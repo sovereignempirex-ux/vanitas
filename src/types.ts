@@ -77,7 +77,7 @@ export interface AuditLog {
   actorName: string;
   actorEmail: string;
   action: string;
-  category: 'ADMIN' | 'API' | 'SECURITY' | 'AUTH' | 'KEYS' | 'BOT';
+  category: 'ADMIN' | 'API' | 'SECURITY' | 'AUTH' | 'KEYS' | 'BOT' | 'DATABASE';
   target: string;
   source: ClientSource;
   status: 'SUCCESS' | 'FAILURE' | 'WARNING';
@@ -247,6 +247,18 @@ export interface ApiKeyUsageResponse {
 
 export type AiToneStyle = 'architect' | 'security' | 'developer' | 'bot' | 'arabic';
 
+export interface ProductSuggestion {
+  id: string;
+  title: string;
+  details: string;
+  category: 'bug' | 'feature' | 'ux';
+  status: 'open' | 'reviewing' | 'resolved';
+  createdAt: string;
+  authorName: string;
+  code?: string;
+  adminNote?: string;
+}
+
 export interface CodeDiagnosisRequest {
   code: string;
   language: 'typescript' | 'javascript' | 'python' | 'curl' | 'json' | 'sql';
@@ -401,5 +413,3 @@ export interface VideoTutorialItem {
   tags: string[];
   highlights: string[];
 }
-
-
