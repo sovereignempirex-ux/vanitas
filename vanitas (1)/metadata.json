@@ -1,0 +1,6 @@
+{
+  "name": "Vanitas",
+  "description": "Centralized API, Developer, Security, AI, and Administration Platform connecting web, bot, mobile, and desktop applications.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
