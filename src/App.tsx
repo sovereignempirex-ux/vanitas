@@ -62,7 +62,7 @@ const AppContent: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-[#060913] text-slate-100 flex flex-col selection:bg-blue-600/30 selection:text-blue-200">
+    <div className="min-h-screen vnt-app-bg text-slate-100 flex flex-col">
       {/* Top Navigation Bar */}
       <Header onOpenCommandPalette={() => setIsCommandPaletteOpen(true)} />
 
@@ -76,15 +76,16 @@ const AppContent: React.FC = () => {
 
         {/* Content View Container */}
         <main className="flex-1 lg:pl-64 flex flex-col min-w-0">
-          <div className="flex-1 p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto">
+          <div className="flex-1 p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto vnt-fade-up" key={activeView}>
             {renderActiveView()}
           </div>
 
           {/* Footer */}
-          <footer className="border-t border-white/[0.06] bg-slate-950/40 py-4 px-6 text-center text-xs text-slate-500">
+          <footer className="border-t border-white/[0.06] bg-slate-950/60 backdrop-blur-xl py-4 px-6 text-center text-xs text-slate-500">
             <div className="flex flex-col sm:flex-row items-center justify-between gap-2 max-w-7xl mx-auto">
               <div className="flex items-center gap-2">
-                <span className="font-display font-bold text-slate-400">VANITAS</span>
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" aria-hidden="true" />
+                <span className="font-display font-bold text-slate-300">VANITAS</span>
                 <span>• Centralized API & Intelligence Platform</span>
               </div>
               <p className="font-mono text-[11px]">

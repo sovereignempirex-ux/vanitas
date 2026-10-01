@@ -1,19 +1,116 @@
 @import "tailwindcss";
 
 @layer base {
+  :root {
+    --vnt-bg: #05070e;
+    --vnt-surface: rgba(13, 20, 38, 0.72);
+    --vnt-border: rgba(148, 163, 184, 0.14);
+    --vnt-accent: #60a5fa;
+    --vnt-accent-2: #22d3ee;
+    color-scheme: dark;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
   body {
-    font-family: 'Plus Jakarta Sans', sans-serif;
-    background-color: #060913;
+    font-family: 'Plus Jakarta Sans', ui-sans-serif, system-ui, sans-serif;
+    background-color: var(--vnt-bg);
     color: #e2e8f0;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  ::selection {
+    background: rgba(96, 165, 250, 0.35);
+    color: #eff6ff;
+  }
+
+  :focus-visible {
+    outline: 2px solid rgba(96, 165, 250, 0.8);
+    outline-offset: 2px;
+    border-radius: 8px;
   }
 
   code, pre, .font-mono {
-    font-family: 'JetBrains Mono', monospace;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
   }
 
   .font-display {
     font-family: 'Cinzel', serif;
+    letter-spacing: 0.04em;
   }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+    html {
+      scroll-behavior: auto;
+    }
+  }
+}
+
+/* Modern mesh background */
+.vnt-app-bg {
+  background:
+    radial-gradient(900px 480px at 85% -5%, rgba(59, 130, 246, 0.14), transparent 60%),
+    radial-gradient(760px 420px at 8% 8%, rgba(34, 211, 238, 0.09), transparent 60%),
+    radial-gradient(700px 500px at 50% 110%, rgba(99, 102, 241, 0.08), transparent 60%),
+    var(--vnt-bg);
+}
+
+.vnt-surface {
+  background: var(--vnt-surface);
+  backdrop-filter: blur(18px) saturate(1.2);
+  -webkit-backdrop-filter: blur(18px) saturate(1.2);
+  border: 1px solid var(--vnt-border);
+}
+
+.vnt-gradient-text {
+  background: linear-gradient(100deg, #93c5fd 0%, #67e8f9 45%, #dbeafe 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.vnt-btn-primary {
+  background: linear-gradient(135deg, #2563eb 0%, #0891b2 100%);
+  box-shadow: 0 8px 24px -8px rgba(37, 99, 235, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  transition: transform 0.18s ease, box-shadow 0.18s ease, filter 0.18s ease;
+}
+.vnt-btn-primary:hover {
+  filter: brightness(1.08);
+  box-shadow: 0 12px 32px -8px rgba(34, 211, 238, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.22);
+}
+.vnt-btn-primary:active {
+  transform: translateY(1px) scale(0.99);
+}
+
+.vnt-chip {
+  border: 1px solid var(--vnt-border);
+  background: rgba(148, 163, 184, 0.08);
+  backdrop-filter: blur(10px);
+}
+
+@keyframes vnt-fade-up {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.vnt-fade-up {
+  animation: vnt-fade-up 0.45s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes vnt-shimmer {
+  from { background-position: -200% 0; }
+  to { background-position: 200% 0; }
+}
+.vnt-skeleton {
+  background: linear-gradient(90deg, rgba(148,163,184,0.08) 25%, rgba(148,163,184,0.18) 50%, rgba(148,163,184,0.08) 75%);
+  background-size: 200% 100%;
+  animation: vnt-shimmer 1.4s linear infinite;
 }
 
 /* Custom Glass & Crystal UI Utilities */

@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: vanitas
+    runtime: docker
+    plan: free
+    autoDeploy: true
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: ADMIN_API_TOKEN
+        generateValue: true
+      - key: FRONTEND_URL
+        sync: false
+      - key: AI_PROVIDER
+        value: ollama
+      - key: OLLAMA_BASE_URL
+        sync: false
+    healthCheckPath: /api/v1/health
+
+databases:
+  - name: vanitas-postgres
+    plan: free
+    databaseName: vanitas
+    user: vanitas

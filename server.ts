@@ -1,12 +1,25 @@
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
-import { createServer as createViteServer } from 'vite';
+import crypto from 'crypto';
 import { Pool } from 'pg';
 import { db, ALL_SCOPES } from './src/server/db.ts';
 import { processAiQuery, diagnoseAndFixCode, performSemanticSearch, searchYouTubeVideos } from './src/server/aiService.ts';
 import { ClientSource, UserRole, PermissionScope, ProductSuggestion } from './src/types.ts';
+import { getActorUser, requireAdmin, rateLimit, sanitizeText, sanitizeUrl, csvCell, parsePagination, secureToken, secureId, isValidScope } from './src/server/security.ts';
 
-const databasePool = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL, max: 8 }) : null;
+// PostgreSQL pool with SSL auto-detect (required for Supabase / Neon).
+// Never expose DATABASE_URL to the browser — server-side only.
+const databasePool = process.env.DATABASE_URL
+  ? new Pool({
+      connectionString: process.env.DATABASE_URL,
+      max: 8,
+      ssl: /supabase\.co|neon\.tech|sslmode=require/.test(process.env.DATABASE_URL) ? { rejectUnauthorized: false } : undefined,
+    })
+  : null;
+
+if (databasePool) {
+  databasePool.on('error', (err) => console.error('[db] pool error:', (err as Error).message));
+}
 
 function mapSuggestion(row: Record<string, any>): ProductSuggestion {
   return {
@@ -53,26 +66,61 @@ async function findSuggestion(id: string): Promise<ProductSuggestion | undefined
   return result.rows[0] ? mapSuggestion(result.rows[0]) : undefined;
 }
 
-async function startServer() {
+export async function buildApp() {
   const app = express();
-  const PORT = 3000;
-  const demoMode = process.env.DEMO_MODE === 'true' && process.env.NODE_ENV !== 'production';
+  const PORT = Number(process.env.PORT) || 3000;
 
   app.set('trust proxy', 1);
+  app.disable('x-powered-by');
   app.use(express.json({ limit: '256kb' }));
-  app.use(express.urlencoded({ extended: true }));
+  app.use(express.urlencoded({ extended: true, limit: '256kb' }));
 
-  // Security Headers Middleware
+  // Hardened CORS — same-origin by default, allowlist via FRONTEND_URL
+  app.use((req, res, next) => {
+    const allowed = (process.env.FRONTEND_URL || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const origin = req.headers.origin as string | undefined;
+    if (origin && (allowed.includes(origin) || allowed.includes('*'))) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+    }
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Request-Id');
+    if (req.method === 'OPTIONS') return res.status(204).end();
+    next();
+  });
+
+  // Global abuse protection
+  app.use('/api/', rateLimit({ windowMs: 60_000, max: 300 }));
+  app.use('/api/v1/auth/', rateLimit({ windowMs: 60_000, max: 60 }));
+  app.use('/api/v1/ai/', rateLimit({ windowMs: 60_000, max: 60 }));
+  app.use('/api/v1/bot/', rateLimit({ windowMs: 60_000, max: 120 }));
+
+  // Security Headers Middleware (always on, stricter in production)
   app.use((_req, res, next) => {
-    res.setHeader('X-DNS-Prefetch-Control', 'on');
-    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    res.setHeader('X-DNS-Prefetch-Control', 'off');
+    res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=()');
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+    res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
     if (process.env.NODE_ENV === 'production') {
-      res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
-      res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self' https: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'");
+      res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
+      res.setHeader(
+        'Content-Security-Policy',
+        "default-src 'self'; img-src 'self' https: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+      );
     }
+    next();
+  });
+
+  // Request id (for audit correlation, never trust client value blindly)
+  app.use((req, _res, next) => {
+    const incoming = sanitizeText(req.headers['x-request-id'] as string, 64);
+    (req as any).requestId = incoming || crypto.randomUUID();
     next();
   });
 
@@ -104,30 +152,15 @@ async function startServer() {
     next();
   });
 
-  // Auth Context Simulation Middleware
-  function getActorUser(req: Request) {
-    const roleHeader = req.headers['x-user-role'] as UserRole;
-    const userIdHeader = req.headers['x-user-id'] as string;
-
-    // Headers are never authentication. They are accepted only in explicit,
-    // non-production demo mode so a browser cannot self-promote in production.
-    if (demoMode && userIdHeader) {
-      const user = db.users.find((u) => u.id === userIdHeader);
-      if (user) return user;
-    }
-
-    if (demoMode && roleHeader === 'ADMIN') {
-      return db.users.find((u) => u.role === 'ADMIN') || db.users[0];
-    }
-
-    return db.users.find((user) => user.role === 'USER') || db.users[0];
-  }
+  // Auth is centralized in src/server/security.ts (getActorUser / requireAdmin).
+  // x-user-role / x-user-id headers are NEVER trusted in production.
+  // Admin actions require ADMIN_API_TOKEN (Bearer) or ADMIN role.
 
   // ----------------------------------------------------
   // API ROUTES (/api/v1/...)
   // ----------------------------------------------------
 
-  // Health & Ready
+  // Health & Ready (ready actually probes Postgres)
   app.get('/api/v1/health', (_req, res) => {
     res.json({
       status: 'healthy',
@@ -138,13 +171,21 @@ async function startServer() {
     });
   });
 
-  app.get('/api/v1/ready', (_req, res) => {
+  app.get('/api/v1/ready', async (_req, res) => {
+    let database: string = databasePool ? 'connected' : 'in-memory-fallback';
+    if (databasePool) {
+      try {
+        await databasePool.query('select 1');
+      } catch {
+        database = 'unreachable';
+      }
+    }
     res.json({
-      ready: true,
-      database: 'connected',
+      ready: database !== 'unreachable',
+      database,
       auth: 'ready',
       ai: process.env.AI_PROVIDER === 'ollama' ? 'ollama_configured' : process.env.GEMINI_API_KEY ? 'gemini_enabled' : 'fallback_ready',
-      mode: demoMode ? 'demo' : 'authenticated',
+      mode: process.env.DEMO_MODE === 'true' && process.env.NODE_ENV !== 'production' ? 'demo' : 'authenticated',
     });
   });
 
@@ -170,9 +211,12 @@ async function startServer() {
     });
   });
 
-  // Auth OAuth Simulation
+  // Auth OAuth Simulation (validated + secure token, no Math.random)
   app.post('/api/v1/auth/oauth', (req, res) => {
-    const { provider } = req.body;
+    const provider = sanitizeText(req.body?.provider, 32).toUpperCase() || 'GENERIC';
+    if (!/^[A-Z0-9_-]{1,32}$/.test(provider)) {
+      return res.status(400).json({ error: 'Invalid provider' });
+    }
     const actor = getActorUser(req);
     const source = detectSource(req);
 
@@ -180,18 +224,18 @@ async function startServer() {
       actorId: actor.id,
       actorName: actor.name,
       actorEmail: actor.email,
-      action: `OAUTH_LOGIN_${(provider || 'GENERIC').toUpperCase()}`,
+      action: `OAUTH_LOGIN_${provider}`,
       category: 'AUTH',
       target: `User Account: ${actor.id}`,
       source,
       status: 'SUCCESS',
-      ipAddress: req.ip || '194.230.14.88',
-      metadata: { provider, userAgent: req.headers['user-agent'] },
+      ipAddress: req.ip || 'unknown',
+      metadata: { provider },
     });
 
     res.json({
       success: true,
-      token: `vnt_jwt_${Math.random().toString(36).substring(2, 14)}`,
+      token: secureToken('vnt_jwt_'),
       user: actor,
     });
   });
@@ -202,7 +246,7 @@ async function startServer() {
   });
 
   app.delete('/api/v1/auth/sessions/:id', (req, res) => {
-    const { id } = req.params;
+    const id = sanitizeText(req.params.id, 64);
     const actor = getActorUser(req);
     const idx = db.sessions.findIndex((s) => s.id === id);
     if (idx !== -1) {
@@ -213,10 +257,10 @@ async function startServer() {
         actorEmail: actor.email,
         action: 'SESSION_REVOKED',
         category: 'AUTH',
-        target: `Session Device: ${removed.device} (${removed.ip})`,
+        target: `Session Device: ${sanitizeText(removed.device, 120)} (${sanitizeText(removed.ip, 64)})`,
         source: detectSource(req),
         status: 'SUCCESS',
-        ipAddress: req.ip || '194.230.14.88',
+        ipAddress: req.ip || 'unknown',
         metadata: { deviceId: id },
       });
       return res.json({ success: true, message: 'Session terminated' });
@@ -242,14 +286,20 @@ async function startServer() {
     res.json(data);
   });
 
-  // API Key Create (with assertGrantableScopes)
+  // API Key Create (with assertGrantableScopes + strict validation)
   app.post('/api/v1/api-keys', (req, res) => {
     try {
       const actor = getActorUser(req);
-      const { name, scopes, environment, rateLimitPerMin, expiresAt } = req.body;
+      const name = sanitizeText(req.body?.name, 80);
+      const scopes = req.body?.scopes;
+      const environment = req.body?.environment === 'test' ? 'test' : 'live';
+      const rateLimitPerMin = Math.min(Math.max(Number(req.body?.rateLimitPerMin) || 600, 10), 10000);
 
-      if (!name || !scopes || !Array.isArray(scopes)) {
-        return res.status(400).json({ error: 'Invalid parameters. "name" and "scopes" array are required.' });
+      if (!name || name.length < 3 || !scopes || !Array.isArray(scopes) || scopes.length === 0 || scopes.length > 30) {
+        return res.status(400).json({ error: 'Invalid parameters. "name" (3-80 chars) and "scopes" array (1-30) are required.' });
+      }
+      if (!scopes.every(isValidScope)) {
+        return res.status(400).json({ error: 'Invalid scope format detected.' });
       }
 
       const result = db.createApiKey({
@@ -258,9 +308,9 @@ async function startServer() {
         ownerName: actor.name,
         requesterRole: actor.role,
         scopes: scopes as PermissionScope[],
-        environment: environment || 'live',
-        rateLimitPerMin: Number(rateLimitPerMin) || 600,
-        expiresAt: expiresAt || null,
+        environment,
+        rateLimitPerMin,
+        expiresAt: typeof req.body?.expiresAt === 'string' ? req.body.expiresAt.slice(0, 64) : null,
       });
 
       res.status(201).json({
@@ -269,7 +319,7 @@ async function startServer() {
         revealNote: 'This secret is revealed only once. Store it in a secure vault.',
       });
     } catch (err: any) {
-      res.status(403).json({ error: err.message });
+      res.status(403).json({ error: 'Request denied' });
     }
   });
 
@@ -277,7 +327,7 @@ async function startServer() {
   app.post('/api/v1/api-keys/:id/rotate', (req, res) => {
     try {
       const actor = getActorUser(req);
-      const { id } = req.params;
+      const id = sanitizeText(req.params.id, 128);
       const result = db.rotateApiKey(id, actor);
       res.json({
         key: result.key,
@@ -285,7 +335,7 @@ async function startServer() {
         revealNote: 'Previous secret has been permanently invalidated. Store this new secret securely.',
       });
     } catch (err: any) {
-      res.status(400).json({ error: err.message });
+      res.status(400).json({ error: 'Rotation failed' });
     }
   });
 
@@ -293,12 +343,12 @@ async function startServer() {
   app.delete('/api/v1/api-keys/:id', (req, res) => {
     try {
       const actor = getActorUser(req);
-      const { id } = req.params;
-      const { reason } = req.body || {};
-      const key = db.revokeApiKey(id, actor, reason);
+      const id = sanitizeText(req.params.id, 128);
+      const reason = sanitizeText(req.body?.reason, 200);
+      const key = db.revokeApiKey(id, actor, reason || undefined);
       res.json({ success: true, key });
     } catch (err: any) {
-      res.status(400).json({ error: err.message });
+      res.status(400).json({ error: 'Revocation failed' });
     }
   });
 
@@ -306,15 +356,15 @@ async function startServer() {
   app.patch('/api/v1/api-keys/:id/scopes', (req, res) => {
     try {
       const actor = getActorUser(req);
-      const { id } = req.params;
+      const id = sanitizeText(req.params.id, 128);
       const { scopes } = req.body;
-      if (!scopes || !Array.isArray(scopes)) {
-        return res.status(400).json({ error: 'Scopes array required' });
+      if (!scopes || !Array.isArray(scopes) || scopes.length > 30 || !scopes.every(isValidScope)) {
+        return res.status(400).json({ error: 'Valid scopes array required (max 30)' });
       }
       const key = db.updateApiKeyScopes(id, scopes, actor);
       res.json({ success: true, key });
     } catch (err: any) {
-      res.status(403).json({ error: err.message });
+      res.status(403).json({ error: 'Scope update denied' });
     }
   });
 
@@ -322,38 +372,45 @@ async function startServer() {
   app.patch('/api/v1/api-keys/:id/rate-limit', (req, res) => {
     try {
       const actor = getActorUser(req);
-      const { id } = req.params;
+      const id = sanitizeText(req.params.id, 128);
       const { rateLimitPerMin, burstLimit, rateLimitAlgorithm, actionOnExceed, monthlyQuota } = req.body;
-      if (!rateLimitPerMin || isNaN(Number(rateLimitPerMin))) {
-        return res.status(400).json({ error: 'Valid rateLimitPerMin number is required' });
+      const rpm = Number(rateLimitPerMin);
+      if (!rpm || !Number.isFinite(rpm) || rpm < 10 || rpm > 10000) {
+        return res.status(400).json({ error: 'rateLimitPerMin must be 10-10000' });
+      }
+      if (rateLimitAlgorithm && !['sliding_window', 'token_bucket', 'fixed_window'].includes(rateLimitAlgorithm)) {
+        return res.status(400).json({ error: 'Invalid rate limit algorithm' });
+      }
+      if (actionOnExceed && !['reject_429', 'throttle_delay', 'alert_only'].includes(actionOnExceed)) {
+        return res.status(400).json({ error: 'Invalid actionOnExceed' });
       }
       const key = db.updateApiKeyRateLimit(
         id,
         {
-          rateLimitPerMin: Number(rateLimitPerMin),
-          burstLimit: burstLimit !== undefined ? Number(burstLimit) : undefined,
+          rateLimitPerMin: Math.floor(rpm),
+          burstLimit: burstLimit !== undefined ? Math.min(Math.max(Number(burstLimit) || 0, 0), 1000) : undefined,
           rateLimitAlgorithm,
           actionOnExceed,
-          monthlyQuota: monthlyQuota !== undefined ? Number(monthlyQuota) : undefined,
+          monthlyQuota: monthlyQuota !== undefined ? Math.min(Math.max(Number(monthlyQuota) || 0, 0), 100_000_000) : undefined,
         },
         actor
       );
       res.json({ success: true, key });
     } catch (err: any) {
-      res.status(400).json({ error: err.message });
+      res.status(400).json({ error: 'Rate limit update failed' });
     }
   });
 
   // API Key Simulate / Test Rate Limit Ingress
   app.post('/api/v1/api-keys/:id/simulate-traffic', (req, res) => {
     try {
-      const { id } = req.params;
-      const { requestCount = 50 } = req.body;
+      const id = sanitizeText(req.params.id, 128);
+      const requestCount = req.body?.requestCount;
       const key = db.apiKeys.find((k) => k.id === id);
       if (!key) return res.status(404).json({ error: 'Key not found' });
 
-      // Increment simulated usage
-      const count = Number(requestCount) || 50;
+      // Increment simulated usage (capped to prevent abuse)
+      const count = Math.min(Math.max(Number(requestCount) || 50, 1), 1000);
       key.usageCount += count;
       key.currentUsageThisMonth = (key.currentUsageThisMonth || 0) + count;
       key.currentRpmUsage = Math.min(
@@ -379,28 +436,23 @@ async function startServer() {
         },
       });
     } catch (err: any) {
-      res.status(400).json({ error: err.message });
+      res.status(400).json({ error: 'Simulation failed' });
     }
   });
 
   // Admin Users List
   app.get('/api/v1/admin/users', (req, res) => {
-    const actor = getActorUser(req);
-    if (actor.role !== 'ADMIN') {
-      return res.status(403).json({ error: '403 Forbidden: Admin privileges required' });
-    }
+    if (!requireAdmin(req, res)) return;
     res.json({ users: db.users });
   });
 
-  // Admin User Role Update
+  // Admin User Role Update (cannot demote last admin)
   app.patch('/api/v1/admin/users/:id/role', (req, res) => {
-    const actor = getActorUser(req);
-    if (actor.role !== 'ADMIN') {
-      return res.status(403).json({ error: '403 Forbidden: Admin privileges required' });
-    }
+    const actor = requireAdmin(req, res);
+    if (!actor) return;
 
-    const { id } = req.params;
-    const { role } = req.body;
+    const id = sanitizeText(req.params.id, 64);
+    const role = sanitizeText(req.body?.role, 16);
     if (!['USER', 'ADMIN'].includes(role)) {
       return res.status(400).json({ error: 'Invalid role' });
     }
@@ -408,6 +460,11 @@ async function startServer() {
     const targetUser = db.users.find((u) => u.id === id);
     if (!targetUser) {
       return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (targetUser.id === actor.id && role !== 'ADMIN') {
+      const adminCount = db.users.filter((u) => u.role === 'ADMIN').length;
+      if (adminCount <= 1) return res.status(400).json({ error: 'Cannot demote the last administrator' });
     }
 
     const priorRole = targetUser.role;
@@ -422,25 +479,21 @@ async function startServer() {
       target: `${targetUser.id} (${targetUser.email}) -> ${role}`,
       source: detectSource(req),
       status: 'SUCCESS',
-      ipAddress: req.ip || '194.230.14.88',
+      ipAddress: req.ip || 'unknown',
       metadata: { priorRole, newRole: role },
     });
 
     res.json({ success: true, user: targetUser });
   });
 
-  // Admin Audit Logs (with limit, offset, from, category, CSV Export)
+  // Admin Audit Logs (capped pagination, allowlisted filters)
   app.get('/api/v1/admin/logs', (req, res) => {
-    const actor = getActorUser(req);
-    if (actor.role !== 'ADMIN') {
-      return res.status(403).json({ error: '403 Forbidden: Admin privileges required' });
-    }
+    if (!requireAdmin(req, res)) return;
 
-    const limit = parseInt(req.query.limit as string) || 25;
-    const offset = parseInt(req.query.offset as string) || 0;
-    const from = req.query.from as string; // '24h' | '7d' | '30d' | ISO date string
-    const category = (req.query.category as string || 'ALL').toUpperCase();
-    const search = ((req.query.search as string) || '').toLowerCase();
+    const { limit, offset } = parsePagination(req.query);
+    const from = sanitizeText(req.query.from as string, 32);
+    const category = sanitizeText((req.query.category as string) || 'ALL', 16).toUpperCase();
+    const search = sanitizeText((req.query.search as string) || '', 100).toLowerCase();
 
     let logs = [...db.auditLogs];
 
@@ -457,8 +510,10 @@ async function startServer() {
       }
     }
 
-    // Category filter
+    // Category filter (allowlist)
+    const allowedCats = ['ALL', 'ADMIN', 'API', 'SECURITY', 'AUTH', 'KEYS', 'BOT', 'DATABASE'];
     if (category && category !== 'ALL') {
+      if (!allowedCats.includes(category)) return res.status(400).json({ error: 'Invalid category' });
       logs = logs.filter((l) => l.category === category);
     }
 
@@ -484,51 +539,43 @@ async function startServer() {
     });
   });
 
-  // Admin Logs CSV Export
+  // Admin Logs CSV Export (formula-injection hardened)
   app.get('/api/v1/admin/logs/export', (req, res) => {
-    const actor = getActorUser(req);
-    if (actor.role !== 'ADMIN') {
-      return res.status(403).send('403 Forbidden');
-    }
+    if (!requireAdmin(req, res)) return res.status(403).send('Forbidden');
 
     const headers = ['Timestamp', 'Actor', 'Action', 'Category', 'Target', 'Source', 'Status', 'Request ID', 'IP Address', 'Metadata'];
-    const rows = db.auditLogs.map((l) => [
-      `"${l.timestamp}"`,
-      `"${l.actorName} (${l.actorEmail})"`,
-      `"${l.action}"`,
-      `"${l.category}"`,
-      `"${l.target.replace(/"/g, '""')}"`,
-      `"${l.source}"`,
-      `"${l.status}"`,
-      `"${l.requestId}"`,
-      `"${l.ipAddress}"`,
-      `"${JSON.stringify(l.metadata || {}).replace(/"/g, '""')}"`,
+    const rows = db.auditLogs.slice(0, 5000).map((l) => [
+      csvCell(l.timestamp),
+      csvCell(`${l.actorName} (${l.actorEmail})`),
+      csvCell(l.action),
+      csvCell(l.category),
+      csvCell(l.target),
+      csvCell(l.source),
+      csvCell(l.status),
+      csvCell(l.requestId),
+      csvCell(l.ipAddress),
+      csvCell(JSON.stringify(l.metadata || {})),
     ]);
 
     const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
 
-    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="vanitas_audit_logs_${Date.now()}.csv"`);
     res.send(csvContent);
   });
 
   // Admin System Statistics
   app.get('/api/v1/admin/statistics', (req, res) => {
-    const actor = getActorUser(req);
-    if (actor.role !== 'ADMIN') {
-      return res.status(403).json({ error: '403 Forbidden: Admin privileges required' });
-    }
+    if (!requireAdmin(req, res)) return;
     res.json({ stats: db.systemStats, threats: db.securityThreats });
   });
 
-  // Admin Emergency Controls
+  // Admin Emergency Controls (explicit allowlist)
   app.post('/api/v1/admin/emergency', (req, res) => {
-    const actor = getActorUser(req);
-    if (actor.role !== 'ADMIN') {
-      return res.status(403).json({ error: '403 Forbidden: Admin privileges required' });
-    }
+    const actor = requireAdmin(req, res);
+    if (!actor) return;
 
-    const { action, targetId } = req.body;
+    const action = sanitizeText(req.body?.action, 64);
     const source = detectSource(req);
 
     if (action === 'TOGGLE_MAINTENANCE') {
@@ -544,7 +591,7 @@ async function startServer() {
           target: 'Platform Core Services',
           source,
           status: 'WARNING',
-          ipAddress: req.ip || '194.230.14.88',
+          ipAddress: req.ip || 'unknown',
         });
         return res.json({ success: true, maintenanceMode: flag.enabled });
       }
@@ -567,7 +614,7 @@ async function startServer() {
         target: `${count} sandbox tokens revoked`,
         source,
         status: 'WARNING',
-        ipAddress: req.ip || '194.230.14.88',
+        ipAddress: req.ip || 'unknown',
       });
       return res.json({ success: true, revokedCount: count });
     }
@@ -581,11 +628,8 @@ async function startServer() {
   });
 
   app.patch('/api/v1/admin/feature-flags/:id', (req, res) => {
-    const actor = getActorUser(req);
-    if (actor.role !== 'ADMIN') {
-      return res.status(403).json({ error: '403 Forbidden' });
-    }
-    const { id } = req.params;
+    if (!requireAdmin(req, res)) return;
+    const id = sanitizeText(req.params.id, 64);
     const { enabled } = req.body;
     const flag = db.featureFlags.find((f) => f.id === id);
     if (!flag) return res.status(404).json({ error: 'Feature flag not found' });
@@ -594,23 +638,30 @@ async function startServer() {
     res.json({ success: true, flag });
   });
 
-  // Webhooks
+  // Webhooks — secrets NEVER returned in list; SSRF-guarded URLs
   app.get('/api/v1/webhooks', (_req, res) => {
-    res.json({ webhooks: db.webhooks, logs: db.webhookLogs });
+    const safe = db.webhooks.map((w) => ({ ...w, secret: undefined, url: w.url }));
+    res.json({ webhooks: safe, logs: db.webhookLogs });
   });
 
   app.post('/api/v1/webhooks', (req, res) => {
     const actor = getActorUser(req);
-    const { name, url, events } = req.body;
-    if (!name || !url || !events) {
-      return res.status(400).json({ error: 'Name, URL, and Events are required' });
+    const name = sanitizeText(req.body?.name, 80);
+    const rawUrl = req.body?.url;
+    const events = req.body?.events;
+    if (!name || name.length < 3 || !rawUrl || !Array.isArray(events) || events.length === 0 || events.length > 20) {
+      return res.status(400).json({ error: 'Name (3-80), URL, and Events (1-20) are required' });
     }
+    const url = sanitizeUrl(rawUrl);
+    if (!url) return res.status(400).json({ error: 'Invalid or blocked webhook URL (https only, no private hosts)' });
+    const cleanEvents = events.map((e: unknown) => sanitizeText(e, 48)).filter((e: string) => /^[a-z_.-]+$/.test(e));
+    if (cleanEvents.length === 0) return res.status(400).json({ error: 'Invalid event names' });
     const newWebhook = {
-      id: `wh_${Date.now().toString(36)}`,
+      id: secureId('wh'),
       name,
       url,
-      events,
-      secret: `whsec_${Math.random().toString(36).substring(2, 14)}`,
+      events: cleanEvents,
+      secret: secureToken('whsec_'),
       status: 'active' as const,
       createdAt: new Date().toISOString(),
       lastTriggeredAt: null,
@@ -623,27 +674,28 @@ async function startServer() {
       actorEmail: actor.email,
       action: 'WEBHOOK_CREATED',
       category: 'API',
-      target: `${newWebhook.name} (${newWebhook.url})`,
+      target: `${sanitizeText(newWebhook.name, 80)} (${newWebhook.url.slice(0, 120)})`,
       source: detectSource(req),
       status: 'SUCCESS',
-      ipAddress: req.ip || '194.230.14.88',
+      ipAddress: req.ip || 'unknown',
     });
+    // Return secret ONCE on creation only
     res.status(201).json({ webhook: newWebhook });
   });
 
   app.post('/api/v1/webhooks/:id/test', (req, res) => {
-    const { id } = req.params;
+    const id = sanitizeText(req.params.id, 128);
     const wh = db.webhooks.find((w) => w.id === id);
     if (!wh) return res.status(404).json({ error: 'Webhook not found' });
 
     wh.lastTriggeredAt = new Date().toISOString();
     const log = {
-      id: `wh_log_${Date.now()}`,
+      id: secureId('wh_log'),
       webhookId: wh.id,
       event: 'ping.test',
       status: 'delivered' as const,
       statusCode: 200,
-      latencyMs: Math.floor(Math.random() * 80) + 90,
+      latencyMs: 90 + crypto.randomInt(80),
       timestamp: new Date().toISOString(),
       payload: { event: 'ping.test', timestamp: new Date().toISOString(), message: 'Vanitas ping verification handshake' },
     };
@@ -651,18 +703,25 @@ async function startServer() {
     res.json({ success: true, log });
   });
 
-  // Bot Gateway Execution
+  // Bot Gateway Execution (validated, allowlisted platforms)
   app.get('/api/v1/bot/status', (_req, res) => {
     res.json({ bots: db.bots });
   });
 
   app.post('/api/v1/bot/execute', (req, res) => {
     const actor = getActorUser(req);
-    const { platform, command, payload } = req.body;
-    const source = detectSource(req);
+    const platform = sanitizeText(req.body?.platform, 32) || 'discord';
+    const command = sanitizeText(req.body?.command, 200);
+    const payload = req.body?.payload;
 
-    if (!command) {
+    if (!command || command.length < 1) {
       return res.status(400).json({ error: 'Missing command payload' });
+    }
+    if (!['discord', 'whatsapp', 'telegram', 'custom'].includes(platform)) {
+      return res.status(400).json({ error: 'Invalid platform' });
+    }
+    if (payload && (typeof payload !== 'object' || JSON.stringify(payload).length > 8000)) {
+      return res.status(400).json({ error: 'Invalid payload (max 8KB object)' });
     }
 
     const bot = db.bots.find((b) => b.platform === platform) || db.bots[0];
@@ -675,62 +734,73 @@ async function startServer() {
       actorEmail: actor.email,
       action: 'BOT_COMMAND_EXECUTED',
       category: 'BOT',
-      target: `${platform || 'discord'}::${command}`,
+      target: `${platform}::${command.slice(0, 120)}`,
       source: 'BOT',
       status: 'SUCCESS',
-      ipAddress: req.ip || '10.0.4.12',
-      metadata: { command, payload, latencyMs: 14 },
+      ipAddress: req.ip || 'unknown',
+      metadata: { command: command.slice(0, 200), latencyMs: 14 },
     });
 
     res.json({
       success: true,
-      executionId: `exec_${Date.now().toString(36)}`,
+      executionId: secureId('exec'),
       platform: bot.platform,
       command,
-      output: `Vanitas executed [${command}] on ${bot.name}. Result: Nominal. All systems in state 200 OK.`,
+      output: `Vanitas executed [${command.slice(0, 100)}] on ${bot.name}. Result: Nominal.`,
       timestamp: new Date().toISOString(),
     });
   });
 
-  // Vanitas AI Chat endpoint
+  // Vanitas AI Chat endpoint (prompt size cap + persona allowlist)
   app.post('/api/v1/ai/chat', async (req, res) => {
     try {
-      const { persona, toneStyle, prompt, enableWebSearch, enableVideoSearch, context } = req.body;
-      if (!prompt) return res.status(400).json({ error: 'Prompt is required' });
+      const persona = sanitizeText(req.body?.persona, 32) || 'code';
+      const toneStyle = sanitizeText(req.body?.toneStyle, 32) || 'developer';
+      const prompt = sanitizeText(req.body?.prompt, 8000);
+      if (!prompt || prompt.length < 2) return res.status(400).json({ error: 'Prompt is required (2-8000 chars)' });
+      if (!['code', 'api', 'security', 'analyst', 'docs', 'video', 'admin'].includes(persona)) {
+        return res.status(400).json({ error: 'Invalid persona' });
+      }
 
       const response = await processAiQuery({
-        persona: persona || 'code',
-        toneStyle: toneStyle || 'developer',
+        persona: persona as any,
+        toneStyle: (['architect', 'security', 'developer', 'bot', 'arabic'].includes(toneStyle) ? toneStyle : 'developer') as any,
         prompt,
-        enableWebSearch: !!enableWebSearch,
-        enableVideoSearch: !!enableVideoSearch,
-        context,
+        enableWebSearch: !!req.body?.enableWebSearch,
+        enableVideoSearch: !!req.body?.enableVideoSearch,
+        context: typeof req.body?.context === 'object' ? req.body.context : undefined,
       });
 
       res.json(response);
     } catch (err: any) {
-      res.status(500).json({ error: err.message || 'AI engine error' });
+      console.error('[ai/chat]', (err as Error)?.message);
+      res.status(500).json({ error: 'AI engine error' });
     }
   });
 
   // Vanitas AI Code Diagnosis, Bug Detection & Auto-Repair Tool
   app.post('/api/v1/ai/diagnose-fix', async (req, res) => {
     try {
-      const { code, language = 'typescript', context, autoFix } = req.body;
-      if (!code || typeof code !== 'string') {
-        return res.status(400).json({ error: 'Code snippet string is required' });
+      const code = typeof req.body?.code === 'string' ? req.body.code.slice(0, 30000) : '';
+      const language = sanitizeText(req.body?.language, 16) || 'typescript';
+      if (!code) {
+        return res.status(400).json({ error: 'Code snippet string is required (max 30KB)' });
+      }
+      if (!['typescript', 'javascript', 'python', 'curl', 'json', 'sql'].includes(language)) {
+        return res.status(400).json({ error: 'Invalid language' });
       }
 
       const result = await diagnoseAndFixCode({
         code,
-        language,
-        context,
-        autoFix: autoFix !== false,
+        language: language as any,
+        context: sanitizeText(req.body?.context, 2000) || undefined,
+        autoFix: req.body?.autoFix !== false,
       });
 
       res.json(result);
     } catch (err: any) {
-      res.status(500).json({ error: err.message || 'Failed running code diagnosis' });
+      console.error('[ai/diagnose]', (err as Error)?.message);
+      res.status(500).json({ error: 'Failed running code diagnosis' });
     }
   });
 
@@ -738,11 +808,14 @@ async function startServer() {
   // while an administrator retains control over the review and any proposed code repair.
   app.post('/api/v1/suggestions', async (req, res) => {
     const actor = getActorUser(req);
-    const { title, details, category = 'feature', code } = req.body;
-    if (!title || !details) return res.status(400).json({ error: 'Title and details are required' });
+    const title = sanitizeText(req.body?.title, 140);
+    const details = sanitizeText(req.body?.details, 5000);
+    const category = sanitizeText(req.body?.category, 16) || 'feature';
+    const code = typeof req.body?.code === 'string' ? req.body.code.slice(0, 20000) : undefined;
+    if (!title || title.length < 3 || !details || details.length < 3) return res.status(400).json({ error: 'Title and details are required (3+ chars)' });
     if (!['bug', 'feature', 'ux'].includes(category)) return res.status(400).json({ error: 'Invalid suggestion category' });
 
-    const suggestion = await createSuggestion({ title, details, category, code, authorName: actor.name });
+    const suggestion = await createSuggestion({ title, details, category: category as any, code, authorName: sanitizeText(actor.name, 80) });
     db.recordAuditLog({
       actorId: actor.id, actorName: actor.name, actorEmail: actor.email,
       action: 'SUGGESTION_CREATED', category: 'ADMIN', target: suggestion.id,
@@ -752,29 +825,28 @@ async function startServer() {
   });
 
   app.get('/api/v1/admin/suggestions', async (req, res) => {
-    const actor = getActorUser(req);
-    if (actor.role !== 'ADMIN') return res.status(403).json({ error: 'Administrator access required' });
+    if (!requireAdmin(req, res)) return;
     res.json({ suggestions: await listSuggestions() });
   });
 
   app.patch('/api/v1/admin/suggestions/:id', async (req, res) => {
-    const actor = getActorUser(req);
-    if (actor.role !== 'ADMIN') return res.status(403).json({ error: 'Administrator access required' });
-    const { status, adminNote } = req.body;
+    if (!requireAdmin(req, res)) return;
+    const status = sanitizeText(req.body?.status, 16);
+    const adminNote = sanitizeText(req.body?.adminNote, 2000) || undefined;
     if (!['open', 'reviewing', 'resolved'].includes(status)) return res.status(400).json({ error: 'Invalid status' });
-    const suggestion = await updateSuggestion(req.params.id, status, adminNote);
+    const suggestion = await updateSuggestion(sanitizeText(req.params.id, 128), status as any, adminNote);
     if (!suggestion) return res.status(404).json({ error: 'Suggestion not found' });
     res.json({ suggestion });
   });
 
   app.post('/api/v1/admin/suggestions/:id/ai-fix', async (req, res) => {
-    const actor = getActorUser(req);
-    if (actor.role !== 'ADMIN') return res.status(403).json({ error: 'Administrator access required' });
-    const suggestion = await findSuggestion(req.params.id);
+    if (!requireAdmin(req, res)) return;
+    const suggestion = await findSuggestion(sanitizeText(req.params.id, 128));
     if (!suggestion) return res.status(404).json({ error: 'Suggestion not found' });
     if (!suggestion.code) return res.status(400).json({ error: 'A code sample is required before AI repair can run' });
     await updateSuggestion(suggestion.id, 'reviewing', 'Admin requested an AI repair proposal.');
-    const diagnosis = await diagnoseAndFixCode({ code: suggestion.code, language: req.body.language || 'typescript', context: suggestion.details, autoFix: true });
+    const language = sanitizeText(req.body?.language, 16) || 'typescript';
+    const diagnosis = await diagnoseAndFixCode({ code: suggestion.code.slice(0, 30000), language: language as any, context: suggestion.details.slice(0, 2000), autoFix: true });
     res.json({ suggestion: await findSuggestion(suggestion.id), diagnosis });
   });
 
@@ -783,9 +855,10 @@ async function startServer() {
   // ----------------------------------------------------
   app.all(['/api/v1/search/semantic', '/api/v1/semantic-search'], async (req, res) => {
     try {
-      const query = (req.method === 'POST' ? req.body.query : req.query.q) as string;
-      if (!query || typeof query !== 'string') {
-        return res.status(400).json({ error: 'Search query parameter is required' });
+      const rawQuery = (req.method === 'POST' ? req.body?.query : req.query.q) as string;
+      const query = sanitizeText(rawQuery, 300);
+      if (!query || query.length < 2) {
+        return res.status(400).json({ error: 'Search query (2-300 chars) is required' });
       }
 
       // Documentation endpoints corpus
@@ -844,7 +917,8 @@ async function startServer() {
 
       res.json(result);
     } catch (err: any) {
-      res.status(500).json({ error: err.message || 'Semantic search failed' });
+      console.error('[semantic-search]', (err as Error)?.message);
+      res.status(500).json({ error: 'Semantic search failed' });
     }
   });
 
@@ -853,12 +927,13 @@ async function startServer() {
   // ----------------------------------------------------
   app.get('/api/v1/youtube/search', async (req, res) => {
     try {
-      const q = (req.query.q as string) || 'Vanitas API Gateway';
-      const limit = parseInt((req.query.limit as string) || '6', 10);
+      const q = sanitizeText(req.query.q as string, 200) || 'Vanitas API Gateway';
+      const limit = Math.min(Math.max(parseInt((req.query.limit as string) || '6', 10) || 6, 1), 20);
       const result = await searchYouTubeVideos(q, limit);
       res.json(result);
     } catch (err: any) {
-      res.status(500).json({ error: err.message || 'Failed searching YouTube videos' });
+      console.error('[youtube/search]', (err as Error)?.message);
+      res.status(500).json({ error: 'Failed searching YouTube videos' });
     }
   });
 
@@ -879,20 +954,32 @@ async function startServer() {
   });
 
   app.post('/api/v1/databases/external/test', (req, res) => {
-    const { id } = req.body;
+    const id = sanitizeText(req.body?.id, 128);
     if (!id) return res.status(400).json({ error: 'Database ID is required' });
     const result = db.testDatabaseConnection(id);
     res.json(result);
   });
 
+  // Admin-only: storing a connection URL is sensitive — never return raw URL.
   app.post('/api/v1/databases/external', (req, res) => {
-    const actor = getActorUser(req);
-    const { name, provider, connectionUrl, region } = req.body;
-    if (!name || !provider || !connectionUrl) {
+    const actor = requireAdmin(req, res);
+    if (!actor) return;
+    const name = sanitizeText(req.body?.name, 80);
+    const provider = sanitizeText(req.body?.provider, 32);
+    const region = sanitizeText(req.body?.region, 80);
+    const connectionUrl = typeof req.body?.connectionUrl === 'string' ? req.body.connectionUrl.slice(0, 2048) : '';
+    if (!name || name.length < 3 || !provider || !connectionUrl) {
       return res.status(400).json({ error: 'Name, Provider, and Connection URL are required' });
     }
+    if (!['supabase', 'neon', 'upstash', 'render', 'railway', 'sqlite_cloud'].includes(provider)) {
+      return res.status(400).json({ error: 'Unsupported provider' });
+    }
+    // Do not store obviously unsafe URLs (private hosts) — SSRF guard
+    if (!sanitizeUrl(connectionUrl) && !connectionUrl.startsWith('postgresql://') && !connectionUrl.startsWith('rediss://') && !connectionUrl.startsWith('https://')) {
+      return res.status(400).json({ error: 'Invalid connection URL' });
+    }
 
-    const created = db.addExternalDatabase({ name, provider, connectionUrl, region });
+    const created = db.addExternalDatabase({ name, provider: provider as any, connectionUrl, region: region || undefined });
 
     db.recordAuditLog({
       actorId: actor.id,
@@ -903,7 +990,7 @@ async function startServer() {
       target: `${created.name} (${created.provider})`,
       source: detectSource(req),
       status: 'SUCCESS',
-      ipAddress: req.ip || '194.230.14.88',
+      ipAddress: req.ip || 'unknown',
       metadata: { provider: created.provider, region: created.region },
     });
 
@@ -935,7 +1022,7 @@ async function startServer() {
     try {
       const actor = getActorUser(req);
       const source = detectSource(req);
-      const { type } = req.params as { type: 'apk' | 'exe' | 'dmg' | 'appimage' };
+      const type = sanitizeText(req.params.type, 16) as 'apk' | 'exe' | 'dmg' | 'appimage';
 
       if (!['apk', 'exe', 'dmg', 'appimage'].includes(type)) {
         return res.status(400).json({ error: 'Invalid platform release type. Expected: apk, exe, dmg, appimage' });
@@ -984,38 +1071,69 @@ async function startServer() {
 
       const buffer = Buffer.from(manifestHeader, 'utf-8');
 
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.setHeader('Content-Disposition', `attachment; filename="${sanitizeText(filename, 128)}"`);
       res.setHeader('Content-Type', contentType);
-      res.setHeader('X-Vanitas-Version', release.version);
-      res.setHeader('X-Vanitas-Checksum-SHA256', release.sha256);
+      res.setHeader('X-Vanitas-Version', sanitizeText(release.version, 32));
+      res.setHeader('X-Vanitas-Checksum-SHA256', sanitizeText(release.sha256, 128));
       res.setHeader('Content-Length', buffer.length);
 
       res.send(buffer);
     } catch (err: any) {
-      res.status(500).json({ error: err.message });
+      console.error('[download]', (err as Error)?.message);
+      res.status(500).json({ error: 'Download failed' });
     }
+  });
+
+  // Centralized error handler — never leak stack traces to clients
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+    console.error('[unhandled]', err?.message);
+    res.status(500).json({ error: 'Internal server error' });
   });
 
   // ----------------------------------------------------
   // VITE MIDDLEWARE (Development) or STATIC SERVE (Production)
+  // In serverless (Vercel) skip vite/static — platform serves frontend.
   // ----------------------------------------------------
-  if (process.env.NODE_ENV !== 'production') {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
+  if (!process.env.VERCEL) {
+    if (process.env.NODE_ENV !== 'production') {
+      const { createServer: createViteServer } = await import('vite');
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: 'spa',
+      });
+      app.use(vite.middlewares);
+    } else {
+      const distPath = path.join(process.cwd(), 'dist');
+      app.use(express.static(distPath));
+      app.get(/^(?!\/api\/).*/, (_req, res) => {
+        res.sendFile(path.join(distPath, 'index.html'));
+      });
+    }
   }
 
+  return app;
+}
+
+async function startServer() {
+  const PORT = Number(process.env.PORT) || 3000;
+  const app = await buildApp();
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Vanitas Central Server running on http://0.0.0.0:${PORT}`);
   });
 }
 
-startServer();
+export default buildApp;
+
+// Only auto-listen when run directly (node dist/server.cjs / tsx server.ts),
+// not when imported by Vercel serverless.
+if (!process.env.VERCEL && (process.argv[1]?.endsWith('server.ts') || process.argv[1]?.endsWith('server.cjs'))) {
+  startServer();
+} else if (!process.env.VERCEL && process.env.NODE_ENV !== 'test') {
+  // Fallback for `npm run dev` / `npm start` where argv check may vary.
+  // Avoid double-listen on Vercel.
+  if (!(globalThis as any).__vanitas_listening) {
+    (globalThis as any).__vanitas_listening = true;
+    startServer().catch((e) => console.error(e));
+  }
+}

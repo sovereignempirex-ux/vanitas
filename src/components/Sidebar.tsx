@@ -91,8 +91,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen, setIsMobileOpen 
       )}
 
       <aside
-        className={`fixed top-16 bottom-0 left-0 z-40 w-64 border-r border-white/[0.08] bg-[#060913]/95 backdrop-blur-2xl transition-transform duration-300 lg:translate-x-0 overflow-y-auto ${
-          isMobileOpen ? 'translate-x-0' : '-translate-x-full'
+        className={`fixed top-16 bottom-0 left-0 z-40 w-64 border-r border-white/[0.08] bg-[#05070e]/90 backdrop-blur-2xl transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] lg:translate-x-0 overflow-y-auto ${
+          isMobileOpen ? 'translate-x-0 shadow-[24px_0_48px_-24px_rgba(0,0,0,0.8)]' : '-translate-x-full'
         }`}
       >
         <div className="p-3 space-y-6">
@@ -109,10 +109,10 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen, setIsMobileOpen 
                     <button
                       key={item.id}
                       onClick={() => handleSelect(item.id)}
-                      className={`group flex w-full items-center justify-between rounded-xl px-3 py-2 text-xs font-medium transition-all ${
+                      className={`group flex w-full items-center justify-between rounded-xl px-3 py-2 text-xs font-medium transition-all duration-200 ${
                         isActive
-                          ? 'bg-blue-600/15 text-blue-300 border border-blue-500/30 shadow-[0_0_15px_rgba(59,130,246,0.15)] font-semibold'
-                          : 'text-slate-400 hover:bg-white/[0.04] hover:text-slate-200 border border-transparent'
+                          ? 'bg-gradient-to-r from-blue-600/25 to-cyan-500/15 text-blue-200 border border-blue-400/40 shadow-[0_8px_24px_-12px_rgba(59,130,246,0.6)] font-semibold'
+                          : 'text-slate-400 hover:bg-white/[0.05] hover:text-slate-100 border border-transparent hover:border-white/10'
                       }`}
                     >
                       <div className="flex items-center gap-2.5">
@@ -201,15 +201,15 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen, setIsMobileOpen 
           </div>
 
           {/* Quick System Health Beacon */}
-          <div className="rounded-xl border border-blue-500/20 bg-gradient-to-b from-blue-950/40 to-slate-950/60 p-3">
+          <div className="vnt-surface rounded-2xl p-3.5 shadow-[0_16px_40px_-24px_rgba(59,130,246,0.5)]">
             <div className="flex items-center justify-between text-xs font-semibold text-slate-200">
               <span className="flex items-center gap-1.5">
                 <Radio className="h-3.5 w-3.5 text-blue-400 animate-pulse" />
                 Central Gateway
               </span>
-              <span className="text-[10px] font-mono text-emerald-400">ONLINE</span>
+              <span className="vnt-chip rounded-full px-2 py-0.5 text-[10px] font-mono text-emerald-300">ONLINE</span>
             </div>
-            <p className="text-[11px] text-slate-400 mt-1">
+            <p className="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
               Serving Web, Discord, WhatsApp & Mobile native clients.
             </p>
           </div>

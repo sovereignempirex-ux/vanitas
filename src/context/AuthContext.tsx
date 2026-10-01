@@ -92,7 +92,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   });
 
   const [role, setRoleState] = useState<UserRole>(() => {
-    return user ? user.role : 'ADMIN';
+    // Least privilege by default. Server is source of truth for ADMIN.
+    return user ? user.role : 'USER';
   });
 
   const [permissions, setPermissions] = useState<PermissionScope[]>([]);
@@ -193,8 +194,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const refreshUser = async () => {
     try {
       const data = await api.getMe();
-      if (!user) {
+      // Server is source of truth — sync role from server, don't trust localStorage.
+      if (data.user) {
         setUser(data.user);
+        setRoleState(data.user.role);
+        try {
+          localStorage.setItem('vanitas_active_user', JSON.stringify(data.user));
+        } catch {
+          // ignore
+        }
       }
       setPermissions(data.permissions);
     } catch (err) {
@@ -203,22 +211,25 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   useEffect(() => {
-    api.setRoleOverride(role);
     api.setClientSource(clientSource);
     refreshUser();
-  }, [role, clientSource]);
+  }, [clientSource]);
 
   const setRole = (newRole: UserRole) => {
+    // SECURITY: client-side role switch is UI-only preview. Real promotion
+    // must happen via PATCH /api/v1/admin/users/:id/role with ADMIN_API_TOKEN.
+    // We keep local state but refresh from server on next refreshUser().
     setRoleState(newRole);
-    api.setRoleOverride(newRole);
     if (user) {
       const updated = { ...user, role: newRole };
       setUser(updated);
       localStorage.setItem('vanitas_active_user', JSON.stringify(updated));
     }
+    refreshUser();
   };
 
   const toggleRole = () => {
+    console.warn('toggleRole is UI-only and does not grant server privileges.');
     const nextRole: UserRole = role === 'ADMIN' ? 'USER' : 'ADMIN';
     setRole(nextRole);
   };
@@ -231,21 +242,31 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const loginOAuth = async (provider: string) => {
     const res = await api.oauthLogin(provider);
     if (res.user) {
-      setUser(res.user);
-      setRoleState(res.user.role);
-      localStorage.setItem('vanitas_active_user', JSON.stringify(res.user));
+      // Server decides role. Never self-promote here.
+      const serverRole = res.user.role === 'ADMIN' ? 'ADMIN' : 'USER';
+      const safeUser = { ...res.user, role: serverRole as UserRole };
+      setUser(safeUser);
+      setRoleState(serverRole);
+      api.setAuthToken(res.token);
+      localStorage.setItem('vanitas_active_user', JSON.stringify(safeUser));
     }
     setIsAuthModalOpen(false);
   };
 
   const loginWithEmail = async (email: string, _pass: string, name?: string) => {
+    const cleanEmail = email.trim().toLowerCase().slice(0, 120);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      return { success: false, error: 'Invalid email address' };
+    }
     const generatedUser: User = {
       id: `usr_${Date.now().toString(36)}`,
-      email: email.trim().toLowerCase(),
-      name: name || email.split('@')[0],
-      username: email.split('@')[0].toLowerCase().replace(/[^a-z0-9_]/g, '_'),
+      email: cleanEmail,
+      name: (name || email.split('@')[0]).slice(0, 80),
+      username: email.split('@')[0].toLowerCase().replace(/[^a-z0-9_]/g, '_').slice(0, 40),
       avatarUrl: 'https://images.unsplash.com/photo-1534447677768-be436bb09401?q=80&w=800&auto=format&fit=crop',
-      role: 'ADMIN',
+      // SECURITY FIX: new self-registered users are ALWAYS USER. Admin must be
+      // granted server-side via ADMIN_API_TOKEN, never client-side.
+      role: 'USER',
       twoFactorEnabled: false,
       createdAt: new Date().toISOString(),
       lastLoginAt: new Date().toISOString(),
@@ -288,7 +309,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const logout = () => {
     setUser(null);
     setRoleState('USER');
-    api.setRoleOverride('USER');
+    api.setAuthToken(null);
     localStorage.removeItem('vanitas_active_user');
   };
 

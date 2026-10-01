@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import {
   User,
   ApiKey,
@@ -480,9 +481,9 @@ export class VanitasDatabase {
   recordAuditLog(entry: Omit<AuditLog, 'id' | 'timestamp' | 'requestId'>): AuditLog {
     const log: AuditLog = {
       ...entry,
-      id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      id: `log_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
       timestamp: new Date().toISOString(),
-      requestId: `req_${Math.random().toString(36).substring(2, 9)}`,
+      requestId: `req_${crypto.randomBytes(5).toString('hex')}`,
     };
     this.auditLogs.unshift(log);
     if (this.auditLogs.length > 500) {
@@ -537,7 +538,7 @@ export class VanitasDatabase {
     this.assertGrantableScopes(params.requesterRole, params.scopes);
 
     const env = params.environment || 'live';
-    const randPart = Math.random().toString(36).substring(2, 10) + Math.random().toString(36).substring(2, 10);
+    const randPart = crypto.randomBytes(18).toString('base64url');
     const rawSecret = `sk_${env}_vanitas_${randPart}`;
     const keyPrefix = rawSecret.substring(0, 14);
     const maskedSecret = `${keyPrefix}••••••••••••${rawSecret.slice(-4)}`;
@@ -546,7 +547,7 @@ export class VanitasDatabase {
     const burstLimit = params.burstLimit || Math.round(rateLimitPerMin * 0.05);
 
     const newKey: ApiKey = {
-      id: `key_${env}_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`,
+      id: `key_${env}_${Date.now().toString(36)}_${crypto.randomBytes(4).toString('hex')}`,
       name: params.name,
       keyPrefix,
       maskedSecret,
@@ -597,7 +598,7 @@ export class VanitasDatabase {
     }
 
     const env = key.environment;
-    const randPart = Math.random().toString(36).substring(2, 10) + Math.random().toString(36).substring(2, 10);
+    const randPart = crypto.randomBytes(18).toString('base64url');
     const rawSecret = `sk_${env}_vanitas_${randPart}`;
     const keyPrefix = rawSecret.substring(0, 14);
     key.keyPrefix = keyPrefix;

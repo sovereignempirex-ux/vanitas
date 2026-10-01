@@ -40,7 +40,7 @@ export const Header: React.FC<HeaderProps> = ({ onOpenCommandPalette }) => {
   ];
 
   return (
-    <header className="sticky top-0 z-40 w-full border-b border-white/[0.08] bg-[#060913]/85 backdrop-blur-xl">
+    <header className="sticky top-0 z-40 w-full border-b border-white/[0.08] bg-[#05070e]/80 backdrop-blur-2xl supports-[backdrop-filter]:bg-[#05070e]/70">
       <div className="flex h-16 items-center justify-between px-4 sm:px-6">
         {/* Left: Brand Identity & Active Breadcrumb */}
         <div className="flex items-center gap-4">
@@ -75,7 +75,7 @@ export const Header: React.FC<HeaderProps> = ({ onOpenCommandPalette }) => {
         <div className="hidden md:flex flex-1 max-w-md mx-8">
           <button
             onClick={onOpenCommandPalette}
-            className="flex w-full items-center justify-between rounded-xl border border-white/10 bg-white/[0.03] px-3.5 py-2 text-sm text-slate-400 hover:border-blue-500/30 hover:bg-white/[0.05] transition-all group"
+            className="flex w-full items-center justify-between rounded-xl border border-white/10 bg-white/[0.03] px-3.5 py-2 text-sm text-slate-400 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] hover:border-blue-400/40 hover:bg-white/[0.06] hover:shadow-[0_8px_24px_-12px_rgba(59,130,246,0.5)] transition-all group"
           >
             <div className="flex items-center gap-2.5">
               <Search className="h-4 w-4 text-slate-400 group-hover:text-blue-400 transition-colors" />
@@ -277,7 +277,7 @@ export const Header: React.FC<HeaderProps> = ({ onOpenCommandPalette }) => {
           ) : (
             <button
               onClick={() => setIsAuthModalOpen(true)}
-              className="flex items-center gap-2 rounded-xl bg-blue-600 px-3.5 py-1.5 text-xs font-semibold text-white shadow-lg shadow-blue-600/30 hover:bg-blue-500 transition-all"
+              className="vnt-btn-primary flex items-center gap-2 rounded-xl px-4 py-2 text-xs font-semibold text-white"
             >
               <span>Sign In</span>
             </button>

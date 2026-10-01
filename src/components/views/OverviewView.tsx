@@ -139,12 +139,13 @@ export const OverviewView: React.FC = () => {
   };
 
   return (
-    <div className="space-y-8 animate-in fade-in duration-300">
+    <div className="space-y-8 vnt-fade-up">
       {/* Hero Glass Banner */}
-      <div className="relative overflow-hidden rounded-3xl border border-blue-500/20 bg-gradient-to-r from-[#0a1024] via-[#091533] to-[#0a0e1a] p-6 sm:p-10 shadow-[0_0_50px_rgba(59,130,246,0.15)]">
+      <div className="vnt-surface relative overflow-hidden rounded-3xl p-6 sm:p-10 shadow-[0_24px_64px_-32px_rgba(59,130,246,0.45)]">
         {/* Glow Effects */}
-        <div className="absolute top-0 right-0 -mr-20 -mt-20 h-80 w-80 rounded-full bg-blue-500/10 blur-3xl pointer-events-none" />
-        <div className="absolute bottom-0 left-1/3 -mb-20 h-60 w-60 rounded-full bg-cyan-500/10 blur-3xl pointer-events-none" />
+        <div className="absolute top-0 right-0 -mr-20 -mt-20 h-80 w-80 rounded-full bg-blue-500/15 blur-3xl pointer-events-none" />
+        <div className="absolute bottom-0 left-1/3 -mb-20 h-60 w-60 rounded-full bg-cyan-500/15 blur-3xl pointer-events-none" />
+        <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-blue-400/60 to-transparent" aria-hidden="true" />
 
         <div className="relative z-10 flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
           <div className="max-w-2xl">
@@ -152,9 +153,9 @@ export const OverviewView: React.FC = () => {
               <span className="h-2 w-2 rounded-full bg-blue-400 animate-ping" />
               <span>CENTRALIZED API & CLOUD ECOSYSTEM</span>
             </div>
-            <h1 className="mt-4 font-display text-3xl sm:text-4xl lg:text-5xl font-extrabold tracking-tight text-white leading-tight">
+            <h1 className="mt-4 font-display text-3xl sm:text-4xl lg:text-5xl font-extrabold tracking-tight text-white leading-[1.08]">
               One Unified Gateway.<br />
-              <span className="bg-gradient-to-r from-blue-400 via-cyan-300 to-blue-200 bg-clip-text text-transparent">
+              <span className="vnt-gradient-text">
                 Every Client. Total Security.
               </span>
             </h1>
@@ -169,7 +170,7 @@ export const OverviewView: React.FC = () => {
                 return (
                   <button
                     onClick={() => setActiveView('downloads')}
-                    className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-600 px-4 py-2.5 text-xs font-bold text-white shadow-lg shadow-blue-600/30 hover:from-blue-500 hover:to-cyan-500 transition-all active:scale-95"
+                    className="vnt-btn-primary flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-bold text-white active:scale-95"
                   >
                     <Download className="h-4 w-4" />
                     <span>

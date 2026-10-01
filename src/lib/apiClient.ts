@@ -27,15 +27,31 @@ import {
 
 class ApiClient {
   private baseUrl = '/api/v1';
-  private roleOverride: UserRole = 'ADMIN';
   private clientSource: ClientSource = 'WEB';
 
-  setRoleOverride(role: UserRole) {
-    this.roleOverride = role;
+  /** Token stored after login (Bearer). Never store raw API secrets in localStorage long-term. */
+  private getAuthToken(): string | null {
+    try {
+      return localStorage.getItem('vanitas_auth_token');
+    } catch {
+      return null;
+    }
   }
 
+  setAuthToken(token: string | null) {
+    try {
+      if (token) localStorage.setItem('vanitas_auth_token', token);
+      else localStorage.removeItem('vanitas_auth_token');
+    } catch {
+      // ignore
+    }
+  }
+
+  // Kept for backwards-compat with older UI code. Role is now decided
+  // SERVER-SIDE only — this is a no-op and never sent to the backend.
+  setRoleOverride(_role: UserRole) {}
   getRoleOverride(): UserRole {
-    return this.roleOverride;
+    return 'USER';
   }
 
   setClientSource(source: ClientSource) {
@@ -45,8 +61,12 @@ class ApiClient {
   private async request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
     const headers = new Headers(options.headers || {});
     headers.set('Content-Type', 'application/json');
-    headers.set('x-user-role', this.roleOverride);
+    // SECURITY: never send x-user-role / x-user-id. Auth is Bearer server-side.
+    headers.delete('x-user-role');
+    headers.delete('x-user-id');
     headers.set('x-client-source', this.clientSource);
+    const token = this.getAuthToken();
+    if (token) headers.set('Authorization', `Bearer ${token}`);
 
     const res = await fetch(`${this.baseUrl}${endpoint}`, {
       ...options,

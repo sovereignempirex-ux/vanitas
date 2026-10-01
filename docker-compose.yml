@@ -5,7 +5,8 @@ services:
     environment:
       POSTGRES_DB: vanitas
       POSTGRES_USER: vanitas
-      POSTGRES_PASSWORD: change-me
+      # Override in production: POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?set a strong password}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-dev-only}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./supabase/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
@@ -25,13 +26,14 @@ services:
     build: .
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     env_file: .env
     environment:
       NODE_ENV: production
       AI_PROVIDER: ollama
       OLLAMA_BASE_URL: http://ollama:11434
-      DATABASE_URL: postgresql://vanitas:change-me@postgres:5432/vanitas
+      # Set DATABASE_URL / ADMIN_API_TOKEN / FRONTEND_URL in .env (never commit .env)
+      DATABASE_URL: ${DATABASE_URL:-postgresql://vanitas:change-me-dev-only@postgres:5432/vanitas}
     depends_on:
       postgres:
         condition: service_healthy

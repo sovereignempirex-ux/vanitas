@@ -4,6 +4,10 @@ var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
+};
 var __copyProps = (to, from, except, desc) => {
   if (from && typeof from === "object" || typeof from === "function") {
     for (let key of __getOwnPropNames(from))
@@ -20,14 +24,22 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
   mod
 ));
+var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
 // server.ts
+var server_exports = {};
+__export(server_exports, {
+  buildApp: () => buildApp,
+  default: () => server_default
+});
+module.exports = __toCommonJS(server_exports);
 var import_express = __toESM(require("express"), 1);
 var import_path = __toESM(require("path"), 1);
-var import_vite = require("vite");
+var import_crypto3 = __toESM(require("crypto"), 1);
 var import_pg = require("pg");
 
 // src/server/db.ts
+var import_crypto = __toESM(require("crypto"), 1);
 var ALL_SCOPES = [
   { scope: "api.read", label: "Read API Data & Status", group: "Core API", adminOnly: false },
   { scope: "api.write", label: "Write & Mutate API Resources", group: "Core API", adminOnly: false },
@@ -474,9 +486,9 @@ var VanitasDatabase = class {
   recordAuditLog(entry) {
     const log = {
       ...entry,
-      id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      id: `log_${Date.now()}_${import_crypto.default.randomBytes(4).toString("hex")}`,
       timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-      requestId: `req_${Math.random().toString(36).substring(2, 9)}`
+      requestId: `req_${import_crypto.default.randomBytes(5).toString("hex")}`
     };
     this.auditLogs.unshift(log);
     if (this.auditLogs.length > 500) {
@@ -513,14 +525,14 @@ var VanitasDatabase = class {
   createApiKey(params) {
     this.assertGrantableScopes(params.requesterRole, params.scopes);
     const env = params.environment || "live";
-    const randPart = Math.random().toString(36).substring(2, 10) + Math.random().toString(36).substring(2, 10);
+    const randPart = import_crypto.default.randomBytes(18).toString("base64url");
     const rawSecret = `sk_${env}_vanitas_${randPart}`;
     const keyPrefix = rawSecret.substring(0, 14);
     const maskedSecret = `${keyPrefix}\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022${rawSecret.slice(-4)}`;
     const rateLimitPerMin = params.rateLimitPerMin || 600;
     const burstLimit = params.burstLimit || Math.round(rateLimitPerMin * 0.05);
     const newKey = {
-      id: `key_${env}_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`,
+      id: `key_${env}_${Date.now().toString(36)}_${import_crypto.default.randomBytes(4).toString("hex")}`,
       name: params.name,
       keyPrefix,
       maskedSecret,
@@ -565,7 +577,7 @@ var VanitasDatabase = class {
       throw new Error("Forbidden: You can only rotate keys you own");
     }
     const env = key.environment;
-    const randPart = Math.random().toString(36).substring(2, 10) + Math.random().toString(36).substring(2, 10);
+    const randPart = import_crypto.default.randomBytes(18).toString("base64url");
     const rawSecret = `sk_${env}_vanitas_${randPart}`;
     const keyPrefix = rawSecret.substring(0, 14);
     key.keyPrefix = keyPrefix;
@@ -1987,8 +1999,130 @@ Respond with a valid JSON object matching this schema:
   };
 }
 
+// src/server/security.ts
+var import_crypto2 = __toESM(require("crypto"), 1);
+function secureToken(prefix, bytes = 24) {
+  return `${prefix}${import_crypto2.default.randomBytes(bytes).toString("base64url")}`;
+}
+function secureId(prefix) {
+  return `${prefix}_${Date.now().toString(36)}_${import_crypto2.default.randomBytes(6).toString("hex")}`;
+}
+function sanitizeText(input, maxLen = 5e3) {
+  if (typeof input !== "string") return "";
+  let s = input.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
+  s = s.trim().slice(0, maxLen);
+  return s;
+}
+function sanitizeUrl(input) {
+  if (typeof input !== "string") return null;
+  const s = input.trim().slice(0, 2048);
+  let u;
+  try {
+    u = new URL(s);
+  } catch {
+    return null;
+  }
+  if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+  const host = u.hostname.toLowerCase();
+  const blocked = [
+    "localhost",
+    "127.",
+    "10.",
+    "192.168.",
+    "169.254.",
+    "0.0.0.0",
+    "::1",
+    "[::1]"
+  ];
+  if (blocked.some((b) => host === b || host.startsWith(b))) return null;
+  if (host.endsWith(".internal") || host.endsWith(".local")) return null;
+  if (process.env.NODE_ENV === "production" && u.protocol !== "https:") return null;
+  return u.toString();
+}
+function csvCell(value) {
+  let s = String(value ?? "");
+  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+  s = s.replace(/"/g, '""');
+  return `"${s}"`;
+}
+var hits = /* @__PURE__ */ new Map();
+function rateLimit({ windowMs = 6e4, max = 120 }) {
+  return (req, res, next) => {
+    const key = (req.ip || req.socket.remoteAddress || "unknown") + ":" + req.path;
+    const now = Date.now();
+    const arr = (hits.get(key) || []).filter((t) => now - t < windowMs);
+    if (arr.length >= max) {
+      res.setHeader("Retry-After", Math.ceil(windowMs / 1e3));
+      return res.status(429).json({ error: "Too many requests. Slow down and retry." });
+    }
+    arr.push(now);
+    hits.set(key, arr);
+    next();
+  };
+}
+function adminToken() {
+  const t = process.env.ADMIN_API_TOKEN;
+  if (t && t.length >= 32) return t;
+  return null;
+}
+function getActorUser(req) {
+  const demoMode = process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "production";
+  const auth = req.headers.authorization || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+  const expected = adminToken();
+  if (expected && token && token.length >= 32) {
+    try {
+      const a = Buffer.from(token);
+      const b = Buffer.from(expected);
+      if (a.length === b.length && import_crypto2.default.timingSafeEqual(a, b)) {
+        return db.users.find((u) => u.role === "ADMIN") || db.users[0];
+      }
+    } catch {
+    }
+  }
+  if (demoMode) {
+    const userIdHeader = req.headers["x-user-id"];
+    if (userIdHeader) {
+      const user = db.users.find((u) => u.id === sanitizeText(userIdHeader, 64));
+      if (user) return user;
+    }
+    const roleHeader = req.headers["x-user-role"];
+    if (roleHeader === "ADMIN") {
+      return db.users.find((u) => u.role === "ADMIN") || db.users[0];
+    }
+  }
+  return db.users.find((u) => u.role === "USER") || db.users[0];
+}
+function requireAdmin(req, res) {
+  const actor = getActorUser(req);
+  if (actor.role !== "ADMIN") {
+    res.status(403).json({ error: "Administrator access required" });
+    return null;
+  }
+  return actor;
+}
+function parsePagination(query) {
+  let limit = parseInt(query.limit, 10);
+  let offset = parseInt(query.offset, 10);
+  if (!Number.isFinite(limit) || limit <= 0) limit = 25;
+  if (!Number.isFinite(offset) || offset < 0) offset = 0;
+  limit = Math.min(limit, 100);
+  offset = Math.min(offset, 1e5);
+  return { limit, offset };
+}
+function isValidScope(s) {
+  return typeof s === "string" && /^[a-z.]+\.[a-z.]+$/.test(s) && s.length <= 40;
+}
+
 // server.ts
-var databasePool = process.env.DATABASE_URL ? new import_pg.Pool({ connectionString: process.env.DATABASE_URL, max: 8 }) : null;
+var databasePool = process.env.DATABASE_URL ? new import_pg.Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 8,
+  ssl: /supabase\.co|neon\.tech|sslmode=require/.test(process.env.DATABASE_URL) ? { rejectUnauthorized: false } : void 0
+}) : null;
+if (databasePool) {
+  databasePool.on("error", (err) => console.error("[db] pool error:", err.message));
+}
 function mapSuggestion(row) {
   return {
     id: row.id,
@@ -2029,22 +2163,49 @@ async function findSuggestion(id) {
   const result = await databasePool.query("select * from public.product_suggestions where id = $1", [id]);
   return result.rows[0] ? mapSuggestion(result.rows[0]) : void 0;
 }
-const app = (0, import_express.default)();
-const PORT = 3e3;
-const demoMode = process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "production";
+async function buildApp() {
+  const app = (0, import_express.default)();
+  const PORT = Number(process.env.PORT) || 3e3;
   app.set("trust proxy", 1);
+  app.disable("x-powered-by");
   app.use(import_express.default.json({ limit: "256kb" }));
-  app.use(import_express.default.urlencoded({ extended: true }));
+  app.use(import_express.default.urlencoded({ extended: true, limit: "256kb" }));
+  app.use((req, res, next) => {
+    const allowed = (process.env.FRONTEND_URL || "").split(",").map((s) => s.trim()).filter(Boolean);
+    const origin = req.headers.origin;
+    if (origin && (allowed.includes(origin) || allowed.includes("*"))) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+      res.setHeader("Vary", "Origin");
+    }
+    res.setHeader("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Request-Id");
+    if (req.method === "OPTIONS") return res.status(204).end();
+    next();
+  });
+  app.use("/api/", rateLimit({ windowMs: 6e4, max: 300 }));
+  app.use("/api/v1/auth/", rateLimit({ windowMs: 6e4, max: 60 }));
+  app.use("/api/v1/ai/", rateLimit({ windowMs: 6e4, max: 60 }));
+  app.use("/api/v1/bot/", rateLimit({ windowMs: 6e4, max: 120 }));
   app.use((_req, res, next) => {
-    res.setHeader("X-DNS-Prefetch-Control", "on");
-    res.setHeader("X-Frame-Options", "SAMEORIGIN");
+    res.setHeader("X-DNS-Prefetch-Control", "off");
+    res.setHeader("X-Frame-Options", "DENY");
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
-    res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+    res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
+    res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+    res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
     if (process.env.NODE_ENV === "production") {
-      res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
-      res.setHeader("Content-Security-Policy", "default-src 'self'; img-src 'self' https: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'");
+      res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload");
+      res.setHeader(
+        "Content-Security-Policy",
+        "default-src 'self'; img-src 'self' https: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+      );
     }
+    next();
+  });
+  app.use((req, _res, next) => {
+    const incoming = sanitizeText(req.headers["x-request-id"], 64);
+    req.requestId = incoming || import_crypto3.default.randomUUID();
     next();
   });
   function detectSource(req) {
@@ -2071,18 +2232,6 @@ const demoMode = process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "p
     });
     next();
   });
-  function getActorUser(req) {
-    const roleHeader = req.headers["x-user-role"];
-    const userIdHeader = req.headers["x-user-id"];
-    if (demoMode && userIdHeader) {
-      const user = db.users.find((u) => u.id === userIdHeader);
-      if (user) return user;
-    }
-    if (demoMode && roleHeader === "ADMIN") {
-      return db.users.find((u) => u.role === "ADMIN") || db.users[0];
-    }
-    return db.users.find((user) => user.role === "USER") || db.users[0];
-  }
   app.get("/api/v1/health", (_req, res) => {
     res.json({
       status: "healthy",
@@ -2092,13 +2241,21 @@ const demoMode = process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "p
       service: "Vanitas Central Gateway"
     });
   });
-  app.get("/api/v1/ready", (_req, res) => {
+  app.get("/api/v1/ready", async (_req, res) => {
+    let database = databasePool ? "connected" : "in-memory-fallback";
+    if (databasePool) {
+      try {
+        await databasePool.query("select 1");
+      } catch {
+        database = "unreachable";
+      }
+    }
     res.json({
-      ready: true,
-      database: "connected",
+      ready: database !== "unreachable",
+      database,
       auth: "ready",
       ai: process.env.AI_PROVIDER === "ollama" ? "ollama_configured" : process.env.GEMINI_API_KEY ? "gemini_enabled" : "fallback_ready",
-      mode: demoMode ? "demo" : "authenticated"
+      mode: process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "production" ? "demo" : "authenticated"
     });
   });
   app.get("/api/v1/status", (_req, res) => {
@@ -2120,24 +2277,27 @@ const demoMode = process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "p
     });
   });
   app.post("/api/v1/auth/oauth", (req, res) => {
-    const { provider } = req.body;
+    const provider = sanitizeText(req.body?.provider, 32).toUpperCase() || "GENERIC";
+    if (!/^[A-Z0-9_-]{1,32}$/.test(provider)) {
+      return res.status(400).json({ error: "Invalid provider" });
+    }
     const actor = getActorUser(req);
     const source = detectSource(req);
     db.recordAuditLog({
       actorId: actor.id,
       actorName: actor.name,
       actorEmail: actor.email,
-      action: `OAUTH_LOGIN_${(provider || "GENERIC").toUpperCase()}`,
+      action: `OAUTH_LOGIN_${provider}`,
       category: "AUTH",
       target: `User Account: ${actor.id}`,
       source,
       status: "SUCCESS",
-      ipAddress: req.ip || "194.230.14.88",
-      metadata: { provider, userAgent: req.headers["user-agent"] }
+      ipAddress: req.ip || "unknown",
+      metadata: { provider }
     });
     res.json({
       success: true,
-      token: `vnt_jwt_${Math.random().toString(36).substring(2, 14)}`,
+      token: secureToken("vnt_jwt_"),
       user: actor
     });
   });
@@ -2145,7 +2305,7 @@ const demoMode = process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "p
     res.json({ sessions: db.sessions });
   });
   app.delete("/api/v1/auth/sessions/:id", (req, res) => {
-    const { id } = req.params;
+    const id = sanitizeText(req.params.id, 64);
     const actor = getActorUser(req);
     const idx = db.sessions.findIndex((s) => s.id === id);
     if (idx !== -1) {
@@ -2156,10 +2316,10 @@ const demoMode = process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "p
         actorEmail: actor.email,
         action: "SESSION_REVOKED",
         category: "AUTH",
-        target: `Session Device: ${removed.device} (${removed.ip})`,
+        target: `Session Device: ${sanitizeText(removed.device, 120)} (${sanitizeText(removed.ip, 64)})`,
         source: detectSource(req),
         status: "SUCCESS",
-        ipAddress: req.ip || "194.230.14.88",
+        ipAddress: req.ip || "unknown",
         metadata: { deviceId: id }
       });
       return res.json({ success: true, message: "Session terminated" });
@@ -2182,9 +2342,15 @@ const demoMode = process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "p
   app.post("/api/v1/api-keys", (req, res) => {
     try {
       const actor = getActorUser(req);
-      const { name, scopes, environment, rateLimitPerMin, expiresAt } = req.body;
-      if (!name || !scopes || !Array.isArray(scopes)) {
-        return res.status(400).json({ error: 'Invalid parameters. "name" and "scopes" array are required.' });
+      const name = sanitizeText(req.body?.name, 80);
+      const scopes = req.body?.scopes;
+      const environment = req.body?.environment === "test" ? "test" : "live";
+      const rateLimitPerMin = Math.min(Math.max(Number(req.body?.rateLimitPerMin) || 600, 10), 1e4);
+      if (!name || name.length < 3 || !scopes || !Array.isArray(scopes) || scopes.length === 0 || scopes.length > 30) {
+        return res.status(400).json({ error: 'Invalid parameters. "name" (3-80 chars) and "scopes" array (1-30) are required.' });
+      }
+      if (!scopes.every(isValidScope)) {
+        return res.status(400).json({ error: "Invalid scope format detected." });
       }
       const result = db.createApiKey({
         name,
@@ -2192,9 +2358,9 @@ const demoMode = process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "p
         ownerName: actor.name,
         requesterRole: actor.role,
         scopes,
-        environment: environment || "live",
-        rateLimitPerMin: Number(rateLimitPerMin) || 600,
-        expiresAt: expiresAt || null
+        environment,
+        rateLimitPerMin,
+        expiresAt: typeof req.body?.expiresAt === "string" ? req.body.expiresAt.slice(0, 64) : null
       });
       res.status(201).json({
         key: result.key,
@@ -2202,13 +2368,13 @@ const demoMode = process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "p
         revealNote: "This secret is revealed only once. Store it in a secure vault."
       });
     } catch (err) {
-      res.status(403).json({ error: err.message });
+      res.status(403).json({ error: "Request denied" });
     }
   });
   app.post("/api/v1/api-keys/:id/rotate", (req, res) => {
     try {
       const actor = getActorUser(req);
-      const { id } = req.params;
+      const id = sanitizeText(req.params.id, 128);
       const result = db.rotateApiKey(id, actor);
       res.json({
         key: result.key,
@@ -2216,65 +2382,72 @@ const demoMode = process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "p
         revealNote: "Previous secret has been permanently invalidated. Store this new secret securely."
       });
     } catch (err) {
-      res.status(400).json({ error: err.message });
+      res.status(400).json({ error: "Rotation failed" });
     }
   });
   app.delete("/api/v1/api-keys/:id", (req, res) => {
     try {
       const actor = getActorUser(req);
-      const { id } = req.params;
-      const { reason } = req.body || {};
-      const key = db.revokeApiKey(id, actor, reason);
+      const id = sanitizeText(req.params.id, 128);
+      const reason = sanitizeText(req.body?.reason, 200);
+      const key = db.revokeApiKey(id, actor, reason || void 0);
       res.json({ success: true, key });
     } catch (err) {
-      res.status(400).json({ error: err.message });
+      res.status(400).json({ error: "Revocation failed" });
     }
   });
   app.patch("/api/v1/api-keys/:id/scopes", (req, res) => {
     try {
       const actor = getActorUser(req);
-      const { id } = req.params;
+      const id = sanitizeText(req.params.id, 128);
       const { scopes } = req.body;
-      if (!scopes || !Array.isArray(scopes)) {
-        return res.status(400).json({ error: "Scopes array required" });
+      if (!scopes || !Array.isArray(scopes) || scopes.length > 30 || !scopes.every(isValidScope)) {
+        return res.status(400).json({ error: "Valid scopes array required (max 30)" });
       }
       const key = db.updateApiKeyScopes(id, scopes, actor);
       res.json({ success: true, key });
     } catch (err) {
-      res.status(403).json({ error: err.message });
+      res.status(403).json({ error: "Scope update denied" });
     }
   });
   app.patch("/api/v1/api-keys/:id/rate-limit", (req, res) => {
     try {
       const actor = getActorUser(req);
-      const { id } = req.params;
+      const id = sanitizeText(req.params.id, 128);
       const { rateLimitPerMin, burstLimit, rateLimitAlgorithm, actionOnExceed, monthlyQuota } = req.body;
-      if (!rateLimitPerMin || isNaN(Number(rateLimitPerMin))) {
-        return res.status(400).json({ error: "Valid rateLimitPerMin number is required" });
+      const rpm = Number(rateLimitPerMin);
+      if (!rpm || !Number.isFinite(rpm) || rpm < 10 || rpm > 1e4) {
+        return res.status(400).json({ error: "rateLimitPerMin must be 10-10000" });
+      }
+      if (rateLimitAlgorithm && !["sliding_window", "token_bucket", "fixed_window"].includes(rateLimitAlgorithm)) {
+        return res.status(400).json({ error: "Invalid rate limit algorithm" });
+      }
+      if (actionOnExceed && !["reject_429", "throttle_delay", "alert_only"].includes(actionOnExceed)) {
+        return res.status(400).json({ error: "Invalid actionOnExceed" });
       }
       const key = db.updateApiKeyRateLimit(
         id,
         {
-          rateLimitPerMin: Number(rateLimitPerMin),
-          burstLimit: burstLimit !== void 0 ? Number(burstLimit) : void 0,
+          rateLimitPerMin: Math.floor(rpm),
+          burstLimit: burstLimit !== void 0 ? Math.min(Math.max(Number(burstLimit) || 0, 0), 1e3) : void 0,
           rateLimitAlgorithm,
           actionOnExceed,
-          monthlyQuota: monthlyQuota !== void 0 ? Number(monthlyQuota) : void 0
+          monthlyQuota: monthlyQuota !== void 0 ? Math.min(Math.max(Number(monthlyQuota) || 0, 0), 1e8) : void 0
         },
         actor
       );
       res.json({ success: true, key });
     } catch (err) {
-      res.status(400).json({ error: err.message });
+      res.status(400).json({ error: "Rate limit update failed" });
     }
   });
   app.post("/api/v1/api-keys/:id/simulate-traffic", (req, res) => {
     try {
-      const { id } = req.params;
-      const { requestCount = 50 } = req.body;
+      const id = sanitizeText(req.params.id, 128);
+      const requestCount = req.body?.requestCount;
       const key = db.apiKeys.find((k) => k.id === id);
       if (!key) return res.status(404).json({ error: "Key not found" });
-      const count = Number(requestCount) || 50;
+      const count = Math.min(Math.max(Number(requestCount) || 50, 1), 1e3);
       key.usageCount += count;
       key.currentUsageThisMonth = (key.currentUsageThisMonth || 0) + count;
       key.currentRpmUsage = Math.min(
@@ -2298,29 +2471,28 @@ const demoMode = process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "p
         }
       });
     } catch (err) {
-      res.status(400).json({ error: err.message });
+      res.status(400).json({ error: "Simulation failed" });
     }
   });
   app.get("/api/v1/admin/users", (req, res) => {
-    const actor = getActorUser(req);
-    if (actor.role !== "ADMIN") {
-      return res.status(403).json({ error: "403 Forbidden: Admin privileges required" });
-    }
+    if (!requireAdmin(req, res)) return;
     res.json({ users: db.users });
   });
   app.patch("/api/v1/admin/users/:id/role", (req, res) => {
-    const actor = getActorUser(req);
-    if (actor.role !== "ADMIN") {
-      return res.status(403).json({ error: "403 Forbidden: Admin privileges required" });
-    }
-    const { id } = req.params;
-    const { role } = req.body;
+    const actor = requireAdmin(req, res);
+    if (!actor) return;
+    const id = sanitizeText(req.params.id, 64);
+    const role = sanitizeText(req.body?.role, 16);
     if (!["USER", "ADMIN"].includes(role)) {
       return res.status(400).json({ error: "Invalid role" });
     }
     const targetUser = db.users.find((u) => u.id === id);
     if (!targetUser) {
       return res.status(404).json({ error: "User not found" });
+    }
+    if (targetUser.id === actor.id && role !== "ADMIN") {
+      const adminCount = db.users.filter((u) => u.role === "ADMIN").length;
+      if (adminCount <= 1) return res.status(400).json({ error: "Cannot demote the last administrator" });
     }
     const priorRole = targetUser.role;
     targetUser.role = role;
@@ -2333,21 +2505,17 @@ const demoMode = process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "p
       target: `${targetUser.id} (${targetUser.email}) -> ${role}`,
       source: detectSource(req),
       status: "SUCCESS",
-      ipAddress: req.ip || "194.230.14.88",
+      ipAddress: req.ip || "unknown",
       metadata: { priorRole, newRole: role }
     });
     res.json({ success: true, user: targetUser });
   });
   app.get("/api/v1/admin/logs", (req, res) => {
-    const actor = getActorUser(req);
-    if (actor.role !== "ADMIN") {
-      return res.status(403).json({ error: "403 Forbidden: Admin privileges required" });
-    }
-    const limit = parseInt(req.query.limit) || 25;
-    const offset = parseInt(req.query.offset) || 0;
-    const from = req.query.from;
-    const category = (req.query.category || "ALL").toUpperCase();
-    const search = (req.query.search || "").toLowerCase();
+    if (!requireAdmin(req, res)) return;
+    const { limit, offset } = parsePagination(req.query);
+    const from = sanitizeText(req.query.from, 32);
+    const category = sanitizeText(req.query.category || "ALL", 16).toUpperCase();
+    const search = sanitizeText(req.query.search || "", 100).toLowerCase();
     let logs = [...db.auditLogs];
     if (from) {
       let sinceMs = 0;
@@ -2359,7 +2527,9 @@ const demoMode = process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "p
         logs = logs.filter((l) => new Date(l.timestamp).getTime() >= sinceMs);
       }
     }
+    const allowedCats = ["ALL", "ADMIN", "API", "SECURITY", "AUTH", "KEYS", "BOT", "DATABASE"];
     if (category && category !== "ALL") {
+      if (!allowedCats.includes(category)) return res.status(400).json({ error: "Invalid category" });
       logs = logs.filter((l) => l.category === category);
     }
     if (search) {
@@ -2377,41 +2547,33 @@ const demoMode = process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "p
     });
   });
   app.get("/api/v1/admin/logs/export", (req, res) => {
-    const actor = getActorUser(req);
-    if (actor.role !== "ADMIN") {
-      return res.status(403).send("403 Forbidden");
-    }
+    if (!requireAdmin(req, res)) return res.status(403).send("Forbidden");
     const headers = ["Timestamp", "Actor", "Action", "Category", "Target", "Source", "Status", "Request ID", "IP Address", "Metadata"];
-    const rows = db.auditLogs.map((l) => [
-      `"${l.timestamp}"`,
-      `"${l.actorName} (${l.actorEmail})"`,
-      `"${l.action}"`,
-      `"${l.category}"`,
-      `"${l.target.replace(/"/g, '""')}"`,
-      `"${l.source}"`,
-      `"${l.status}"`,
-      `"${l.requestId}"`,
-      `"${l.ipAddress}"`,
-      `"${JSON.stringify(l.metadata || {}).replace(/"/g, '""')}"`
+    const rows = db.auditLogs.slice(0, 5e3).map((l) => [
+      csvCell(l.timestamp),
+      csvCell(`${l.actorName} (${l.actorEmail})`),
+      csvCell(l.action),
+      csvCell(l.category),
+      csvCell(l.target),
+      csvCell(l.source),
+      csvCell(l.status),
+      csvCell(l.requestId),
+      csvCell(l.ipAddress),
+      csvCell(JSON.stringify(l.metadata || {}))
     ]);
     const csvContent = [headers.join(","), ...rows.map((r) => r.join(","))].join("\n");
-    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="vanitas_audit_logs_${Date.now()}.csv"`);
     res.send(csvContent);
   });
   app.get("/api/v1/admin/statistics", (req, res) => {
-    const actor = getActorUser(req);
-    if (actor.role !== "ADMIN") {
-      return res.status(403).json({ error: "403 Forbidden: Admin privileges required" });
-    }
+    if (!requireAdmin(req, res)) return;
     res.json({ stats: db.systemStats, threats: db.securityThreats });
   });
   app.post("/api/v1/admin/emergency", (req, res) => {
-    const actor = getActorUser(req);
-    if (actor.role !== "ADMIN") {
-      return res.status(403).json({ error: "403 Forbidden: Admin privileges required" });
-    }
-    const { action, targetId } = req.body;
+    const actor = requireAdmin(req, res);
+    if (!actor) return;
+    const action = sanitizeText(req.body?.action, 64);
     const source = detectSource(req);
     if (action === "TOGGLE_MAINTENANCE") {
       const flag = db.featureFlags.find((f) => f.key === "SYSTEM_MAINTENANCE_MODE");
@@ -2426,7 +2588,7 @@ const demoMode = process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "p
           target: "Platform Core Services",
           source,
           status: "WARNING",
-          ipAddress: req.ip || "194.230.14.88"
+          ipAddress: req.ip || "unknown"
         });
         return res.json({ success: true, maintenanceMode: flag.enabled });
       }
@@ -2448,7 +2610,7 @@ const demoMode = process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "p
         target: `${count} sandbox tokens revoked`,
         source,
         status: "WARNING",
-        ipAddress: req.ip || "194.230.14.88"
+        ipAddress: req.ip || "unknown"
       });
       return res.json({ success: true, revokedCount: count });
     }
@@ -2458,11 +2620,8 @@ const demoMode = process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "p
     res.json({ featureFlags: db.featureFlags });
   });
   app.patch("/api/v1/admin/feature-flags/:id", (req, res) => {
-    const actor = getActorUser(req);
-    if (actor.role !== "ADMIN") {
-      return res.status(403).json({ error: "403 Forbidden" });
-    }
-    const { id } = req.params;
+    if (!requireAdmin(req, res)) return;
+    const id = sanitizeText(req.params.id, 64);
     const { enabled } = req.body;
     const flag = db.featureFlags.find((f) => f.id === id);
     if (!flag) return res.status(404).json({ error: "Feature flag not found" });
@@ -2471,20 +2630,27 @@ const demoMode = process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "p
     res.json({ success: true, flag });
   });
   app.get("/api/v1/webhooks", (_req, res) => {
-    res.json({ webhooks: db.webhooks, logs: db.webhookLogs });
+    const safe = db.webhooks.map((w) => ({ ...w, secret: void 0, url: w.url }));
+    res.json({ webhooks: safe, logs: db.webhookLogs });
   });
   app.post("/api/v1/webhooks", (req, res) => {
     const actor = getActorUser(req);
-    const { name, url, events } = req.body;
-    if (!name || !url || !events) {
-      return res.status(400).json({ error: "Name, URL, and Events are required" });
+    const name = sanitizeText(req.body?.name, 80);
+    const rawUrl = req.body?.url;
+    const events = req.body?.events;
+    if (!name || name.length < 3 || !rawUrl || !Array.isArray(events) || events.length === 0 || events.length > 20) {
+      return res.status(400).json({ error: "Name (3-80), URL, and Events (1-20) are required" });
     }
+    const url = sanitizeUrl(rawUrl);
+    if (!url) return res.status(400).json({ error: "Invalid or blocked webhook URL (https only, no private hosts)" });
+    const cleanEvents = events.map((e) => sanitizeText(e, 48)).filter((e) => /^[a-z_.-]+$/.test(e));
+    if (cleanEvents.length === 0) return res.status(400).json({ error: "Invalid event names" });
     const newWebhook = {
-      id: `wh_${Date.now().toString(36)}`,
+      id: secureId("wh"),
       name,
       url,
-      events,
-      secret: `whsec_${Math.random().toString(36).substring(2, 14)}`,
+      events: cleanEvents,
+      secret: secureToken("whsec_"),
       status: "active",
       createdAt: (/* @__PURE__ */ new Date()).toISOString(),
       lastTriggeredAt: null,
@@ -2497,25 +2663,25 @@ const demoMode = process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "p
       actorEmail: actor.email,
       action: "WEBHOOK_CREATED",
       category: "API",
-      target: `${newWebhook.name} (${newWebhook.url})`,
+      target: `${sanitizeText(newWebhook.name, 80)} (${newWebhook.url.slice(0, 120)})`,
       source: detectSource(req),
       status: "SUCCESS",
-      ipAddress: req.ip || "194.230.14.88"
+      ipAddress: req.ip || "unknown"
     });
     res.status(201).json({ webhook: newWebhook });
   });
   app.post("/api/v1/webhooks/:id/test", (req, res) => {
-    const { id } = req.params;
+    const id = sanitizeText(req.params.id, 128);
     const wh = db.webhooks.find((w) => w.id === id);
     if (!wh) return res.status(404).json({ error: "Webhook not found" });
     wh.lastTriggeredAt = (/* @__PURE__ */ new Date()).toISOString();
     const log = {
-      id: `wh_log_${Date.now()}`,
+      id: secureId("wh_log"),
       webhookId: wh.id,
       event: "ping.test",
       status: "delivered",
       statusCode: 200,
-      latencyMs: Math.floor(Math.random() * 80) + 90,
+      latencyMs: 90 + import_crypto3.default.randomInt(80),
       timestamp: (/* @__PURE__ */ new Date()).toISOString(),
       payload: { event: "ping.test", timestamp: (/* @__PURE__ */ new Date()).toISOString(), message: "Vanitas ping verification handshake" }
     };
@@ -2527,10 +2693,17 @@ const demoMode = process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "p
   });
   app.post("/api/v1/bot/execute", (req, res) => {
     const actor = getActorUser(req);
-    const { platform, command, payload } = req.body;
-    const source = detectSource(req);
-    if (!command) {
+    const platform = sanitizeText(req.body?.platform, 32) || "discord";
+    const command = sanitizeText(req.body?.command, 200);
+    const payload = req.body?.payload;
+    if (!command || command.length < 1) {
       return res.status(400).json({ error: "Missing command payload" });
+    }
+    if (!["discord", "whatsapp", "telegram", "custom"].includes(platform)) {
+      return res.status(400).json({ error: "Invalid platform" });
+    }
+    if (payload && (typeof payload !== "object" || JSON.stringify(payload).length > 8e3)) {
+      return res.status(400).json({ error: "Invalid payload (max 8KB object)" });
     }
     const bot = db.bots.find((b) => b.platform === platform) || db.bots[0];
     bot.commandsExecuted += 1;
@@ -2541,61 +2714,75 @@ const demoMode = process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "p
       actorEmail: actor.email,
       action: "BOT_COMMAND_EXECUTED",
       category: "BOT",
-      target: `${platform || "discord"}::${command}`,
+      target: `${platform}::${command.slice(0, 120)}`,
       source: "BOT",
       status: "SUCCESS",
-      ipAddress: req.ip || "10.0.4.12",
-      metadata: { command, payload, latencyMs: 14 }
+      ipAddress: req.ip || "unknown",
+      metadata: { command: command.slice(0, 200), latencyMs: 14 }
     });
     res.json({
       success: true,
-      executionId: `exec_${Date.now().toString(36)}`,
+      executionId: secureId("exec"),
       platform: bot.platform,
       command,
-      output: `Vanitas executed [${command}] on ${bot.name}. Result: Nominal. All systems in state 200 OK.`,
+      output: `Vanitas executed [${command.slice(0, 100)}] on ${bot.name}. Result: Nominal.`,
       timestamp: (/* @__PURE__ */ new Date()).toISOString()
     });
   });
   app.post("/api/v1/ai/chat", async (req, res) => {
     try {
-      const { persona, toneStyle, prompt, enableWebSearch, enableVideoSearch, context } = req.body;
-      if (!prompt) return res.status(400).json({ error: "Prompt is required" });
+      const persona = sanitizeText(req.body?.persona, 32) || "code";
+      const toneStyle = sanitizeText(req.body?.toneStyle, 32) || "developer";
+      const prompt = sanitizeText(req.body?.prompt, 8e3);
+      if (!prompt || prompt.length < 2) return res.status(400).json({ error: "Prompt is required (2-8000 chars)" });
+      if (!["code", "api", "security", "analyst", "docs", "video", "admin"].includes(persona)) {
+        return res.status(400).json({ error: "Invalid persona" });
+      }
       const response = await processAiQuery({
-        persona: persona || "code",
-        toneStyle: toneStyle || "developer",
+        persona,
+        toneStyle: ["architect", "security", "developer", "bot", "arabic"].includes(toneStyle) ? toneStyle : "developer",
         prompt,
-        enableWebSearch: !!enableWebSearch,
-        enableVideoSearch: !!enableVideoSearch,
-        context
+        enableWebSearch: !!req.body?.enableWebSearch,
+        enableVideoSearch: !!req.body?.enableVideoSearch,
+        context: typeof req.body?.context === "object" ? req.body.context : void 0
       });
       res.json(response);
     } catch (err) {
-      res.status(500).json({ error: err.message || "AI engine error" });
+      console.error("[ai/chat]", err?.message);
+      res.status(500).json({ error: "AI engine error" });
     }
   });
   app.post("/api/v1/ai/diagnose-fix", async (req, res) => {
     try {
-      const { code, language = "typescript", context, autoFix } = req.body;
-      if (!code || typeof code !== "string") {
-        return res.status(400).json({ error: "Code snippet string is required" });
+      const code = typeof req.body?.code === "string" ? req.body.code.slice(0, 3e4) : "";
+      const language = sanitizeText(req.body?.language, 16) || "typescript";
+      if (!code) {
+        return res.status(400).json({ error: "Code snippet string is required (max 30KB)" });
+      }
+      if (!["typescript", "javascript", "python", "curl", "json", "sql"].includes(language)) {
+        return res.status(400).json({ error: "Invalid language" });
       }
       const result = await diagnoseAndFixCode({
         code,
         language,
-        context,
-        autoFix: autoFix !== false
+        context: sanitizeText(req.body?.context, 2e3) || void 0,
+        autoFix: req.body?.autoFix !== false
       });
       res.json(result);
     } catch (err) {
-      res.status(500).json({ error: err.message || "Failed running code diagnosis" });
+      console.error("[ai/diagnose]", err?.message);
+      res.status(500).json({ error: "Failed running code diagnosis" });
     }
   });
   app.post("/api/v1/suggestions", async (req, res) => {
     const actor = getActorUser(req);
-    const { title, details, category = "feature", code } = req.body;
-    if (!title || !details) return res.status(400).json({ error: "Title and details are required" });
+    const title = sanitizeText(req.body?.title, 140);
+    const details = sanitizeText(req.body?.details, 5e3);
+    const category = sanitizeText(req.body?.category, 16) || "feature";
+    const code = typeof req.body?.code === "string" ? req.body.code.slice(0, 2e4) : void 0;
+    if (!title || title.length < 3 || !details || details.length < 3) return res.status(400).json({ error: "Title and details are required (3+ chars)" });
     if (!["bug", "feature", "ux"].includes(category)) return res.status(400).json({ error: "Invalid suggestion category" });
-    const suggestion = await createSuggestion({ title, details, category, code, authorName: actor.name });
+    const suggestion = await createSuggestion({ title, details, category, code, authorName: sanitizeText(actor.name, 80) });
     db.recordAuditLog({
       actorId: actor.id,
       actorName: actor.name,
@@ -2611,34 +2798,34 @@ const demoMode = process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "p
     res.status(201).json({ suggestion });
   });
   app.get("/api/v1/admin/suggestions", async (req, res) => {
-    const actor = getActorUser(req);
-    if (actor.role !== "ADMIN") return res.status(403).json({ error: "Administrator access required" });
+    if (!requireAdmin(req, res)) return;
     res.json({ suggestions: await listSuggestions() });
   });
   app.patch("/api/v1/admin/suggestions/:id", async (req, res) => {
-    const actor = getActorUser(req);
-    if (actor.role !== "ADMIN") return res.status(403).json({ error: "Administrator access required" });
-    const { status, adminNote } = req.body;
+    if (!requireAdmin(req, res)) return;
+    const status = sanitizeText(req.body?.status, 16);
+    const adminNote = sanitizeText(req.body?.adminNote, 2e3) || void 0;
     if (!["open", "reviewing", "resolved"].includes(status)) return res.status(400).json({ error: "Invalid status" });
-    const suggestion = await updateSuggestion(req.params.id, status, adminNote);
+    const suggestion = await updateSuggestion(sanitizeText(req.params.id, 128), status, adminNote);
     if (!suggestion) return res.status(404).json({ error: "Suggestion not found" });
     res.json({ suggestion });
   });
   app.post("/api/v1/admin/suggestions/:id/ai-fix", async (req, res) => {
-    const actor = getActorUser(req);
-    if (actor.role !== "ADMIN") return res.status(403).json({ error: "Administrator access required" });
-    const suggestion = await findSuggestion(req.params.id);
+    if (!requireAdmin(req, res)) return;
+    const suggestion = await findSuggestion(sanitizeText(req.params.id, 128));
     if (!suggestion) return res.status(404).json({ error: "Suggestion not found" });
     if (!suggestion.code) return res.status(400).json({ error: "A code sample is required before AI repair can run" });
     await updateSuggestion(suggestion.id, "reviewing", "Admin requested an AI repair proposal.");
-    const diagnosis = await diagnoseAndFixCode({ code: suggestion.code, language: req.body.language || "typescript", context: suggestion.details, autoFix: true });
+    const language = sanitizeText(req.body?.language, 16) || "typescript";
+    const diagnosis = await diagnoseAndFixCode({ code: suggestion.code.slice(0, 3e4), language, context: suggestion.details.slice(0, 2e3), autoFix: true });
     res.json({ suggestion: await findSuggestion(suggestion.id), diagnosis });
   });
   app.all(["/api/v1/search/semantic", "/api/v1/semantic-search"], async (req, res) => {
     try {
-      const query = req.method === "POST" ? req.body.query : req.query.q;
-      if (!query || typeof query !== "string") {
-        return res.status(400).json({ error: "Search query parameter is required" });
+      const rawQuery = req.method === "POST" ? req.body?.query : req.query.q;
+      const query = sanitizeText(rawQuery, 300);
+      if (!query || query.length < 2) {
+        return res.status(400).json({ error: "Search query (2-300 chars) is required" });
       }
       const docsCorpus = [
         {
@@ -2693,17 +2880,19 @@ const demoMode = process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "p
       });
       res.json(result);
     } catch (err) {
-      res.status(500).json({ error: err.message || "Semantic search failed" });
+      console.error("[semantic-search]", err?.message);
+      res.status(500).json({ error: "Semantic search failed" });
     }
   });
   app.get("/api/v1/youtube/search", async (req, res) => {
     try {
-      const q = req.query.q || "Vanitas API Gateway";
-      const limit = parseInt(req.query.limit || "6", 10);
+      const q = sanitizeText(req.query.q, 200) || "Vanitas API Gateway";
+      const limit = Math.min(Math.max(parseInt(req.query.limit || "6", 10) || 6, 1), 20);
       const result = await searchYouTubeVideos(q, limit);
       res.json(result);
     } catch (err) {
-      res.status(500).json({ error: err.message || "Failed searching YouTube videos" });
+      console.error("[youtube/search]", err?.message);
+      res.status(500).json({ error: "Failed searching YouTube videos" });
     }
   });
   app.get("/api/v1/databases/external", (_req, res) => {
@@ -2719,18 +2908,28 @@ const demoMode = process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "p
     });
   });
   app.post("/api/v1/databases/external/test", (req, res) => {
-    const { id } = req.body;
+    const id = sanitizeText(req.body?.id, 128);
     if (!id) return res.status(400).json({ error: "Database ID is required" });
     const result = db.testDatabaseConnection(id);
     res.json(result);
   });
   app.post("/api/v1/databases/external", (req, res) => {
-    const actor = getActorUser(req);
-    const { name, provider, connectionUrl, region } = req.body;
-    if (!name || !provider || !connectionUrl) {
+    const actor = requireAdmin(req, res);
+    if (!actor) return;
+    const name = sanitizeText(req.body?.name, 80);
+    const provider = sanitizeText(req.body?.provider, 32);
+    const region = sanitizeText(req.body?.region, 80);
+    const connectionUrl = typeof req.body?.connectionUrl === "string" ? req.body.connectionUrl.slice(0, 2048) : "";
+    if (!name || name.length < 3 || !provider || !connectionUrl) {
       return res.status(400).json({ error: "Name, Provider, and Connection URL are required" });
     }
-    const created = db.addExternalDatabase({ name, provider, connectionUrl, region });
+    if (!["supabase", "neon", "upstash", "render", "railway", "sqlite_cloud"].includes(provider)) {
+      return res.status(400).json({ error: "Unsupported provider" });
+    }
+    if (!sanitizeUrl(connectionUrl) && !connectionUrl.startsWith("postgresql://") && !connectionUrl.startsWith("rediss://") && !connectionUrl.startsWith("https://")) {
+      return res.status(400).json({ error: "Invalid connection URL" });
+    }
+    const created = db.addExternalDatabase({ name, provider, connectionUrl, region: region || void 0 });
     db.recordAuditLog({
       actorId: actor.id,
       actorName: actor.name,
@@ -2740,7 +2939,7 @@ const demoMode = process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "p
       target: `${created.name} (${created.provider})`,
       source: detectSource(req),
       status: "SUCCESS",
-      ipAddress: req.ip || "194.230.14.88",
+      ipAddress: req.ip || "unknown",
       metadata: { provider: created.provider, region: created.region }
     });
     res.status(201).json({ success: true, database: created });
@@ -2762,7 +2961,7 @@ const demoMode = process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "p
     try {
       const actor = getActorUser(req);
       const source = detectSource(req);
-      const { type } = req.params;
+      const type = sanitizeText(req.params.type, 16);
       if (!["apk", "exe", "dmg", "appimage"].includes(type)) {
         return res.status(400).json({ error: "Invalid platform release type. Expected: apk, exe, dmg, appimage" });
       }
@@ -2801,35 +3000,57 @@ const demoMode = process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "p
 `
       ].join("\n");
       const buffer = Buffer.from(manifestHeader, "utf-8");
-      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+      res.setHeader("Content-Disposition", `attachment; filename="${sanitizeText(filename, 128)}"`);
       res.setHeader("Content-Type", contentType);
-      res.setHeader("X-Vanitas-Version", release.version);
-      res.setHeader("X-Vanitas-Checksum-SHA256", release.sha256);
+      res.setHeader("X-Vanitas-Version", sanitizeText(release.version, 32));
+      res.setHeader("X-Vanitas-Checksum-SHA256", sanitizeText(release.sha256, 128));
       res.setHeader("Content-Length", buffer.length);
       res.send(buffer);
     } catch (err) {
-      res.status(500).json({ error: err.message });
+      console.error("[download]", err?.message);
+      res.status(500).json({ error: "Download failed" });
     }
   });
-  if (process.env.NODE_ENV !== "production") {
-    (async () => {
-      const vite = await (0, import_vite.createServer)({
+  app.use((err, _req, res, _next) => {
+    console.error("[unhandled]", err?.message);
+    res.status(500).json({ error: "Internal server error" });
+  });
+  if (!process.env.VERCEL) {
+    if (process.env.NODE_ENV !== "production") {
+      const { createServer: createViteServer } = await import("vite");
+      const vite = await createViteServer({
         server: { middlewareMode: true },
         appType: "spa"
       });
       app.use(vite.middlewares);
-    })();
-  } else {
-    const distPath = import_path.default.join(process.cwd(), "dist");
-    app.use(import_express.default.static(distPath));
-    app.get("*", (_req, res) => {
-      res.sendFile(import_path.default.join(distPath, "index.html"));
-    });
+    } else {
+      const distPath = import_path.default.join(process.cwd(), "dist");
+      app.use(import_express.default.static(distPath));
+      app.get(/^(?!\/api\/).*/, (_req, res) => {
+        res.sendFile(import_path.default.join(distPath, "index.html"));
+      });
+    }
   }
-  if (process.env.NODE_ENV !== "production") {
-    app.listen(PORT, "0.0.0.0", () => {
-      console.log(`Vanitas Central Server running on http://0.0.0.0:${PORT}`);
-    });
+  return app;
+}
+async function startServer() {
+  const PORT = Number(process.env.PORT) || 3e3;
+  const app = await buildApp();
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Vanitas Central Server running on http://0.0.0.0:${PORT}`);
+  });
+}
+var server_default = buildApp;
+if (!process.env.VERCEL && (process.argv[1]?.endsWith("server.ts") || process.argv[1]?.endsWith("server.cjs"))) {
+  startServer();
+} else if (!process.env.VERCEL && process.env.NODE_ENV !== "test") {
+  if (!globalThis.__vanitas_listening) {
+    globalThis.__vanitas_listening = true;
+    startServer().catch((e) => console.error(e));
   }
-export default app;
+}
+// Annotate the CommonJS export names for ESM import in node:
+0 && (module.exports = {
+  buildApp
+});
 //# sourceMappingURL=server.cjs.map
