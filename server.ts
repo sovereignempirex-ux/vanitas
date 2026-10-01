@@ -1097,7 +1097,10 @@ export async function buildApp() {
   // ----------------------------------------------------
   if (!process.env.VERCEL) {
     if (process.env.NODE_ENV !== 'production') {
-      const { createServer: createViteServer } = await import('vite');
+      // Dev-only: build the specifier dynamically so bundlers/nft-tracers
+      // never pull the (huge, dev-only) vite package into a serverless bundle.
+      const viteSpecifier = ['v', 'ite'].join('');
+      const { createServer: createViteServer } = await import(viteSpecifier);
       const vite = await createViteServer({
         server: { middlewareMode: true },
         appType: 'spa',

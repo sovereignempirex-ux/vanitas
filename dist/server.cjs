@@ -3017,7 +3017,8 @@ async function buildApp() {
   });
   if (!process.env.VERCEL) {
     if (process.env.NODE_ENV !== "production") {
-      const { createServer: createViteServer } = await import("vite");
+      const viteSpecifier = ["v", "ite"].join("");
+      const { createServer: createViteServer } = await import(viteSpecifier);
       const vite = await createViteServer({
         server: { middlewareMode: true },
         appType: "spa"
