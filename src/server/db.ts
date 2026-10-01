@@ -50,6 +50,24 @@ export const ALL_SCOPES: { scope: PermissionScope; label: string; group: string;
   { scope: 'settings.write', label: 'Update Platform Settings', group: 'System', adminOnly: true },
 ];
 
+// ---------------------------------------------------------------------------
+// API key secret hashing
+// Raw secrets (sk_live_vanitas_…) are NEVER persisted. We keep only sha256 hex.
+// The hash is attached NON-ENUMERABLE so JSON.stringify can never leak it.
+// ---------------------------------------------------------------------------
+export function hashApiKeySecret(rawSecret: string): string {
+  return crypto.createHash('sha256').update(rawSecret, 'utf8').digest('hex');
+}
+
+export function attachSecretHash(key: ApiKey, hash: string): void {
+  Object.defineProperty(key, 'secretHash', {
+    value: hash,
+    enumerable: false,
+    writable: true,
+    configurable: true,
+  });
+}
+
 export class VanitasDatabase {
   productSuggestions: ProductSuggestion[] = [
     {
@@ -563,11 +581,14 @@ export class VanitasDatabase {
       currentUsageThisMonth: 0,
       currentRpmUsage: 0,
       usageCount: 0,
+      usagePeriod: new Date().toISOString().slice(0, 7),
       createdAt: new Date().toISOString(),
       lastUsedAt: null,
       expiresAt: params.expiresAt || null,
       environment: env,
     };
+    // sha256(secret) — non-enumerable so it is never serialized to any client.
+    attachSecretHash(newKey, hashApiKeySecret(rawSecret));
 
     this.apiKeys.unshift(newKey);
     this.systemStats.activeApiKeys = this.apiKeys.filter((k) => k.status === 'active').length;
@@ -603,6 +624,8 @@ export class VanitasDatabase {
     const keyPrefix = rawSecret.substring(0, 14);
     key.keyPrefix = keyPrefix;
     key.maskedSecret = `${keyPrefix}••••••••••••${rawSecret.slice(-4)}`;
+    // Invalidate the old secret: re-bind the hash to the freshly rotated value.
+    attachSecretHash(key, hashApiKeySecret(rawSecret));
 
     this.recordAuditLog({
       actorId: actor.id,

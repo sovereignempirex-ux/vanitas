@@ -17,7 +17,8 @@ import {
   fetchProfile,
 } from './src/server/oauth.ts';
 import { processAiQuery, diagnoseAndFixCode, performSemanticSearch, searchYouTubeVideos } from './src/server/aiService.ts';
-import { ClientSource, UserRole, PermissionScope, ProductSuggestion } from './src/types.ts';
+import { authenticateApiKey, requireScope, rateWindowStatus, nextQuotaReset } from './src/server/apiKeyAuth.ts';
+import { ClientSource, UserRole, PermissionScope, ProductSuggestion, ApiKey } from './src/types.ts';
 import { getActorUser, requireAdmin, rateLimit, sanitizeText, sanitizeUrl, csvCell, parsePagination, secureToken, secureId, isValidScope } from './src/server/security.ts';
 
 function mapSuggestion(row: Record<string, any>): ProductSuggestion {
@@ -86,13 +87,23 @@ export async function buildApp() {
       res.setHeader('Vary', 'Origin');
     }
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Request-Id');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Request-Id,X-Api-Key');
+    // Browser clients must be able to read the throttling headers we send back.
+    res.setHeader('Access-Control-Expose-Headers', 'X-RateLimit-Limit,X-RateLimit-Remaining,X-RateLimit-Reset,Retry-After');
     if (req.method === 'OPTIONS') return res.status(204).end();
     next();
   });
 
-  // Global abuse protection
-  app.use('/api/', rateLimit({ windowMs: 60_000, max: 300 }));
+  // Global abuse protection. /api/v1/public/* is the machine-to-machine
+  // surface (one key can legitimately burst), so it gets a wider per-IP
+  // backstop; per-key limits are enforced by authenticateApiKey itself.
+  const defaultLimiter = rateLimit({ windowMs: 60_000, max: 300 });
+  const publicLimiter = rateLimit({ windowMs: 60_000, max: 1200 });
+  app.use('/api/', (req, res, next) =>
+    (req.originalUrl || req.url).startsWith('/api/v1/public/')
+      ? publicLimiter(req, res, next)
+      : defaultLimiter(req, res, next),
+  );
   app.use('/api/v1/auth/', rateLimit({ windowMs: 60_000, max: 60 }));
   app.use('/api/v1/ai/', rateLimit({ windowMs: 60_000, max: 60 }));
   app.use('/api/v1/bot/', rateLimit({ windowMs: 60_000, max: 120 }));
@@ -104,7 +115,8 @@ export async function buildApp() {
       const auth = req.headers.authorization || '';
       const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
       const adminToken = process.env.ADMIN_API_TOKEN;
-      if (token && !(adminToken && token === adminToken)) {
+      // sk_* tokens are API keys (external integrations), never sessions.
+      if (token && !token.startsWith('sk_') && !(adminToken && token === adminToken)) {
         const user = await resolveSession(token);
         if (user) (req as any).actor = user;
       }
@@ -634,6 +646,108 @@ export async function buildApp() {
     } catch (err: any) {
       res.status(400).json({ error: 'Simulation failed' });
     }
+  });
+
+  // ---------------------------------------------------------------------------
+  // PUBLIC API — machine-to-machine surface for external integrations.
+  // Authenticated with an API key created in the dashboard:
+  //   x-api-key: sk_live_vanitas_...            (or)
+  //   Authorization: Bearer sk_live_vanitas_...
+  // Every response carries X-RateLimit-Limit/Remaining/Reset.
+  // ---------------------------------------------------------------------------
+
+  // Key liveness check (no scope required)
+  app.get('/api/v1/public/ping', authenticateApiKey, (req, res) => {
+    const key = (req as any).apiKey as ApiKey;
+    res.json({
+      ok: true,
+      key: { id: key.id, name: key.name, environment: key.environment, status: key.status, scopes: key.scopes },
+      serverTime: new Date().toISOString(),
+    });
+  });
+
+  // Key + owner + limits (no scope required)
+  app.get('/api/v1/public/me', authenticateApiKey, (req, res) => {
+    const key = (req as any).apiKey as ApiKey;
+    const quota = key.monthlyQuota || 0;
+    const used = key.currentUsageThisMonth || 0;
+    res.json({
+      key: {
+        id: key.id,
+        name: key.name,
+        keyPrefix: key.keyPrefix,
+        maskedSecret: key.maskedSecret,
+        scopes: key.scopes,
+        status: key.status,
+        environment: key.environment,
+        createdAt: key.createdAt,
+        expiresAt: key.expiresAt,
+        lastUsedAt: key.lastUsedAt,
+        usageCount: key.usageCount,
+        usagePeriod: key.usagePeriod,
+      },
+      // Registered users live in the auth store (PG), not db.users — so the
+      // owner is reported from the key record itself, never looked up.
+      owner: { id: key.ownerId, name: key.ownerName },
+      limits: {
+        rateLimitPerMin: key.rateLimitPerMin,
+        burstLimit: key.burstLimit,
+        rateLimitAlgorithm: key.rateLimitAlgorithm || 'sliding_window',
+        actionOnExceed: key.actionOnExceed || 'reject_429',
+        monthlyQuota: quota,
+        usedThisMonth: used,
+        remainingQuota: quota > 0 ? Math.max(0, quota - used) : null,
+        quotaResetsAt: nextQuotaReset(),
+      },
+    });
+  });
+
+  // Service status (requires the api.read scope)
+  app.get('/api/v1/public/status', authenticateApiKey, requireScope('api.read'), async (_req, res) => {
+    let database: 'connected' | 'unreachable' | 'in-memory-fallback';
+    if (databasePool) {
+      try {
+        await databasePool.query('select 1');
+        database = 'connected';
+      } catch {
+        database = 'unreachable';
+      }
+    } else {
+      database = 'in-memory-fallback';
+    }
+
+    const stats = db.systemStats;
+    res.json({
+      status: database === 'unreachable' ? 'degraded' : 'operational',
+      database,
+      services: stats.services,
+      stats: {
+        apiRequestsToday: stats.apiRequestsToday,
+        p95LatencyMs: stats.p95LatencyMs,
+        errorRate: stats.errorRate,
+        activeApiKeys: stats.activeApiKeys,
+      },
+      uptimeSeconds: Math.round(process.uptime()),
+      serverTime: new Date().toISOString(),
+    });
+  });
+
+  // Own usage / quota (no scope required — callers may always see their own)
+  app.get('/api/v1/public/quota', authenticateApiKey, (req, res) => {
+    const key = (req as any).apiKey as ApiKey;
+    const quota = key.monthlyQuota || 0;
+    const used = key.currentUsageThisMonth || 0;
+    res.json({
+      key: { id: key.id, name: key.name },
+      quota: {
+        limit: quota,
+        used,
+        remaining: quota > 0 ? Math.max(0, quota - used) : null,
+        period: key.usagePeriod,
+        resetsAt: nextQuotaReset(),
+      },
+      rate: rateWindowStatus(key),
+    });
   });
 
   // Admin Users List

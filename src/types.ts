@@ -64,6 +64,13 @@ export interface ApiKey {
   currentUsageThisMonth?: number;
   currentRpmUsage?: number;
   usageCount: number;
+  /**
+   * sha256 hex of the raw secret. Defined NON-ENUMERABLE on the object at
+   * runtime (Object.defineProperty) so JSON.stringify can never leak it.
+   */
+  secretHash?: string;
+  /** Quota period 'YYYY-MM' — currentUsageThisMonth resets when this rolls. */
+  usagePeriod?: string;
   createdAt: string;
   lastUsedAt: string | null;
   expiresAt: string | null;

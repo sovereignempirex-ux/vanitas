@@ -207,5 +207,49 @@ await must('identities cascade-delete with their user', async () => {
   if (r.rows.length) throw new Error('orphan identity remains');
 });
 
+// ---- 4. api_keys (external API-key auth) ----------------------------------
+await must('api_keys table exists, stores only the sha256 hash', async () => {
+  const cols = await db.query(
+    `select column_name from information_schema.columns where table_schema='public' and table_name='api_keys'`,
+  );
+  const names = cols.rows.map((r) => r.column_name);
+  if (!names.includes('secret_hash')) throw new Error('secret_hash column missing');
+  if (names.includes('secret') || names.includes('raw_secret')) throw new Error('raw secret column present!');
+  const nullable = await db.query(
+    `select is_nullable from information_schema.columns where table_schema='public' and table_name='api_keys' and column_name='secret_hash'`,
+  );
+  if (String(nullable.rows[0]?.is_nullable).toLowerCase() !== 'no') throw new Error('secret_hash must be NOT NULL');
+});
+
+await must('RLS enabled on api_keys with no anon policies', async () => {
+  const r = await db.query(`select relrowsecurity from pg_class where oid = 'public.api_keys'::regclass`);
+  if (!r.rows[0]?.relrowsecurity) throw new Error('row security is OFF');
+  const p = await db.query(`select count(*)::int as n from pg_policies where tablename = 'api_keys'`);
+  if (p.rows[0].n !== 0) throw new Error(`unexpected permissive policies: ${p.rows[0].n}`);
+});
+
+await must('api_keys insert + lookup by secret_hash', async () => {
+  await db.query(
+    `insert into public.api_keys (id, name, key_prefix, secret_hash, owner_id, owner_name, scopes, status, environment, rate_limit_per_min, monthly_quota, usage_count)
+     values ($1, $2, $3, $4, $5, $6, array['api.read','bot.execute'], 'active', 'live', 600, 300000, 0)`,
+    ['key_sql_1', 'SQL Check Key', 'sk_live_vanit', 'a'.repeat(64), 'usr_sql', 'SQL User'],
+  );
+  const r = await db.query(`select * from public.api_keys where secret_hash = $1`, ['a'.repeat(64)]);
+  if (r.rows.length !== 1) throw new Error('secret_hash lookup failed');
+  if (r.rows[0].status !== 'active' || r.rows[0].rate_limit_per_min !== 600) throw new Error('row mismatch');
+  await db.query(`delete from public.api_keys where id = $1`, ['key_sql_1']);
+});
+
+await must('api_keys revoked status round-trips (middleware reads it)', async () => {
+  await db.query(
+    `insert into public.api_keys (id, name, key_prefix, secret_hash, owner_id, owner_name, scopes, status)
+     values ('key_sql_2', 'Revoked Key', 'sk_live_vanit', $1, 'usr_sql', 'SQL User', array['api.read'], 'revoked')`,
+    ['b'.repeat(64)],
+  );
+  const r = await db.query(`select status from public.api_keys where id = 'key_sql_2'`);
+  if (r.rows[0]?.status !== 'revoked') throw new Error('status did not round-trip');
+  await db.query(`delete from public.api_keys where id = 'key_sql_2'`);
+});
+
 console.log(failures ? `\n${failures} FAILED` : '\nALL SQL CHECKS PASSED');
 process.exit(failures ? 1 : 0);

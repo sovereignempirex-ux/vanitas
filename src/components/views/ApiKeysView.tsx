@@ -1729,6 +1729,15 @@ export const ApiKeysView: React.FC = () => {
               </div>
             </div>
 
+            {/* Quick smoke-test for external integrators */}
+            <div className="mt-3">
+              <label className="block text-[11px] font-mono uppercase text-slate-400">Quick test (curl)</label>
+              <div className="mt-1 rounded-xl border border-white/10 bg-slate-900/90 p-3 font-mono text-[11px] text-slate-300">
+                <code className="block break-all whitespace-pre-wrap">{`curl -H "x-api-key: ${revealedSecret.rawSecret}" \\
+  https://vanitas-bot.vercel.app/api/v1/public/ping`}</code>
+              </div>
+            </div>
+
             <div className="mt-6 flex justify-end">
               <button
                 onClick={() => setRevealedSecret(null)}

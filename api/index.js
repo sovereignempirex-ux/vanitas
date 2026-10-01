@@ -10,6 +10,17 @@ var __export = (target, all) => {
 
 // src/server/db.ts
 import crypto from "crypto";
+function hashApiKeySecret(rawSecret) {
+  return crypto.createHash("sha256").update(rawSecret, "utf8").digest("hex");
+}
+function attachSecretHash(key, hash) {
+  Object.defineProperty(key, "secretHash", {
+    value: hash,
+    enumerable: false,
+    writable: true,
+    configurable: true
+  });
+}
 var ALL_SCOPES, VanitasDatabase, db;
 var init_db = __esm({
   "src/server/db.ts"() {
@@ -521,11 +532,13 @@ var init_db = __esm({
           currentUsageThisMonth: 0,
           currentRpmUsage: 0,
           usageCount: 0,
+          usagePeriod: (/* @__PURE__ */ new Date()).toISOString().slice(0, 7),
           createdAt: (/* @__PURE__ */ new Date()).toISOString(),
           lastUsedAt: null,
           expiresAt: params.expiresAt || null,
           environment: env2
         };
+        attachSecretHash(newKey, hashApiKeySecret(rawSecret));
         this.apiKeys.unshift(newKey);
         this.systemStats.activeApiKeys = this.apiKeys.filter((k) => k.status === "active").length;
         this.recordAuditLog({
@@ -555,6 +568,7 @@ var init_db = __esm({
         const keyPrefix = rawSecret.substring(0, 14);
         key.keyPrefix = keyPrefix;
         key.maskedSecret = `${keyPrefix}\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022${rawSecret.slice(-4)}`;
+        attachSecretHash(key, hashApiKeySecret(rawSecret));
         this.recordAuditLog({
           actorId: actor.id,
           actorName: actor.name,
@@ -2671,6 +2685,284 @@ var init_aiService = __esm({
   }
 });
 
+// src/server/apiKeyAuth.ts
+import crypto5 from "crypto";
+function stateFor(key) {
+  let state = rateStates.get(key.id);
+  if (!state) {
+    state = { hits: [], windowStart: 0, windowCount: 0, tokens: 0, lastRefill: 0 };
+    rateStates.set(key.id, state);
+  }
+  return state;
+}
+function bucketCapacity(key) {
+  const configured = Number(key.burstLimit) || 0;
+  if (configured > 0) return configured;
+  return Math.max(1, Math.round((key.rateLimitPerMin || 600) * 0.05));
+}
+function peekRateLimit(key, now) {
+  const limit = Math.max(1, key.rateLimitPerMin || 600);
+  const algorithm = key.rateLimitAlgorithm || "sliding_window";
+  const state = stateFor(key);
+  if (algorithm === "token_bucket") {
+    const capacity = bucketCapacity(key);
+    const refillPerMs = limit / WINDOW_MS;
+    if (state.lastRefill === 0) {
+      state.tokens = capacity;
+      state.lastRefill = now;
+    }
+    const elapsed = now - state.lastRefill;
+    if (elapsed > 0) {
+      state.tokens = Math.min(capacity, state.tokens + elapsed * refillPerMs);
+      state.lastRefill = now;
+    }
+    const allowed2 = state.tokens >= 1;
+    const resetAtSec = Math.ceil((now + (capacity - state.tokens) / refillPerMs) / 1e3);
+    return {
+      allowed: allowed2,
+      limit,
+      windowCount: Math.round(capacity - state.tokens),
+      remaining: Math.max(0, Math.floor(state.tokens)),
+      resetAtSec,
+      retryAfterMs: allowed2 ? 0 : Math.ceil((1 - state.tokens) / refillPerMs)
+    };
+  }
+  if (algorithm === "fixed_window") {
+    const windowStart = Math.floor(now / WINDOW_MS) * WINDOW_MS;
+    if (state.windowStart !== windowStart) {
+      state.windowStart = windowStart;
+      state.windowCount = 0;
+    }
+    const allowed2 = state.windowCount < limit;
+    const resetAtMs2 = windowStart + WINDOW_MS;
+    return {
+      allowed: allowed2,
+      limit,
+      windowCount: state.windowCount,
+      remaining: Math.max(0, limit - state.windowCount),
+      resetAtSec: Math.ceil(resetAtMs2 / 1e3),
+      retryAfterMs: allowed2 ? 0 : resetAtMs2 - now
+    };
+  }
+  state.hits = state.hits.filter((t) => now - t < WINDOW_MS);
+  const allowed = state.hits.length < limit;
+  const resetAtMs = (state.hits[0] ?? now) + WINDOW_MS;
+  return {
+    allowed,
+    limit,
+    windowCount: state.hits.length,
+    remaining: Math.max(0, limit - state.hits.length),
+    resetAtSec: Math.ceil(resetAtMs / 1e3),
+    retryAfterMs: allowed ? 0 : resetAtMs - now
+  };
+}
+function recordRateLimit(key, now) {
+  const algorithm = key.rateLimitAlgorithm || "sliding_window";
+  const state = stateFor(key);
+  if (algorithm === "fixed_window") {
+    const windowStart = Math.floor(now / WINDOW_MS) * WINDOW_MS;
+    if (state.windowStart !== windowStart) {
+      state.windowStart = windowStart;
+      state.windowCount = 0;
+    }
+    state.windowCount += 1;
+    return;
+  }
+  if (algorithm === "token_bucket") {
+    const capacity = bucketCapacity(key);
+    const refillPerMs = Math.max(1, key.rateLimitPerMin || 600) / WINDOW_MS;
+    if (state.lastRefill === 0) {
+      state.tokens = capacity;
+      state.lastRefill = now;
+    }
+    const elapsed = now - state.lastRefill;
+    if (elapsed > 0) {
+      state.tokens = Math.min(capacity, state.tokens + elapsed * refillPerMs);
+      state.lastRefill = now;
+    }
+    state.tokens = Math.max(0, state.tokens - 1);
+    return;
+  }
+  state.hits = state.hits.filter((t) => now - t < WINDOW_MS);
+  state.hits.push(now);
+}
+function setRateHeaders(res, decision) {
+  res.setHeader("X-RateLimit-Limit", String(decision.limit));
+  res.setHeader("X-RateLimit-Remaining", String(Math.max(0, decision.remaining)));
+  res.setHeader("X-RateLimit-Reset", String(decision.resetAtSec));
+}
+function currentPeriod() {
+  return (/* @__PURE__ */ new Date()).toISOString().slice(0, 7);
+}
+function nextQuotaReset() {
+  const now = /* @__PURE__ */ new Date();
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)).toISOString();
+}
+function extractApiKey(req) {
+  const header = req.headers["x-api-key"];
+  const raw = (Array.isArray(header) ? header[0] : header || "").trim();
+  if (raw && raw.length <= MAX_KEY_LENGTH) return raw;
+  const auth = req.headers.authorization || "";
+  if (auth.startsWith("Bearer ")) {
+    const token = auth.slice(7).trim();
+    if (token.startsWith("sk_") && token.length <= MAX_KEY_LENGTH) return token;
+  }
+  return null;
+}
+function findKeyBySecret(raw) {
+  const digest = hashApiKeySecret(raw);
+  const target = Buffer.from(digest, "utf8");
+  for (const key of db.apiKeys) {
+    const stored = key.secretHash;
+    if (typeof stored !== "string" || stored.length !== target.length) continue;
+    if (crypto5.timingSafeEqual(Buffer.from(stored, "utf8"), target)) return key;
+  }
+  return null;
+}
+function maybeAlertRateLimit(req, key, decision) {
+  const now = Date.now();
+  const last = lastAlerts.get(key.id) || 0;
+  if (now - last < ALERT_THROTTLE_MS) return;
+  lastAlerts.set(key.id, now);
+  try {
+    db.recordAuditLog({
+      actorId: key.ownerId,
+      actorName: key.ownerName,
+      actorEmail: db.users.find((u) => u.id === key.ownerId)?.email || "",
+      action: "API_KEY_RATE_LIMIT_EXCEEDED",
+      category: "API",
+      target: `${key.id} (${key.name})`,
+      source: "APPLICATION",
+      status: "WARNING",
+      ipAddress: req.ip || "unknown",
+      metadata: {
+        path: req.originalUrl,
+        limit: decision.limit,
+        algorithm: key.rateLimitAlgorithm || "sliding_window",
+        action: "alert_only"
+      }
+    });
+  } catch (err) {
+    console.error("[apiKeyAuth] audit write failed:", err.message);
+  }
+}
+async function runApiKeyAuth(req, res, next) {
+  const raw = extractApiKey(req);
+  if (!raw) {
+    res.status(401).json({
+      error: "API key required",
+      hint: "Send x-api-key: sk_... or Authorization: Bearer sk_..."
+    });
+    return;
+  }
+  const key = findKeyBySecret(raw);
+  if (!key) {
+    res.status(401).json({ error: "Invalid API key" });
+    return;
+  }
+  if (key.status === "revoked") {
+    res.status(403).json({ error: "API key revoked", keyId: key.id });
+    return;
+  }
+  if (key.status === "suspended") {
+    res.status(403).json({ error: "API key suspended", keyId: key.id });
+    return;
+  }
+  if (key.expiresAt && Date.parse(key.expiresAt) < Date.now()) {
+    res.status(403).json({ error: "API key expired", expiresAt: key.expiresAt });
+    return;
+  }
+  const period = currentPeriod();
+  if (key.usagePeriod !== period) {
+    key.usagePeriod = period;
+    key.currentUsageThisMonth = 0;
+  }
+  const now = Date.now();
+  let decision = peekRateLimit(key, now);
+  setRateHeaders(res, decision);
+  const quota = key.monthlyQuota || 0;
+  const used = key.currentUsageThisMonth || 0;
+  if (quota > 0 && used >= quota) {
+    const resetsAt = nextQuotaReset();
+    const retryAfterSec = Math.max(1, Math.ceil((Date.parse(resetsAt) - Date.now()) / 1e3));
+    res.setHeader("Retry-After", String(retryAfterSec));
+    res.status(429).json({ error: "Monthly quota exceeded", quota, used, resetsAt });
+    return;
+  }
+  if (!decision.allowed) {
+    const action = key.actionOnExceed || "reject_429";
+    if (action === "throttle_delay") {
+      await sleep(Math.min(MAX_THROTTLE_SLEEP_MS, Math.max(0, decision.retryAfterMs)));
+      recordRateLimit(key, Date.now());
+    } else if (action === "alert_only") {
+      recordRateLimit(key, now);
+      maybeAlertRateLimit(req, key, decision);
+    } else {
+      const retryAfterSec = Math.max(1, Math.ceil(decision.retryAfterMs / 1e3));
+      res.setHeader("Retry-After", String(retryAfterSec));
+      res.status(429).json({
+        error: "Rate limit exceeded",
+        limit: decision.limit,
+        windowSeconds: Math.round(WINDOW_MS / 1e3),
+        retryAfter: retryAfterSec
+      });
+      return;
+    }
+  } else {
+    recordRateLimit(key, now);
+  }
+  decision = peekRateLimit(key, Date.now());
+  setRateHeaders(res, decision);
+  key.usageCount += 1;
+  key.currentUsageThisMonth = (key.currentUsageThisMonth || 0) + 1;
+  key.currentRpmUsage = decision.windowCount;
+  key.lastUsedAt = (/* @__PURE__ */ new Date()).toISOString();
+  req.apiKey = key;
+  next();
+}
+function authenticateApiKey(req, res, next) {
+  runApiKeyAuth(req, res, next).catch(next);
+}
+function requireScope(scope) {
+  return (req, res, next) => {
+    const key = req.apiKey;
+    if (!key) {
+      res.status(401).json({ error: "API key required" });
+      return;
+    }
+    if (!key.scopes.includes(scope)) {
+      res.status(403).json({ error: `Missing required scope: ${scope}`, grantedScopes: key.scopes });
+      return;
+    }
+    next();
+  };
+}
+function rateWindowStatus(key) {
+  const now = Date.now();
+  const decision = peekRateLimit(key, now);
+  return {
+    algorithm: key.rateLimitAlgorithm || "sliding_window",
+    limitPerMin: decision.limit,
+    windowCount: decision.windowCount,
+    remaining: decision.remaining,
+    resetAt: new Date(decision.resetAtSec * 1e3).toISOString(),
+    retryAfterMs: decision.retryAfterMs
+  };
+}
+var MAX_KEY_LENGTH, WINDOW_MS, MAX_THROTTLE_SLEEP_MS, ALERT_THROTTLE_MS, sleep, rateStates, lastAlerts;
+var init_apiKeyAuth = __esm({
+  "src/server/apiKeyAuth.ts"() {
+    init_db();
+    MAX_KEY_LENGTH = 300;
+    WINDOW_MS = 6e4;
+    MAX_THROTTLE_SLEEP_MS = 2e3;
+    ALERT_THROTTLE_MS = 6e4;
+    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    rateStates = /* @__PURE__ */ new Map();
+    lastAlerts = /* @__PURE__ */ new Map();
+  }
+});
+
 // server.ts
 var server_exports = {};
 __export(server_exports, {
@@ -2679,7 +2971,7 @@ __export(server_exports, {
 });
 import express from "express";
 import path from "path";
-import crypto5 from "crypto";
+import crypto6 from "crypto";
 function mapSuggestion(row) {
   return {
     id: row.id,
@@ -2735,11 +3027,17 @@ async function buildApp() {
       res.setHeader("Vary", "Origin");
     }
     res.setHeader("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Request-Id");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Request-Id,X-Api-Key");
+    res.setHeader("Access-Control-Expose-Headers", "X-RateLimit-Limit,X-RateLimit-Remaining,X-RateLimit-Reset,Retry-After");
     if (req.method === "OPTIONS") return res.status(204).end();
     next();
   });
-  app.use("/api/", rateLimit({ windowMs: 6e4, max: 300 }));
+  const defaultLimiter = rateLimit({ windowMs: 6e4, max: 300 });
+  const publicLimiter = rateLimit({ windowMs: 6e4, max: 1200 });
+  app.use(
+    "/api/",
+    (req, res, next) => (req.originalUrl || req.url).startsWith("/api/v1/public/") ? publicLimiter(req, res, next) : defaultLimiter(req, res, next)
+  );
   app.use("/api/v1/auth/", rateLimit({ windowMs: 6e4, max: 60 }));
   app.use("/api/v1/ai/", rateLimit({ windowMs: 6e4, max: 60 }));
   app.use("/api/v1/bot/", rateLimit({ windowMs: 6e4, max: 120 }));
@@ -2748,7 +3046,7 @@ async function buildApp() {
       const auth = req.headers.authorization || "";
       const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
       const adminToken2 = process.env.ADMIN_API_TOKEN;
-      if (token && !(adminToken2 && token === adminToken2)) {
+      if (token && !token.startsWith("sk_") && !(adminToken2 && token === adminToken2)) {
         const user = await resolveSession(token);
         if (user) req.actor = user;
       }
@@ -2776,7 +3074,7 @@ async function buildApp() {
   });
   app.use((req, _res, next) => {
     const incoming = sanitizeText(req.headers["x-request-id"], 64);
-    req.requestId = incoming || crypto5.randomUUID();
+    req.requestId = incoming || crypto6.randomUUID();
     next();
   });
   function detectSource(req) {
@@ -3194,6 +3492,91 @@ async function buildApp() {
       res.status(400).json({ error: "Simulation failed" });
     }
   });
+  app.get("/api/v1/public/ping", authenticateApiKey, (req, res) => {
+    const key = req.apiKey;
+    res.json({
+      ok: true,
+      key: { id: key.id, name: key.name, environment: key.environment, status: key.status, scopes: key.scopes },
+      serverTime: (/* @__PURE__ */ new Date()).toISOString()
+    });
+  });
+  app.get("/api/v1/public/me", authenticateApiKey, (req, res) => {
+    const key = req.apiKey;
+    const quota = key.monthlyQuota || 0;
+    const used = key.currentUsageThisMonth || 0;
+    res.json({
+      key: {
+        id: key.id,
+        name: key.name,
+        keyPrefix: key.keyPrefix,
+        maskedSecret: key.maskedSecret,
+        scopes: key.scopes,
+        status: key.status,
+        environment: key.environment,
+        createdAt: key.createdAt,
+        expiresAt: key.expiresAt,
+        lastUsedAt: key.lastUsedAt,
+        usageCount: key.usageCount,
+        usagePeriod: key.usagePeriod
+      },
+      // Registered users live in the auth store (PG), not db.users — so the
+      // owner is reported from the key record itself, never looked up.
+      owner: { id: key.ownerId, name: key.ownerName },
+      limits: {
+        rateLimitPerMin: key.rateLimitPerMin,
+        burstLimit: key.burstLimit,
+        rateLimitAlgorithm: key.rateLimitAlgorithm || "sliding_window",
+        actionOnExceed: key.actionOnExceed || "reject_429",
+        monthlyQuota: quota,
+        usedThisMonth: used,
+        remainingQuota: quota > 0 ? Math.max(0, quota - used) : null,
+        quotaResetsAt: nextQuotaReset()
+      }
+    });
+  });
+  app.get("/api/v1/public/status", authenticateApiKey, requireScope("api.read"), async (_req, res) => {
+    let database;
+    if (databasePool) {
+      try {
+        await databasePool.query("select 1");
+        database = "connected";
+      } catch {
+        database = "unreachable";
+      }
+    } else {
+      database = "in-memory-fallback";
+    }
+    const stats = db.systemStats;
+    res.json({
+      status: database === "unreachable" ? "degraded" : "operational",
+      database,
+      services: stats.services,
+      stats: {
+        apiRequestsToday: stats.apiRequestsToday,
+        p95LatencyMs: stats.p95LatencyMs,
+        errorRate: stats.errorRate,
+        activeApiKeys: stats.activeApiKeys
+      },
+      uptimeSeconds: Math.round(process.uptime()),
+      serverTime: (/* @__PURE__ */ new Date()).toISOString()
+    });
+  });
+  app.get("/api/v1/public/quota", authenticateApiKey, (req, res) => {
+    const key = req.apiKey;
+    const quota = key.monthlyQuota || 0;
+    const used = key.currentUsageThisMonth || 0;
+    res.json({
+      key: { id: key.id, name: key.name },
+      quota: {
+        limit: quota,
+        used,
+        remaining: quota > 0 ? Math.max(0, quota - used) : null,
+        period: key.usagePeriod,
+        resetsAt: nextQuotaReset()
+      },
+      rate: rateWindowStatus(key)
+    });
+  });
   app.get("/api/v1/admin/users", (req, res) => {
     if (!requireAdmin(req, res)) return;
     res.json({ users: db.users });
@@ -3401,7 +3784,7 @@ async function buildApp() {
       event: "ping.test",
       status: "delivered",
       statusCode: 200,
-      latencyMs: 90 + crypto5.randomInt(80),
+      latencyMs: 90 + crypto6.randomInt(80),
       timestamp: (/* @__PURE__ */ new Date()).toISOString(),
       payload: { event: "ping.test", timestamp: (/* @__PURE__ */ new Date()).toISOString(), message: "Vanitas ping verification handshake" }
     };
@@ -3769,6 +4152,7 @@ var init_server = __esm({
     init_authStore();
     init_oauth();
     init_aiService();
+    init_apiKeyAuth();
     init_security();
     server_default = buildApp;
     if (!process.env.VERCEL && (process.argv[1]?.endsWith("server.ts") || process.argv[1]?.endsWith("server.cjs"))) {

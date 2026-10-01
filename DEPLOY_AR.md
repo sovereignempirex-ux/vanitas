@@ -142,3 +142,97 @@ FRONTEND_URL=https://<رابطك>
 > ملاحظة: روابط الـ callback هذه تظهر أيضاً في `.env.example` تحت قسم
 > Social login.
 
+## 8) مفاتيح API الخارجية — الاختبار بـ cURL
+
+نظام المفاتيح يعمل الآن فعلياً: تنشئ المفتاح من لوحة التحكم
+(قسم **API Keys**)، ثم تستخدمه في أي طلب خارجي. المُعرِّف الوحيد المخزَّن
+هو بصمة `sha256` للمُفتاح الخام — **لا يُخزَّن المُفتاح نفسه أبداً**،
+ويُعرض مرة واحدة فقط عند الإنشاء أو التدوير (Rotate).
+
+### أنواع المفاتيح
+
+| النوع | الاستخدام |
+|---|---|
+| `sk_live_vanitas_...` | بيئة الإنتاج (الافتراضي) |
+| `sk_test_vanitas_...` | بيئة الاختبار (عند اختيار `test`) |
+
+### 1) إرسال المفتاح
+
+طريقتان مُتكافئتان — اختر أيهما يناسبك:
+
+```bash
+# الطريقة الأولى: ترويسة مخصصة
+curl -H "x-api-key: sk_live_vanitas_XXXXXXXXXXXXXXXXX" \
+  https://vanitas-bot.vercel.app/api/v1/public/ping
+
+# الطريقة الثانية: Authorization Bearer
+curl -H "Authorization: Bearer sk_live_vanitas_XXXXXXXXXXXXXXXXX" \
+  https://vanitas-bot.vercel.app/api/v1/public/ping
+```
+
+### 2) نقاط النهاية المتاحة
+
+```bash
+BASE=https://vanitas-bot.vercel.app/api/v1
+KEY="sk_live_vanitas_XXXXXXXXXXXXXXXXX"
+
+# التحقق من المفتاح (بدون نطاقات)
+curl -H "x-api-key: $KEY" $BASE/public/ping
+
+# بيانات المفتاح + المالك + الحدود (بدون نطاقات)
+curl -H "x-api-key: $KEY" $BASE/public/me
+
+# حالة الخدمات — يتطلب النطاق api.read
+curl -H "x-api-key: $KEY" $BASE/public/status
+
+# استهلاكك الشهري ونافذة الحصة (بدون نطاقات)
+curl -H "x-api-key: $KEY" $BASE/public/quota
+```
+
+### 3) ترويسات الحصة (Rate Limit)
+
+كل رد يحمل:
+
+```
+X-RateLimit-Limit: 600
+X-RateLimit-Remaining: 594
+X-RateLimit-Reset: 1767225600
+```
+
+عند تجاوز الحصة (أو نفاد الحصة الشهرية) يعود:
+
+- `429 Too Many Requests` + ترويسة `Retry-After` (بالثواني)
+- `X-RateLimit-Remaining: 0`
+
+### 4) أخطاء المصادقة الشائعة
+
+| الحالة | الكود | المعنى |
+|---|---|---|
+| بدون مفتاح | 401 | `API key required` |
+| مفتاح خاطئ | 401 | `Invalid API key` |
+| مفتاح مُلغى (Revoke) | 403 | `API key revoked` |
+| مفتاح منتهي (انتهت مدته) | 403 | `API key expired` |
+| النطاق المطلوب غير ممنوح | 403 | `Missing required scope: api.read` |
+| تجاوز الدقيقة أو الشهر | 429 | `Rate limit exceeded` / `Monthly quota exceeded` |
+
+### 5) إعدادات كل مفتاح (من اللوحة)
+
+- `rateLimitPerMin` — عدد الطلبات بالدقيقة (10 – 10000)
+- `rateLimitAlgorithm` — `sliding_window` | `fixed_window` | `token_bucket`
+- `burstLimit` — سعة الانفجار لخوارزمية `token_bucket`
+- `actionOnExceed` — `reject_429` (افتراضي) | `throttle_delay` | `alert_only`
+- `monthlyQuota` — الحصة الشهرية (0 = بلا حد)
+- `scopes` — النطاقات الممنوحة للمفتاح
+
+مثال على تغيير الإعدادات:
+
+```bash
+curl -X PATCH -H "Authorization: Bearer <جلسة اللوحة>" \
+  -H "content-type: application/json" \
+  -d '{"rateLimitPerMin":600,"actionOnExceed":"throttle_delay"}' \
+  https://vanitas-bot.vercel.app/api/v1/api-keys/<id>/rate-limit
+```
+
+> تنبيه: عند `throttle_delay` تُؤخَّر الطلب بدل رفضه (بحد أقصى ثانيتين)،
+> وعند `alert_only` تمر كل الطلبات مع تسجيل تنبيه في سجل التدقيق.
+
