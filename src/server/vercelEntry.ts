@@ -1,7 +1,10 @@
-// Vercel serverless entry (Node runtime).
-// Wraps the Express app from ../server.ts and converts ANY boot/invocation
-// failure into a readable JSON payload instead of the opaque
-// FUNCTION_INVOCATION_FAILED page, so incidents are diagnosable.
+// Vercel serverless entry — SOURCE file.
+// Vercel only ships plain JS into its lambda, so this source is compiled by
+// `npm run build` into the committed bundle `api/index.js`
+// (esbuild, ESM, node platform). Do NOT import this file from Vercel directly.
+//
+// The wrapper converts ANY boot/invocation failure into a readable JSON
+// payload instead of the opaque FUNCTION_INVOCATION_FAILED page.
 
 type AnyReq = any;
 type AnyRes = any;
@@ -11,7 +14,7 @@ let currentRes: AnyRes | null = null;
 
 function loadApp(): Promise<any> {
   if (!appPromise) {
-    appPromise = import('../server.ts')
+    appPromise = import('../../server.ts')
       .then((mod: any) => {
         const buildApp = mod.default;
         if (typeof buildApp !== 'function') {
@@ -36,7 +39,6 @@ function fail(res: AnyRes | null, stage: string, err: any): void {
       .split('\n')
       .slice(0, 10)
       .join('\n'),
-    runtime: typeof (globalThis as any).Bun !== 'undefined' ? 'bun' : 'node',
     node: process.version,
     vercel: process.env.VERCEL ? '1' : '',
     nodeEnv: process.env.NODE_ENV || '',
