@@ -109,12 +109,12 @@ r = await call('GET', '/auth/providers');
 const prov = r.json?.providers || {};
 check('providers endpoint lists discord/google/github', prov.discord === false && prov.google === false && prov.github === false, r.json);
 
-const startRes = await fetch(`${BASE}/auth/oauth/discord`, { redirect: 'manual' });
+const startRes = await fetch(`${BASE}/social/discord`, { redirect: 'manual' });
 check('oauth start without keys → 3xx redirect', startRes.status >= 300 && startRes.status < 400, { status: startRes.status });
 const startLoc = startRes.headers.get('location') || '';
 check('redirect reports not_configured', startLoc.includes('vnt_error=not_configured'), startLoc);
 
-const unknownRes = await fetch(`${BASE}/auth/oauth/nonsense`, { redirect: 'manual' });
+const unknownRes = await fetch(`${BASE}/social/nonsense`, { redirect: 'manual' });
 const unknownLoc = unknownRes.headers.get('location') || '';
 check('unknown provider → unknown_provider', unknownLoc.includes('vnt_error=unknown_provider'), unknownLoc);
 

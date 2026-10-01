@@ -114,14 +114,14 @@ curl -X PATCH https://<رابطك>/api/v1/admin/users/<userId>/role \
 
 1. **Discord** — https://discord.com/developers/applications → New Application
    → OAuth2 → أضف Redirect:
-   `https://<رابطك>/api/v1/auth/oauth/discord/callback`
+   `https://<رابطك>/api/v1/social/discord/callback`
    ثم انسخ *Application ID* و *Client Secret*.
 2. **Google** — https://console.cloud.google.com/apis/credentials
    → Create OAuth client ID (Web application) → Authorized redirect URI:
-   `https://<رابطك>/api/v1/auth/oauth/google/callback`
+   `https://<رابطك>/api/v1/social/google/callback`
 3. **GitHub** — https://github.com/settings/developers → New OAuth App
    → Authorization callback URL:
-   `https://<رابطك>/api/v1/auth/oauth/github/callback`
+   `https://<رابطك>/api/v1/social/github/callback`
 
 ### إضافة المفاتيح في Vercel
 

@@ -143,7 +143,10 @@ export function appBaseUrl(req: Request): string {
 }
 
 export function callbackUrl(req: Request, provider: OAuthProvider): string {
-  return `${appBaseUrl(req)}/api/v1/auth/oauth/${provider}/callback`;
+  // NOTE: intentionally NOT under /auth/oauth — Vercel's edge routes any
+  // "/oauth/<seg>" GET to index.html before the lambda sees it (observed on
+  // production). "/social/..." reaches the function reliably.
+  return `${appBaseUrl(req)}/api/v1/social/${provider}/callback`;
 }
 
 export function buildAuthorizeUrl(cfg: OAuthConfig, state: string, redirectUri: string): string {

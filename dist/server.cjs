@@ -1640,7 +1640,7 @@ function appBaseUrl(req) {
   return `${proto}://${host}`;
 }
 function callbackUrl(req, provider) {
-  return `${appBaseUrl(req)}/api/v1/auth/oauth/${provider}/callback`;
+  return `${appBaseUrl(req)}/api/v1/social/${provider}/callback`;
 }
 function buildAuthorizeUrl(cfg, state, redirectUri) {
   const u = new URL(cfg.authorizeUrl);
@@ -2923,7 +2923,7 @@ async function buildApp() {
   app.get("/api/v1/auth/providers", (_req, res) => {
     res.json({ providers: listConfiguredProviders() });
   });
-  app.get("/api/v1/auth/oauth/:provider", (req, res) => {
+  app.get("/api/v1/social/:provider", (req, res) => {
     const base = appBaseUrl(req);
     const provider = sanitizeText(req.params.provider, 20).toLowerCase();
     if (!isOAuthProvider(provider)) return res.redirect(`${base}/login#vnt_error=unknown_provider`);
@@ -2932,7 +2932,7 @@ async function buildApp() {
     const state = signState(provider, cfg.clientSecret);
     return res.redirect(buildAuthorizeUrl(cfg, state, callbackUrl(req, provider)));
   });
-  app.get("/api/v1/auth/oauth/:provider/callback", async (req, res) => {
+  app.get("/api/v1/social/:provider/callback", async (req, res) => {
     const base = appBaseUrl(req);
     const provider = sanitizeText(req.params.provider, 20).toLowerCase();
     if (!isOAuthProvider(provider)) return res.redirect(`${base}/login#vnt_error=unknown_provider`);

@@ -160,9 +160,9 @@ async function main() {
     check('google/github remain unconfigured', provJson?.providers?.google === false && provJson?.providers?.github === false, provJson);
 
     console.log('— full authorization-code flow —');
-    let hops = await walk(`${appBase}/api/v1/auth/oauth/discord`);
+    let hops = await walk(`${appBase}/api/v1/social/discord`);
     check('hop 1 → provider authorize URL with state', hops[0]?.includes('/authorize?') && hops[0]?.includes('state='), hops);
-    check('hop 2 → app callback with code', hops[1]?.includes('/api/v1/auth/oauth/discord/callback') && hops[1]?.includes('code=mockcode_'), hops);
+    check('hop 2 → app callback with code', hops[1]?.includes('/api/v1/social/discord/callback') && hops[1]?.includes('code=mockcode_'), hops);
     const tokenA = tokenFrom(hops);
     check('hop 3 → SPA with session token', !!tokenA && hops[2]?.includes('/login#vnt_oauth='), hops);
     check('no oauth error emitted', oauthErrorFrom(hops) === null, hops);
@@ -173,7 +173,7 @@ async function main() {
     check('discord marked as connected', userA?.user?.connectedAccounts?.discord === true, userA?.user);
 
     console.log('— repeat login is idempotent —');
-    hops = await walk(`${appBase}/api/v1/auth/oauth/discord`);
+    hops = await walk(`${appBase}/api/v1/social/discord`);
     const tokenB = tokenFrom(hops);
     const userB = await me(tokenB);
     check('same identity → same account (no duplicates)', userB?.user?.id === userA?.user?.id, { a: userA?.user?.id, b: userB?.user?.id });
@@ -188,13 +188,13 @@ async function main() {
     const regJson = await regRes.json();
     check('password account created', regRes.status === 201 && !!regJson?.user?.id, regJson);
     await setMockProfile({ ...currentProfile, id: 'disc_999', email, verified: true });
-    hops = await walk(`${appBase}/api/v1/auth/oauth/discord`);
+    hops = await walk(`${appBase}/api/v1/social/discord`);
     const tokenC = tokenFrom(hops);
     const userC = await me(tokenC);
     check('OAuth links to SAME account by verified email', userC?.user?.id === regJson?.user?.id, { oauth: userC?.user?.id, pw: regJson?.user?.id });
 
     console.log('— tampered state rejected —');
-    hops = await walk(`${appBase}/api/v1/auth/oauth/discord`);
+    hops = await walk(`${appBase}/api/v1/social/discord`);
     const tampered = hops[0].replace(/state=([^&]+)/, (m, s) => `state=${s.slice(0, -2)}xx`);
     const hops2 = await walk(tampered);
     check('tampered state → invalid_state', oauthErrorFrom(hops2) === 'invalid_state', hops2);
@@ -202,7 +202,7 @@ async function main() {
 
     console.log('— unverified email never takes over an account —');
     await setMockProfile({ ...currentProfile, id: 'disc_777', email: 'unverified_target@example.com', verified: false });
-    hops = await walk(`${appBase}/api/v1/auth/oauth/discord`);
+    hops = await walk(`${appBase}/api/v1/social/discord`);
     const tokenD = tokenFrom(hops);
     const userD = await me(tokenD);
     check('unverified email ignored → fallback address', userD?.user?.email === 'discord_disc_777@oauth.vanitas.local', userD?.user);

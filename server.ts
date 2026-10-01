@@ -336,7 +336,9 @@ export async function buildApp() {
   });
 
   // Step 1: send the browser to the provider's consent screen.
-  app.get('/api/v1/auth/oauth/:provider', (req, res) => {
+  // (Path kept OUT of /auth/oauth on purpose: Vercel's edge intercepts
+  // "/oauth/<seg>" GETs before the lambda — see comment in oauth.ts.)
+  app.get('/api/v1/social/:provider', (req, res) => {
     const base = appBaseUrl(req);
     const provider = sanitizeText(req.params.provider, 20).toLowerCase();
     if (!isOAuthProvider(provider)) return res.redirect(`${base}/login#vnt_error=unknown_provider`);
@@ -347,7 +349,7 @@ export async function buildApp() {
   });
 
   // Step 2: provider redirects back with ?code&state → session → SPA.
-  app.get('/api/v1/auth/oauth/:provider/callback', async (req, res) => {
+  app.get('/api/v1/social/:provider/callback', async (req, res) => {
     const base = appBaseUrl(req);
     const provider = sanitizeText(req.params.provider, 20).toLowerCase();
     if (!isOAuthProvider(provider)) return res.redirect(`${base}/login#vnt_error=unknown_provider`);

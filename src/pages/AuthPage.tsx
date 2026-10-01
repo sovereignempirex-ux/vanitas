@@ -103,7 +103,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({ mode }) => {
       return;
     }
     setLoading(true);
-    window.location.href = `/api/v1/auth/oauth/${provider}`;
+    window.location.href = `/api/v1/social/${provider}`;
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
