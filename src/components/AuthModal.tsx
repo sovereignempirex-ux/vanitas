@@ -20,7 +20,7 @@ import {
 } from 'lucide-react';
 
 export const AuthModal: React.FC = () => {
-  const { isAuthModalOpen, setIsAuthModalOpen, loginOAuth, loginWithEmail, loginAsDemoAccount } = useAuth();
+  const { isAuthModalOpen, setIsAuthModalOpen, loginOAuth, loginWithEmail, loginLocalSynthetic, loginAsDemoAccount } = useAuth();
   const [tab, setTab] = useState<'login' | 'register' | 'demo' | 'token'>('login');
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -57,7 +57,11 @@ export const AuthModal: React.FC = () => {
 
     setLoading(true);
     try {
-      await loginWithEmail(email, password, name);
+      const result = await loginWithEmail(email, password, tab === 'register' ? 'register' : 'login', name);
+      if (!result.success) {
+        setAuthError(result.error || 'Failed to authenticate');
+        return;
+      }
       setIs2FaStep(false);
     } catch (err: any) {
       setAuthError(err?.message || 'Failed to authenticate');
@@ -70,10 +74,9 @@ export const AuthModal: React.FC = () => {
     e.preventDefault();
     if (!rawToken.trim()) return;
     setLoading(true);
-    setTimeout(() => {
-      loginWithEmail(`token_dev_${Date.now().toString(36)}@vanitas-ingress.io`, 'token_pass', 'Token Developer Ingress');
-      setLoading(false);
-    }, 600);
+    // Ingress key tab is a local/demo session — it never contacts the server.
+    loginLocalSynthetic(`token_dev_${Date.now().toString(36)}@vanitas-ingress.io`, 'Token Developer Ingress');
+    setLoading(false);
   };
 
   return (

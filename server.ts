@@ -1,25 +1,12 @@
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import crypto from 'crypto';
-import { Pool } from 'pg';
 import { db, ALL_SCOPES } from './src/server/db.ts';
+import { databasePool } from './src/server/pg.ts';
+import { createAccount, verifyAccount, createSession, resolveSession, revokeSession } from './src/server/authStore.ts';
 import { processAiQuery, diagnoseAndFixCode, performSemanticSearch, searchYouTubeVideos } from './src/server/aiService.ts';
 import { ClientSource, UserRole, PermissionScope, ProductSuggestion } from './src/types.ts';
 import { getActorUser, requireAdmin, rateLimit, sanitizeText, sanitizeUrl, csvCell, parsePagination, secureToken, secureId, isValidScope } from './src/server/security.ts';
-
-// PostgreSQL pool with SSL auto-detect (required for Supabase / Neon).
-// Never expose DATABASE_URL to the browser — server-side only.
-const databasePool = process.env.DATABASE_URL
-  ? new Pool({
-      connectionString: process.env.DATABASE_URL,
-      max: 8,
-      ssl: /supabase\.co|neon\.tech|sslmode=require/.test(process.env.DATABASE_URL) ? { rejectUnauthorized: false } : undefined,
-    })
-  : null;
-
-if (databasePool) {
-  databasePool.on('error', (err) => console.error('[db] pool error:', (err as Error).message));
-}
 
 function mapSuggestion(row: Record<string, any>): ProductSuggestion {
   return {
@@ -97,6 +84,23 @@ export async function buildApp() {
   app.use('/api/v1/auth/', rateLimit({ windowMs: 60_000, max: 60 }));
   app.use('/api/v1/ai/', rateLimit({ windowMs: 60_000, max: 60 }));
   app.use('/api/v1/bot/', rateLimit({ windowMs: 60_000, max: 120 }));
+
+  // Real login sessions: resolve Bearer token → authenticated actor.
+  // getActorUser() then reads (req as any).actor synchronously in routes.
+  app.use('/api/', async (req, _res, next) => {
+    try {
+      const auth = req.headers.authorization || '';
+      const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+      const adminToken = process.env.ADMIN_API_TOKEN;
+      if (token && !(adminToken && token === adminToken)) {
+        const user = await resolveSession(token);
+        if (user) (req as any).actor = user;
+      }
+    } catch (err) {
+      console.error('[auth] session resolve failed:', (err as Error).message);
+    }
+    next();
+  });
 
   // Security Headers Middleware (always on, stricter in production)
   app.use((_req, res, next) => {
@@ -202,17 +206,115 @@ export async function buildApp() {
     });
   });
 
+  function permissionsFor(actor: { role: UserRole }): string[] {
+    return actor.role === 'ADMIN' ? ALL_SCOPES.map((s) => s.scope) : ['api.read', 'keys.read', 'keys.create', 'bot.execute'];
+  }
+
   // Auth Current User
   app.get('/api/v1/auth/me', (req, res) => {
     const actor = getActorUser(req);
     res.json({
       user: actor,
-      permissions: actor.role === 'ADMIN' ? ALL_SCOPES.map((s) => s.scope) : ['api.read', 'keys.read', 'keys.create', 'bot.execute'],
+      permissions: permissionsFor(actor),
     });
   });
 
+  // ----------------------------------------------------
+  // REAL AUTH: register / login / logout
+  // Passwords: scrypt. Sessions: random bearer token (sha256-hashed at rest).
+  // Storage: PostgreSQL when DATABASE_URL is set, in-memory otherwise.
+  // ----------------------------------------------------
+  app.post('/api/v1/auth/register', async (req, res) => {
+    const email = sanitizeText(req.body?.email, 120).toLowerCase();
+    const name = sanitizeText(req.body?.name, 80);
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: 'A valid email address is required' });
+    }
+    if (!name) {
+      return res.status(400).json({ error: 'Display name is required' });
+    }
+    if (password.length < 8 || password.length > 128) {
+      return res.status(400).json({ error: 'Password must be between 8 and 128 characters' });
+    }
+
+    try {
+      const outcome = await createAccount({ email, password, name });
+      if (outcome.ok === false) return res.status(outcome.status).json({ error: outcome.error });
+
+      const token = await createSession(outcome.user, { ip: req.ip, userAgent: String(req.headers['user-agent'] || '') });
+      db.recordAuditLog({
+        actorId: outcome.user.id,
+        actorName: outcome.user.name,
+        actorEmail: outcome.user.email,
+        action: 'ACCOUNT_REGISTERED',
+        category: 'AUTH',
+        target: `User Account: ${outcome.user.id}`,
+        source: detectSource(req),
+        status: 'SUCCESS',
+        ipAddress: req.ip || 'unknown',
+        metadata: { role: outcome.user.role },
+      });
+      return res.status(201).json({ token, user: outcome.user, permissions: permissionsFor(outcome.user) });
+    } catch (err) {
+      console.error('[auth] register failed:', err);
+      const msg = (err as Error).message || '';
+      if (msg.includes('db:migrate')) {
+        return res.status(503).json({ error: 'Auth storage unavailable — run npm run db:migrate first' });
+      }
+      return res.status(500).json({ error: 'Registration failed' });
+    }
+  });
+
+  app.post('/api/v1/auth/login', async (req, res) => {
+    const email = sanitizeText(req.body?.email, 120).toLowerCase();
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required' });
+    }
+
+    try {
+      const outcome = await verifyAccount(email, password);
+      if (outcome.ok === false) return res.status(outcome.status).json({ error: outcome.error });
+
+      const token = await createSession(outcome.user, { ip: req.ip, userAgent: String(req.headers['user-agent'] || '') });
+      db.recordAuditLog({
+        actorId: outcome.user.id,
+        actorName: outcome.user.name,
+        actorEmail: outcome.user.email,
+        action: 'LOGIN_SUCCESS',
+        category: 'AUTH',
+        target: `User Account: ${outcome.user.id}`,
+        source: detectSource(req),
+        status: 'SUCCESS',
+        ipAddress: req.ip || 'unknown',
+        metadata: { role: outcome.user.role },
+      });
+      return res.json({ token, user: outcome.user, permissions: permissionsFor(outcome.user) });
+    } catch (err) {
+      console.error('[auth] login failed:', err);
+      const msg = (err as Error).message || '';
+      if (msg.includes('db:migrate')) {
+        return res.status(503).json({ error: 'Auth storage unavailable — run npm run db:migrate first' });
+      }
+      return res.status(500).json({ error: 'Login failed' });
+    }
+  });
+
+  app.post('/api/v1/auth/logout', async (req, res) => {
+    try {
+      const auth = req.headers.authorization || '';
+      const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+      if (token) await revokeSession(token);
+    } catch (err) {
+      console.error('[auth] logout failed:', err);
+    }
+    res.json({ success: true });
+  });
+
   // Auth OAuth Simulation (validated + secure token, no Math.random)
-  app.post('/api/v1/auth/oauth', (req, res) => {
+  app.post('/api/v1/auth/oauth', async (req, res) => {
     const provider = sanitizeText(req.body?.provider, 32).toUpperCase() || 'GENERIC';
     if (!/^[A-Z0-9_-]{1,32}$/.test(provider)) {
       return res.status(400).json({ error: 'Invalid provider' });
@@ -233,9 +335,17 @@ export async function buildApp() {
       metadata: { provider },
     });
 
+    let token: string;
+    try {
+      token = await createSession(actor, { ip: req.ip, userAgent: String(req.headers['user-agent'] || '') });
+    } catch (err) {
+      console.error('[auth] oauth session failed:', err);
+      token = secureToken('vnt_jwt_');
+    }
+
     res.json({
       success: true,
-      token: secureToken('vnt_jwt_'),
+      token,
       user: actor,
     });
   });

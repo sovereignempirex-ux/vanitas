@@ -1050,6 +1050,387 @@ var init_db = __esm({
   }
 });
 
+// src/server/pg.ts
+import { Pool } from "pg";
+var databasePool;
+var init_pg = __esm({
+  "src/server/pg.ts"() {
+    databasePool = process.env.DATABASE_URL ? new Pool({
+      connectionString: process.env.DATABASE_URL,
+      max: 8,
+      ssl: /supabase\.co|neon\.tech|sslmode=require/.test(process.env.DATABASE_URL) ? { rejectUnauthorized: false } : void 0
+    }) : null;
+    if (databasePool) {
+      databasePool.on("error", (err) => console.error("[db] pool error:", err.message));
+    }
+  }
+});
+
+// src/server/security.ts
+import crypto2 from "crypto";
+function secureToken(prefix, bytes = 24) {
+  return `${prefix}${crypto2.randomBytes(bytes).toString("base64url")}`;
+}
+function secureId(prefix) {
+  return `${prefix}_${Date.now().toString(36)}_${crypto2.randomBytes(6).toString("hex")}`;
+}
+function sanitizeText(input, maxLen = 5e3) {
+  if (typeof input !== "string") return "";
+  let s = input.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
+  s = s.trim().slice(0, maxLen);
+  return s;
+}
+function sanitizeUrl(input) {
+  if (typeof input !== "string") return null;
+  const s = input.trim().slice(0, 2048);
+  let u;
+  try {
+    u = new URL(s);
+  } catch {
+    return null;
+  }
+  if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+  const host = u.hostname.toLowerCase();
+  const blocked = [
+    "localhost",
+    "127.",
+    "10.",
+    "192.168.",
+    "169.254.",
+    "0.0.0.0",
+    "::1",
+    "[::1]"
+  ];
+  if (blocked.some((b) => host === b || host.startsWith(b))) return null;
+  if (host.endsWith(".internal") || host.endsWith(".local")) return null;
+  if (process.env.NODE_ENV === "production" && u.protocol !== "https:") return null;
+  return u.toString();
+}
+function csvCell(value) {
+  let s = String(value ?? "");
+  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+  s = s.replace(/"/g, '""');
+  return `"${s}"`;
+}
+function rateLimit({ windowMs = 6e4, max = 120 }) {
+  return (req, res, next) => {
+    const key = (req.ip || req.socket.remoteAddress || "unknown") + ":" + req.path;
+    const now = Date.now();
+    const arr = (hits.get(key) || []).filter((t) => now - t < windowMs);
+    if (arr.length >= max) {
+      res.setHeader("Retry-After", Math.ceil(windowMs / 1e3));
+      return res.status(429).json({ error: "Too many requests. Slow down and retry." });
+    }
+    arr.push(now);
+    hits.set(key, arr);
+    next();
+  };
+}
+function adminToken() {
+  const t = process.env.ADMIN_API_TOKEN;
+  if (t && t.length >= 32) return t;
+  return null;
+}
+function getActorUser(req) {
+  const demoMode = process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "production";
+  const auth = req.headers.authorization || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+  const expected = adminToken();
+  if (expected && token && token.length >= 32) {
+    try {
+      const a = Buffer.from(token);
+      const b = Buffer.from(expected);
+      if (a.length === b.length && crypto2.timingSafeEqual(a, b)) {
+        return db.users.find((u) => u.role === "ADMIN") || db.users[0];
+      }
+    } catch {
+    }
+  }
+  const sessionActor = req.actor;
+  if (sessionActor) return sessionActor;
+  if (demoMode) {
+    const userIdHeader = req.headers["x-user-id"];
+    if (userIdHeader) {
+      const user = db.users.find((u) => u.id === sanitizeText(userIdHeader, 64));
+      if (user) return user;
+    }
+    const roleHeader = req.headers["x-user-role"];
+    if (roleHeader === "ADMIN") {
+      return db.users.find((u) => u.role === "ADMIN") || db.users[0];
+    }
+  }
+  return db.users.find((u) => u.role === "USER") || db.users[0];
+}
+function requireAdmin(req, res) {
+  const actor = getActorUser(req);
+  if (actor.role !== "ADMIN") {
+    res.status(403).json({ error: "Administrator access required" });
+    return null;
+  }
+  return actor;
+}
+function parsePagination(query) {
+  let limit = parseInt(query.limit, 10);
+  let offset = parseInt(query.offset, 10);
+  if (!Number.isFinite(limit) || limit <= 0) limit = 25;
+  if (!Number.isFinite(offset) || offset < 0) offset = 0;
+  limit = Math.min(limit, 100);
+  offset = Math.min(offset, 1e5);
+  return { limit, offset };
+}
+function isValidScope(s) {
+  return typeof s === "string" && /^[a-z.]+\.[a-z.]+$/.test(s) && s.length <= 40;
+}
+var hits;
+var init_security = __esm({
+  "src/server/security.ts"() {
+    init_db();
+    hits = /* @__PURE__ */ new Map();
+  }
+});
+
+// src/server/authStore.ts
+import crypto3 from "crypto";
+function scryptAsync(password, salt, keylen, opts) {
+  return new Promise((resolve, reject) => {
+    crypto3.scrypt(
+      password.normalize("NFKC"),
+      salt,
+      keylen,
+      { N: opts.N, r: opts.r, p: opts.p, maxmem: 128 * 1024 * 1024 },
+      (err, key) => err ? reject(err) : resolve(key)
+    );
+  });
+}
+async function hashPassword(password) {
+  const salt = crypto3.randomBytes(16);
+  const key = await scryptAsync(password, salt, 64, { N: 16384, r: 8, p: 1 });
+  return `scrypt$16384$8$1$${salt.toString("base64")}$${key.toString("base64")}`;
+}
+async function verifyPassword(password, stored) {
+  if (!stored) return false;
+  try {
+    const parts = stored.split("$");
+    if (parts.length !== 6 || parts[0] !== "scrypt") return false;
+    const N = Number(parts[1]);
+    const r = Number(parts[2]);
+    const p = Number(parts[3]);
+    if (!Number.isInteger(N) || !Number.isInteger(r) || !Number.isInteger(p) || N < 1024 || N > 1 << 20) return false;
+    const salt = Buffer.from(parts[4], "base64");
+    const expected = Buffer.from(parts[5], "base64");
+    if (salt.length < 8 || expected.length < 32) return false;
+    const actual = await scryptAsync(password, salt, expected.length, { N, r, p });
+    return crypto3.timingSafeEqual(actual, expected);
+  } catch {
+    return false;
+  }
+}
+async function burnPasswordTime(password) {
+  if (!dummyHashPromise) dummyHashPromise = hashPassword(crypto3.randomBytes(16).toString("hex"));
+  await verifyPassword(password, await dummyHashPromise);
+}
+function isAdminEmail(email) {
+  const list = (process.env.ADMIN_EMAILS || "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+  return list.includes(email.toLowerCase());
+}
+function usernameFromEmail(email, isTaken) {
+  const base = (email.split("@")[0] || "user").toLowerCase().replace(/[^a-z0-9_]/g, "_").slice(0, 32) || "user";
+  let candidate = base;
+  let i = 1;
+  while (isTaken(candidate)) {
+    candidate = `${base.slice(0, 28)}${++i}`;
+  }
+  return candidate;
+}
+function rowToUser(row) {
+  const iso = (v) => v instanceof Date ? v.toISOString() : v || void 0;
+  return {
+    id: row.id,
+    email: row.email,
+    name: row.name,
+    username: row.username || "",
+    avatarUrl: row.avatar_url || DEFAULT_AVATAR,
+    bio: row.bio || void 0,
+    role: row.role === "ADMIN" ? "ADMIN" : "USER",
+    twoFactorEnabled: !!row.two_factor_enabled,
+    createdAt: iso(row.created_at) || (/* @__PURE__ */ new Date()).toISOString(),
+    lastLoginAt: iso(row.last_login_at) || iso(row.created_at) || (/* @__PURE__ */ new Date()).toISOString(),
+    connectedAccounts: row.connected_accounts || { google: false, github: false, discord: false }
+  };
+}
+async function createAccount(params) {
+  const email = params.email.trim().toLowerCase();
+  const passwordHash = await hashPassword(params.password);
+  const role = isAdminEmail(email) ? "ADMIN" : "USER";
+  if (databasePool) {
+    try {
+      const existing = await databasePool.query("select 1 from public.users where lower(email) = $1", [email]);
+      if (existing.rowCount) return { ok: false, status: 409, error: "An account with this email already exists" };
+      let finalRole = role;
+      if (finalRole === "USER") {
+        const count = await databasePool.query("select count(*)::int as n from public.users");
+        if ((count.rows[0]?.n ?? 0) === 0) finalRole = "ADMIN";
+      }
+      const id = secureId("usr");
+      const username = usernameFromEmail(email, () => false);
+      const result = await databasePool.query(
+        `insert into public.users (id, email, name, username, avatar_url, role, password_hash, created_at, last_login_at)
+         values ($1, lower($2), $3, $4, $5, $6, $7, now(), now())
+         returning *`,
+        [id, email, params.name, username, DEFAULT_AVATAR, finalRole, passwordHash]
+      );
+      return { ok: true, user: rowToUser(result.rows[0]) };
+    } catch (err) {
+      if (err?.code === "23505") return { ok: false, status: 409, error: "An account with this email already exists" };
+      if (err?.code === "42P01" || err?.code === "42703") {
+        throw new Error("users table missing \u2014 run: npm run db:migrate (supabase/schema.sql)");
+      }
+      throw err;
+    }
+  }
+  if (db.users.some((u) => u.email.toLowerCase() === email)) {
+    return { ok: false, status: 409, error: "An account with this email already exists" };
+  }
+  const user = {
+    id: secureId("usr"),
+    email,
+    name: params.name,
+    username: usernameFromEmail(email, (u) => db.users.some((x) => x.username === u)),
+    avatarUrl: DEFAULT_AVATAR,
+    role,
+    twoFactorEnabled: false,
+    createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+    lastLoginAt: (/* @__PURE__ */ new Date()).toISOString(),
+    connectedAccounts: { google: false, github: false, discord: false }
+  };
+  db.users.push(user);
+  memoryPasswords.set(email, { userId: user.id, hash: passwordHash });
+  return { ok: true, user };
+}
+async function verifyAccount(email, password) {
+  const clean = email.trim().toLowerCase();
+  if (databasePool) {
+    try {
+      const result = await databasePool.query("select * from public.users where lower(email) = $1", [clean]);
+      const row = result.rows[0];
+      if (!row) {
+        await burnPasswordTime(password);
+        return { ok: false, status: 401, error: "Invalid email or password" };
+      }
+      const valid = await verifyPassword(password, row.password_hash);
+      if (!valid) return { ok: false, status: 401, error: "Invalid email or password" };
+      const user2 = rowToUser({ ...row, last_login_at: (/* @__PURE__ */ new Date()).toISOString() });
+      if (isAdminEmail(clean) && user2.role !== "ADMIN") {
+        user2.role = "ADMIN";
+        await databasePool.query("update public.users set role = 'ADMIN' where id = $1", [row.id]);
+      }
+      await databasePool.query("update public.users set last_login_at = now() where id = $1", [row.id]);
+      return { ok: true, user: user2 };
+    } catch (err) {
+      if (err?.code === "42P01" || err?.code === "42703") {
+        throw new Error("users table missing \u2014 run: npm run db:migrate (supabase/schema.sql)");
+      }
+      throw err;
+    }
+  }
+  const rec = memoryPasswords.get(clean);
+  const user = rec ? db.users.find((u) => u.id === rec.userId) : void 0;
+  if (!rec || !user) {
+    await burnPasswordTime(password);
+    return { ok: false, status: 401, error: "Invalid email or password" };
+  }
+  if (!await verifyPassword(password, rec.hash)) {
+    return { ok: false, status: 401, error: "Invalid email or password" };
+  }
+  user.lastLoginAt = (/* @__PURE__ */ new Date()).toISOString();
+  if (isAdminEmail(clean)) user.role = "ADMIN";
+  return { ok: true, user };
+}
+function hashToken(token) {
+  return crypto3.createHash("sha256").update(token).digest("hex");
+}
+async function createSession(user, meta) {
+  const token = `vnt_sess_${crypto3.randomBytes(32).toString("base64url")}`;
+  const hash = hashToken(token);
+  const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
+  if (databasePool) {
+    await databasePool.query(
+      "insert into public.auth_sessions (token_hash, user_id, ip, user_agent, expires_at) values ($1, $2, $3, $4, $5)",
+      [hash, user.id, String(meta.ip || "").slice(0, 64), String(meta.userAgent || "").slice(0, 200), expiresAt]
+    );
+  } else {
+    if (memorySessions.size > 500) {
+      const now = Date.now();
+      for (const [k, v] of memorySessions) if (v.expiresAt < now) memorySessions.delete(k);
+    }
+    memorySessions.set(hash, { userId: user.id, expiresAt: expiresAt.getTime() });
+  }
+  return token;
+}
+async function resolveSession(token) {
+  if (!token || !token.startsWith("vnt_sess_")) return null;
+  const hash = hashToken(token);
+  const cached = resolveCache.get(hash);
+  if (cached) {
+    if (cached.until > Date.now()) return cached.user;
+    resolveCache.delete(hash);
+  }
+  let user = null;
+  if (databasePool) {
+    try {
+      const result = await databasePool.query(
+        `select u.* from public.auth_sessions s
+         join public.users u on u.id = s.user_id
+         where s.token_hash = $1 and s.expires_at > now()`,
+        [hash]
+      );
+      user = result.rows[0] ? rowToUser(result.rows[0]) : null;
+    } catch (err) {
+      console.error("[auth] session lookup failed:", err.message);
+      return null;
+    }
+  } else {
+    const rec = memorySessions.get(hash);
+    if (!rec) return null;
+    if (rec.expiresAt < Date.now()) {
+      memorySessions.delete(hash);
+      return null;
+    }
+    user = db.users.find((u) => u.id === rec.userId) || null;
+  }
+  resolveCache.set(hash, { user, until: Date.now() + RESOLVE_CACHE_TTL_MS });
+  return user;
+}
+async function revokeSession(token) {
+  if (!token) return;
+  const hash = hashToken(token);
+  resolveCache.delete(hash);
+  if (databasePool) {
+    try {
+      await databasePool.query("delete from public.auth_sessions where token_hash = $1", [hash]);
+    } catch (err) {
+      console.error("[auth] session revoke failed:", err.message);
+    }
+  } else {
+    memorySessions.delete(hash);
+  }
+}
+var SESSION_TTL_MS, RESOLVE_CACHE_TTL_MS, DEFAULT_AVATAR, dummyHashPromise, memoryPasswords, memorySessions, resolveCache;
+var init_authStore = __esm({
+  "src/server/authStore.ts"() {
+    init_pg();
+    init_db();
+    init_security();
+    SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1e3;
+    RESOLVE_CACHE_TTL_MS = 6e4;
+    DEFAULT_AVATAR = "https://i.postimg.cc/SNN169kT/orders.png";
+    dummyHashPromise = null;
+    memoryPasswords = /* @__PURE__ */ new Map();
+    memorySessions = /* @__PURE__ */ new Map();
+    resolveCache = /* @__PURE__ */ new Map();
+  }
+});
+
 // src/server/aiService.ts
 import { GoogleGenAI } from "@google/genai";
 function getAiClient() {
@@ -1979,127 +2360,6 @@ var init_aiService = __esm({
   }
 });
 
-// src/server/security.ts
-import crypto2 from "crypto";
-function secureToken(prefix, bytes = 24) {
-  return `${prefix}${crypto2.randomBytes(bytes).toString("base64url")}`;
-}
-function secureId(prefix) {
-  return `${prefix}_${Date.now().toString(36)}_${crypto2.randomBytes(6).toString("hex")}`;
-}
-function sanitizeText(input, maxLen = 5e3) {
-  if (typeof input !== "string") return "";
-  let s = input.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
-  s = s.trim().slice(0, maxLen);
-  return s;
-}
-function sanitizeUrl(input) {
-  if (typeof input !== "string") return null;
-  const s = input.trim().slice(0, 2048);
-  let u;
-  try {
-    u = new URL(s);
-  } catch {
-    return null;
-  }
-  if (u.protocol !== "https:" && u.protocol !== "http:") return null;
-  const host = u.hostname.toLowerCase();
-  const blocked = [
-    "localhost",
-    "127.",
-    "10.",
-    "192.168.",
-    "169.254.",
-    "0.0.0.0",
-    "::1",
-    "[::1]"
-  ];
-  if (blocked.some((b) => host === b || host.startsWith(b))) return null;
-  if (host.endsWith(".internal") || host.endsWith(".local")) return null;
-  if (process.env.NODE_ENV === "production" && u.protocol !== "https:") return null;
-  return u.toString();
-}
-function csvCell(value) {
-  let s = String(value ?? "");
-  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
-  s = s.replace(/"/g, '""');
-  return `"${s}"`;
-}
-function rateLimit({ windowMs = 6e4, max = 120 }) {
-  return (req, res, next) => {
-    const key = (req.ip || req.socket.remoteAddress || "unknown") + ":" + req.path;
-    const now = Date.now();
-    const arr = (hits.get(key) || []).filter((t) => now - t < windowMs);
-    if (arr.length >= max) {
-      res.setHeader("Retry-After", Math.ceil(windowMs / 1e3));
-      return res.status(429).json({ error: "Too many requests. Slow down and retry." });
-    }
-    arr.push(now);
-    hits.set(key, arr);
-    next();
-  };
-}
-function adminToken() {
-  const t = process.env.ADMIN_API_TOKEN;
-  if (t && t.length >= 32) return t;
-  return null;
-}
-function getActorUser(req) {
-  const demoMode = process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "production";
-  const auth = req.headers.authorization || "";
-  const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
-  const expected = adminToken();
-  if (expected && token && token.length >= 32) {
-    try {
-      const a = Buffer.from(token);
-      const b = Buffer.from(expected);
-      if (a.length === b.length && crypto2.timingSafeEqual(a, b)) {
-        return db.users.find((u) => u.role === "ADMIN") || db.users[0];
-      }
-    } catch {
-    }
-  }
-  if (demoMode) {
-    const userIdHeader = req.headers["x-user-id"];
-    if (userIdHeader) {
-      const user = db.users.find((u) => u.id === sanitizeText(userIdHeader, 64));
-      if (user) return user;
-    }
-    const roleHeader = req.headers["x-user-role"];
-    if (roleHeader === "ADMIN") {
-      return db.users.find((u) => u.role === "ADMIN") || db.users[0];
-    }
-  }
-  return db.users.find((u) => u.role === "USER") || db.users[0];
-}
-function requireAdmin(req, res) {
-  const actor = getActorUser(req);
-  if (actor.role !== "ADMIN") {
-    res.status(403).json({ error: "Administrator access required" });
-    return null;
-  }
-  return actor;
-}
-function parsePagination(query) {
-  let limit = parseInt(query.limit, 10);
-  let offset = parseInt(query.offset, 10);
-  if (!Number.isFinite(limit) || limit <= 0) limit = 25;
-  if (!Number.isFinite(offset) || offset < 0) offset = 0;
-  limit = Math.min(limit, 100);
-  offset = Math.min(offset, 1e5);
-  return { limit, offset };
-}
-function isValidScope(s) {
-  return typeof s === "string" && /^[a-z.]+\.[a-z.]+$/.test(s) && s.length <= 40;
-}
-var hits;
-var init_security = __esm({
-  "src/server/security.ts"() {
-    init_db();
-    hits = /* @__PURE__ */ new Map();
-  }
-});
-
 // server.ts
 var server_exports = {};
 __export(server_exports, {
@@ -2108,8 +2368,7 @@ __export(server_exports, {
 });
 import express from "express";
 import path from "path";
-import crypto3 from "crypto";
-import { Pool } from "pg";
+import crypto4 from "crypto";
 function mapSuggestion(row) {
   return {
     id: row.id,
@@ -2173,6 +2432,20 @@ async function buildApp() {
   app.use("/api/v1/auth/", rateLimit({ windowMs: 6e4, max: 60 }));
   app.use("/api/v1/ai/", rateLimit({ windowMs: 6e4, max: 60 }));
   app.use("/api/v1/bot/", rateLimit({ windowMs: 6e4, max: 120 }));
+  app.use("/api/", async (req, _res, next) => {
+    try {
+      const auth = req.headers.authorization || "";
+      const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+      const adminToken2 = process.env.ADMIN_API_TOKEN;
+      if (token && !(adminToken2 && token === adminToken2)) {
+        const user = await resolveSession(token);
+        if (user) req.actor = user;
+      }
+    } catch (err) {
+      console.error("[auth] session resolve failed:", err.message);
+    }
+    next();
+  });
   app.use((_req, res, next) => {
     res.setHeader("X-DNS-Prefetch-Control", "off");
     res.setHeader("X-Frame-Options", "DENY");
@@ -2192,7 +2465,7 @@ async function buildApp() {
   });
   app.use((req, _res, next) => {
     const incoming = sanitizeText(req.headers["x-request-id"], 64);
-    req.requestId = incoming || crypto3.randomUUID();
+    req.requestId = incoming || crypto4.randomUUID();
     next();
   });
   function detectSource(req) {
@@ -2256,14 +2529,98 @@ async function buildApp() {
       }
     });
   });
+  function permissionsFor(actor) {
+    return actor.role === "ADMIN" ? ALL_SCOPES.map((s) => s.scope) : ["api.read", "keys.read", "keys.create", "bot.execute"];
+  }
   app.get("/api/v1/auth/me", (req, res) => {
     const actor = getActorUser(req);
     res.json({
       user: actor,
-      permissions: actor.role === "ADMIN" ? ALL_SCOPES.map((s) => s.scope) : ["api.read", "keys.read", "keys.create", "bot.execute"]
+      permissions: permissionsFor(actor)
     });
   });
-  app.post("/api/v1/auth/oauth", (req, res) => {
+  app.post("/api/v1/auth/register", async (req, res) => {
+    const email = sanitizeText(req.body?.email, 120).toLowerCase();
+    const name = sanitizeText(req.body?.name, 80);
+    const password = typeof req.body?.password === "string" ? req.body.password : "";
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: "A valid email address is required" });
+    }
+    if (!name) {
+      return res.status(400).json({ error: "Display name is required" });
+    }
+    if (password.length < 8 || password.length > 128) {
+      return res.status(400).json({ error: "Password must be between 8 and 128 characters" });
+    }
+    try {
+      const outcome = await createAccount({ email, password, name });
+      if (outcome.ok === false) return res.status(outcome.status).json({ error: outcome.error });
+      const token = await createSession(outcome.user, { ip: req.ip, userAgent: String(req.headers["user-agent"] || "") });
+      db.recordAuditLog({
+        actorId: outcome.user.id,
+        actorName: outcome.user.name,
+        actorEmail: outcome.user.email,
+        action: "ACCOUNT_REGISTERED",
+        category: "AUTH",
+        target: `User Account: ${outcome.user.id}`,
+        source: detectSource(req),
+        status: "SUCCESS",
+        ipAddress: req.ip || "unknown",
+        metadata: { role: outcome.user.role }
+      });
+      return res.status(201).json({ token, user: outcome.user, permissions: permissionsFor(outcome.user) });
+    } catch (err) {
+      console.error("[auth] register failed:", err);
+      const msg = err.message || "";
+      if (msg.includes("db:migrate")) {
+        return res.status(503).json({ error: "Auth storage unavailable \u2014 run npm run db:migrate first" });
+      }
+      return res.status(500).json({ error: "Registration failed" });
+    }
+  });
+  app.post("/api/v1/auth/login", async (req, res) => {
+    const email = sanitizeText(req.body?.email, 120).toLowerCase();
+    const password = typeof req.body?.password === "string" ? req.body.password : "";
+    if (!email || !password) {
+      return res.status(400).json({ error: "Email and password are required" });
+    }
+    try {
+      const outcome = await verifyAccount(email, password);
+      if (outcome.ok === false) return res.status(outcome.status).json({ error: outcome.error });
+      const token = await createSession(outcome.user, { ip: req.ip, userAgent: String(req.headers["user-agent"] || "") });
+      db.recordAuditLog({
+        actorId: outcome.user.id,
+        actorName: outcome.user.name,
+        actorEmail: outcome.user.email,
+        action: "LOGIN_SUCCESS",
+        category: "AUTH",
+        target: `User Account: ${outcome.user.id}`,
+        source: detectSource(req),
+        status: "SUCCESS",
+        ipAddress: req.ip || "unknown",
+        metadata: { role: outcome.user.role }
+      });
+      return res.json({ token, user: outcome.user, permissions: permissionsFor(outcome.user) });
+    } catch (err) {
+      console.error("[auth] login failed:", err);
+      const msg = err.message || "";
+      if (msg.includes("db:migrate")) {
+        return res.status(503).json({ error: "Auth storage unavailable \u2014 run npm run db:migrate first" });
+      }
+      return res.status(500).json({ error: "Login failed" });
+    }
+  });
+  app.post("/api/v1/auth/logout", async (req, res) => {
+    try {
+      const auth = req.headers.authorization || "";
+      const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+      if (token) await revokeSession(token);
+    } catch (err) {
+      console.error("[auth] logout failed:", err);
+    }
+    res.json({ success: true });
+  });
+  app.post("/api/v1/auth/oauth", async (req, res) => {
     const provider = sanitizeText(req.body?.provider, 32).toUpperCase() || "GENERIC";
     if (!/^[A-Z0-9_-]{1,32}$/.test(provider)) {
       return res.status(400).json({ error: "Invalid provider" });
@@ -2282,9 +2639,16 @@ async function buildApp() {
       ipAddress: req.ip || "unknown",
       metadata: { provider }
     });
+    let token;
+    try {
+      token = await createSession(actor, { ip: req.ip, userAgent: String(req.headers["user-agent"] || "") });
+    } catch (err) {
+      console.error("[auth] oauth session failed:", err);
+      token = secureToken("vnt_jwt_");
+    }
     res.json({
       success: true,
-      token: secureToken("vnt_jwt_"),
+      token,
       user: actor
     });
   });
@@ -2668,7 +3032,7 @@ async function buildApp() {
       event: "ping.test",
       status: "delivered",
       statusCode: 200,
-      latencyMs: 90 + crypto3.randomInt(80),
+      latencyMs: 90 + crypto4.randomInt(80),
       timestamp: (/* @__PURE__ */ new Date()).toISOString(),
       payload: { event: "ping.test", timestamp: (/* @__PURE__ */ new Date()).toISOString(), message: "Vanitas ping verification handshake" }
     };
@@ -3028,20 +3392,14 @@ async function startServer() {
     console.log(`Vanitas Central Server running on http://0.0.0.0:${PORT}`);
   });
 }
-var databasePool, server_default;
+var server_default;
 var init_server = __esm({
   "server.ts"() {
     init_db();
+    init_pg();
+    init_authStore();
     init_aiService();
     init_security();
-    databasePool = process.env.DATABASE_URL ? new Pool({
-      connectionString: process.env.DATABASE_URL,
-      max: 8,
-      ssl: /supabase\.co|neon\.tech|sslmode=require/.test(process.env.DATABASE_URL) ? { rejectUnauthorized: false } : void 0
-    }) : null;
-    if (databasePool) {
-      databasePool.on("error", (err) => console.error("[db] pool error:", err.message));
-    }
     server_default = buildApp;
     if (!process.env.VERCEL && (process.argv[1]?.endsWith("server.ts") || process.argv[1]?.endsWith("server.cjs"))) {
       startServer();

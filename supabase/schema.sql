@@ -107,3 +107,43 @@ end $$;
 
 create index if not exists product_suggestions_status_created_at_idx
   on public.product_suggestions (status, created_at desc);
+
+-- ---------------------------------------------------------------------------
+-- Users (real accounts). Passwords are scrypt hashes — NEVER plaintext.
+-- Accessed only through the server (service role / DATABASE_URL).
+-- ---------------------------------------------------------------------------
+create table if not exists public.users (
+  id text primary key,
+  email text not null,
+  name text not null check (char_length(name) between 1 and 80),
+  username text not null default '',
+  avatar_url text not null default '',
+  bio text,
+  role text not null default 'USER' check (role in ('USER', 'ADMIN')),
+  password_hash text not null,
+  two_factor_enabled boolean not null default false,
+  connected_accounts jsonb not null default '{"google":false,"github":false,"discord":false}',
+  created_at timestamptz not null default now(),
+  last_login_at timestamptz
+);
+create unique index if not exists users_email_uniq on public.users (lower(email));
+create index if not exists users_role_idx on public.users (role);
+
+-- ---------------------------------------------------------------------------
+-- Login sessions. Only the sha256 hash of the bearer token is stored,
+-- so a database leak cannot be replayed as a login.
+-- ---------------------------------------------------------------------------
+create table if not exists public.auth_sessions (
+  token_hash text primary key,
+  user_id text not null references public.users(id) on delete cascade,
+  ip text not null default '',
+  user_agent text not null default '',
+  created_at timestamptz not null default now(),
+  expires_at timestamptz not null
+);
+create index if not exists auth_sessions_user_idx on public.auth_sessions (user_id);
+create index if not exists auth_sessions_expires_idx on public.auth_sessions (expires_at);
+
+-- RLS for auth tables: deny direct browser access — server role only.
+alter table public.users enable row level security;
+alter table public.auth_sessions enable row level security;

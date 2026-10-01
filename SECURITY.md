@@ -17,7 +17,15 @@
 
 - No `x-user-role` / `x-user-id` trust in production. Admin requires `ADMIN_API_TOKEN`
   (min 32 chars, `Authorization: Bearer`) or server-side `ADMIN` role.
-- New self-registered users are always `USER`.
+- **Real accounts**: `POST /api/v1/auth/register|login|logout` with scrypt-hashed
+  passwords (`node:crypto`, no native deps) and random 256-bit session tokens.
+  Only the **sha256 hash** of a token is stored (`public.auth_sessions`), sessions
+  expire after 30 days, and login errors are generic (`Invalid email or password`)
+  to block user enumeration. Login/register are rate-limited (60/min/IP).
+- New self-registered users are always `USER`. Admin promotion paths are only:
+  `ADMIN_EMAILS` env (comma-separated), the first account on a fresh database,
+  or `ADMIN_API_TOKEN` promoting via `/api/v1/admin/users/:id/role`.
+- Local/demo sessions (OAuth sim, ingress-key tab) can never grant `ADMIN`.
 - Secrets use `crypto.randomBytes`. Raw API secrets are shown once only.
 - Webhook URLs: `https` only in production, private hosts blocked (SSRF guard).
 - Rate limits on `/api/*`, stricter on auth/AI/bot. Pagination capped at 100.

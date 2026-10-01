@@ -115,6 +115,11 @@ export function getActorUser(req: Request): User {
     }
   }
 
+  // 1b. Real session actor (resolved from Bearer token by the /api session
+  // middleware above). Regular logged-in users act as themselves only.
+  const sessionActor = (req as any).actor as User | undefined;
+  if (sessionActor) return sessionActor;
+
   // 2. Demo headers — local UI testing only, never production.
   if (demoMode) {
     const userIdHeader = req.headers['x-user-id'] as string | undefined;

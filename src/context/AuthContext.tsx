@@ -63,7 +63,14 @@ interface AuthContextType {
   setRole: (role: UserRole) => void;
   toggleRole: () => void;
   loginOAuth: (provider: string) => Promise<void>;
-  loginWithEmail: (email: string, pass: string, name?: string) => Promise<{ success: boolean; error?: string }>;
+  loginWithEmail: (
+    email: string,
+    pass: string,
+    mode: 'login' | 'register',
+    name?: string,
+  ) => Promise<{ success: boolean; error?: string }>;
+  /** Offline/demo-only session (ingress key tab) — never hits the server. */
+  loginLocalSynthetic: (email: string, name?: string) => { success: boolean };
   loginAsDemoAccount: (account: DemoAccount) => void;
   logout: () => void;
   clientSource: ClientSource;
@@ -253,34 +260,66 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setIsAuthModalOpen(false);
   };
 
-  const loginWithEmail = async (email: string, _pass: string, name?: string) => {
+  const loginLocalSynthetic = (email: string, name?: string) => {
     const cleanEmail = email.trim().toLowerCase().slice(0, 120);
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
-      return { success: false, error: 'Invalid email address' };
-    }
     const generatedUser: User = {
       id: `usr_${Date.now().toString(36)}`,
       email: cleanEmail,
-      name: (name || email.split('@')[0]).slice(0, 80),
-      username: email.split('@')[0].toLowerCase().replace(/[^a-z0-9_]/g, '_').slice(0, 40),
-      avatarUrl: 'https://images.unsplash.com/photo-1534447677768-be436bb09401?q=80&w=800&auto=format&fit=crop',
-      // SECURITY FIX: new self-registered users are ALWAYS USER. Admin must be
-      // granted server-side via ADMIN_API_TOKEN, never client-side.
+      name: (name || cleanEmail.split('@')[0] || 'Developer').slice(0, 80),
+      username: (cleanEmail.split('@')[0] || 'dev').toLowerCase().replace(/[^a-z0-9_]/g, '_').slice(0, 40),
+      avatarUrl: 'https://images.unsplash.com/photo-1534447677768-be436bb09041?q=80&w=800&auto=format&fit=crop',
+      // SECURITY: local sessions can never grant ADMIN.
       role: 'USER',
       twoFactorEnabled: false,
       createdAt: new Date().toISOString(),
       lastLoginAt: new Date().toISOString(),
       connectedAccounts: {
-        google: email.includes('gmail'),
+        google: cleanEmail.includes('gmail'),
         github: false,
         discord: false,
       },
     };
     setUser(generatedUser);
-    setRoleState(generatedUser.role);
+    setRoleState('USER');
     localStorage.setItem('vanitas_active_user', JSON.stringify(generatedUser));
     setIsAuthModalOpen(false);
     return { success: true };
+  };
+
+  const loginWithEmail = async (email: string, password: string, mode: 'login' | 'register', name?: string) => {
+    const cleanEmail = email.trim().toLowerCase().slice(0, 120);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      return { success: false, error: 'Invalid email address' };
+    }
+    if (!password) {
+      return { success: false, error: 'Password is required' };
+    }
+    if (mode === 'register' && password.length < 8) {
+      return { success: false, error: 'Password must be at least 8 characters' };
+    }
+
+    try {
+      const data =
+        mode === 'register'
+          ? await api.register({ email: cleanEmail, password, name: (name || cleanEmail.split('@')[0]).slice(0, 80) })
+          : await api.login({ email: cleanEmail, password });
+
+      // Server is the source of truth for role & permissions.
+      setUser(data.user);
+      setRoleState(data.user.role);
+      setPermissions(data.permissions);
+      localStorage.setItem('vanitas_active_user', JSON.stringify(data.user));
+      setIsAuthModalOpen(false);
+      return { success: true };
+    } catch (err: any) {
+      // Server answered (wrong password, duplicate email, storage down) → show it.
+      if (err?.status) {
+        return { success: false, error: err.message || 'Authentication failed' };
+      }
+      // Network/server unreachable → keep the offline demo session working.
+      console.warn('[auth] server unreachable, using local session fallback:', err);
+      return loginLocalSynthetic(cleanEmail, name);
+    }
   };
 
   const loginAsDemoAccount = (demo: DemoAccount) => {
@@ -307,9 +346,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const logout = () => {
+    // Revoke the server session and clear the stored Bearer token.
+    api.logout().catch(() => undefined);
     setUser(null);
     setRoleState('USER');
-    api.setAuthToken(null);
     localStorage.removeItem('vanitas_active_user');
   };
 
@@ -371,6 +411,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         toggleRole,
         loginOAuth,
         loginWithEmail,
+        loginLocalSynthetic,
         loginAsDemoAccount,
         logout,
         clientSource,

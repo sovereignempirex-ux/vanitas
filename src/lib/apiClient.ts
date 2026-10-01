@@ -81,7 +81,9 @@ class ApiClient {
       } catch {
         // ignore json parse error
       }
-      throw new Error(errMsg);
+      const error: Error & { status?: number } = new Error(errMsg);
+      error.status = res.status; // callers can distinguish server rejection (4xx/5xx) from network failure
+      throw error;
     }
 
     return res.json() as Promise<T>;
@@ -99,6 +101,35 @@ class ApiClient {
   // Auth
   async getMe() {
     return this.request<{ user: User; permissions: PermissionScope[] }>('/auth/me');
+  }
+
+  /** Create a real account (scrypt-hashed password, server-side session). */
+  async register(params: { email: string; password: string; name: string }) {
+    const data = await this.request<{ token: string; user: User; permissions: PermissionScope[] }>('/auth/register', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+    this.setAuthToken(data.token);
+    return data;
+  }
+
+  /** Password login. Returns a session token stored as Bearer. */
+  async login(params: { email: string; password: string }) {
+    const data = await this.request<{ token: string; user: User; permissions: PermissionScope[] }>('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+    this.setAuthToken(data.token);
+    return data;
+  }
+
+  /** Revoke the server session; always clears the local token. */
+  async logout() {
+    try {
+      await this.request<{ success: boolean }>('/auth/logout', { method: 'POST' });
+    } finally {
+      this.setAuthToken(null);
+    }
   }
 
   async oauthLogin(provider: string) {
