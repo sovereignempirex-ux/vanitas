@@ -10,7 +10,9 @@
     }
   },
   "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api/index" }
+    { "source": "/api/(.*)", "destination": "/api/index" },
+    { "source": "/register", "destination": "/index.html" },
+    { "source": "/login", "destination": "/index.html" }
   ],
   "headers": [
     {

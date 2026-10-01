@@ -3,6 +3,7 @@ import { AuthProvider, useAuth } from './context/AuthContext.tsx';
 import { Header } from './components/Header.tsx';
 import { Sidebar } from './components/Sidebar.tsx';
 import { CommandPalette } from './components/CommandPalette.tsx';
+import { AuthPage } from './pages/AuthPage.tsx';
 import { AuthModal } from './components/AuthModal.tsx';
 
 // Views
@@ -24,6 +25,10 @@ const AppContent: React.FC = () => {
   const { activeView } = useAuth();
   const [isSidebarMobileOpen, setIsSidebarMobileOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
+
+  // Standalone shareable auth pages: /register and /login (no modal, no shell).
+  const path = window.location.pathname.replace(/\/+$/, '') || '/';
+  const authPage: 'login' | 'register' | null = path === '/login' ? 'login' : path === '/register' ? 'register' : null;
 
   const renderActiveView = () => {
     switch (activeView) {
@@ -60,6 +65,10 @@ const AppContent: React.FC = () => {
         return <OverviewView />;
     }
   };
+
+  if (authPage) {
+    return <AuthPage mode={authPage} />;
+  }
 
   return (
     <div className="min-h-screen vnt-app-bg text-slate-100 flex flex-col">

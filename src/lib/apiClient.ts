@@ -132,6 +132,11 @@ class ApiClient {
     }
   }
 
+  /** Which social providers have keys configured server-side (for UI buttons). */
+  async getProviders() {
+    return this.request<{ providers: Record<string, boolean> }>('/auth/providers');
+  }
+
   async oauthLogin(provider: string) {
     return this.request<{ success: boolean; token: string; user: User }>('/auth/oauth', {
       method: 'POST',

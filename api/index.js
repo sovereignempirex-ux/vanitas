@@ -497,15 +497,15 @@ var init_db = __esm({
       }
       createApiKey(params) {
         this.assertGrantableScopes(params.requesterRole, params.scopes);
-        const env = params.environment || "live";
+        const env2 = params.environment || "live";
         const randPart = crypto.randomBytes(18).toString("base64url");
-        const rawSecret = `sk_${env}_vanitas_${randPart}`;
+        const rawSecret = `sk_${env2}_vanitas_${randPart}`;
         const keyPrefix = rawSecret.substring(0, 14);
         const maskedSecret = `${keyPrefix}\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022${rawSecret.slice(-4)}`;
         const rateLimitPerMin = params.rateLimitPerMin || 600;
         const burstLimit = params.burstLimit || Math.round(rateLimitPerMin * 0.05);
         const newKey = {
-          id: `key_${env}_${Date.now().toString(36)}_${crypto.randomBytes(4).toString("hex")}`,
+          id: `key_${env2}_${Date.now().toString(36)}_${crypto.randomBytes(4).toString("hex")}`,
           name: params.name,
           keyPrefix,
           maskedSecret,
@@ -524,7 +524,7 @@ var init_db = __esm({
           createdAt: (/* @__PURE__ */ new Date()).toISOString(),
           lastUsedAt: null,
           expiresAt: params.expiresAt || null,
-          environment: env
+          environment: env2
         };
         this.apiKeys.unshift(newKey);
         this.systemStats.activeApiKeys = this.apiKeys.filter((k) => k.status === "active").length;
@@ -549,9 +549,9 @@ var init_db = __esm({
         if (actor.role !== "ADMIN" && key.ownerId !== actor.id) {
           throw new Error("Forbidden: You can only rotate keys you own");
         }
-        const env = key.environment;
+        const env2 = key.environment;
         const randPart = crypto.randomBytes(18).toString("base64url");
-        const rawSecret = `sk_${env}_vanitas_${randPart}`;
+        const rawSecret = `sk_${env2}_vanitas_${randPart}`;
         const keyPrefix = rawSecret.substring(0, 14);
         key.keyPrefix = keyPrefix;
         key.maskedSecret = `${keyPrefix}\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022${rawSecret.slice(-4)}`;
@@ -1191,6 +1191,14 @@ var init_security = __esm({
 
 // src/server/authStore.ts
 import crypto3 from "crypto";
+async function pickInitialRole(email) {
+  if (isAdminEmail(email)) return "ADMIN";
+  if (databasePool) {
+    const count = await databasePool.query("select count(*)::int as n from public.users");
+    if ((count.rows[0]?.n ?? 0) === 0) return "ADMIN";
+  }
+  return "USER";
+}
 function scryptAsync(password, salt, keylen, opts) {
   return new Promise((resolve, reject) => {
     crypto3.scrypt(
@@ -1261,23 +1269,18 @@ function rowToUser(row) {
 async function createAccount(params) {
   const email = params.email.trim().toLowerCase();
   const passwordHash = await hashPassword(params.password);
-  const role = isAdminEmail(email) ? "ADMIN" : "USER";
+  const role = await pickInitialRole(email);
   if (databasePool) {
     try {
       const existing = await databasePool.query("select 1 from public.users where lower(email) = $1", [email]);
       if (existing.rowCount) return { ok: false, status: 409, error: "An account with this email already exists" };
-      let finalRole = role;
-      if (finalRole === "USER") {
-        const count = await databasePool.query("select count(*)::int as n from public.users");
-        if ((count.rows[0]?.n ?? 0) === 0) finalRole = "ADMIN";
-      }
       const id = secureId("usr");
       const username = usernameFromEmail(email, () => false);
       const result = await databasePool.query(
         `insert into public.users (id, email, name, username, avatar_url, role, password_hash, created_at, last_login_at)
          values ($1, lower($2), $3, $4, $5, $6, $7, now(), now())
          returning *`,
-        [id, email, params.name, username, DEFAULT_AVATAR, finalRole, passwordHash]
+        [id, email, params.name, username, DEFAULT_AVATAR, role, passwordHash]
       );
       return { ok: true, user: rowToUser(result.rows[0]) };
     } catch (err) {
@@ -1415,7 +1418,116 @@ async function revokeSession(token) {
     memorySessions.delete(hash);
   }
 }
-var SESSION_TTL_MS, RESOLVE_CACHE_TTL_MS, DEFAULT_AVATAR, dummyHashPromise, memoryPasswords, memorySessions, resolveCache;
+function fallbackOAuthEmail(provider, providerId) {
+  return `${provider}_${providerId}@oauth.vanitas.local`;
+}
+function withConnectedAccount(user, provider) {
+  if (provider === "google" || provider === "github" || provider === "discord") {
+    user.connectedAccounts = { ...user.connectedAccounts, [provider]: true };
+  }
+  return user;
+}
+async function upsertOAuthUser(p) {
+  const provider = p.provider.toLowerCase().slice(0, 20);
+  const providerId = String(p.providerId).slice(0, 64);
+  if (!providerId) throw new Error("oauth profile missing provider id");
+  const identityKey = `${provider}:${providerId}`;
+  const email = p.emailVerified && p.email ? p.email.trim().toLowerCase().slice(0, 120) : "";
+  const name = (p.name || "OAuth User").trim().slice(0, 80) || "OAuth User";
+  const avatarUrl = String(p.avatarUrl || "").slice(0, 500) || DEFAULT_AVATAR;
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+  if (databasePool) {
+    try {
+      const existing = await databasePool.query(
+        `select u.* from public.user_identities i
+         join public.users u on u.id = i.user_id
+         where i.provider = $1 and i.provider_id = $2`,
+        [provider, providerId]
+      );
+      if (existing.rows[0]) {
+        const row = existing.rows[0];
+        await markSocialLogin(row.id, provider);
+        return withConnectedAccount(rowToUser({ ...row, last_login_at: nowIso }), provider);
+      }
+      if (email) {
+        const byEmail = await databasePool.query("select * from public.users where lower(email) = $1", [email]);
+        if (byEmail.rows[0]) {
+          const row = byEmail.rows[0];
+          await databasePool.query(
+            "insert into public.user_identities (provider, provider_id, user_id) values ($1, $2, $3) on conflict (provider, provider_id) do nothing",
+            [provider, providerId, row.id]
+          );
+          await markSocialLogin(row.id, provider);
+          return withConnectedAccount(rowToUser({ ...row, last_login_at: nowIso }), provider);
+        }
+      }
+      const finalRole = await pickInitialRole(email || "oauth@unknown");
+      const id = secureId("usr");
+      const username = usernameFromEmail(email || `${provider}${providerId}`, () => false);
+      await databasePool.query(
+        `with new_user as (
+           insert into public.users (id, email, name, username, avatar_url, role, password_hash, created_at, last_login_at)
+           values ($1, lower($2), $3, $4, $5, $6, '', now(), now())
+           returning id
+         )
+         insert into public.user_identities (provider, provider_id, user_id)
+         select $7, $8, id from new_user`,
+        [id, email || fallbackOAuthEmail(provider, providerId), name, username, avatarUrl, finalRole, provider, providerId]
+      );
+      const created = await databasePool.query("select * from public.users where id = $1", [id]);
+      return withConnectedAccount(rowToUser(created.rows[0]), provider);
+    } catch (err) {
+      if (err?.code === "42P01" || err?.code === "42703") {
+        throw new Error("user_identities table missing \u2014 run: npm run db:migrate (supabase/schema.sql)");
+      }
+      throw err;
+    }
+  }
+  const knownUserId = memoryIdentities.get(identityKey);
+  if (knownUserId) {
+    const user2 = db.users.find((u) => u.id === knownUserId);
+    if (user2) {
+      user2.lastLoginAt = nowIso;
+      return withConnectedAccount(user2, provider);
+    }
+    memoryIdentities.delete(identityKey);
+  }
+  if (email) {
+    const byEmail = db.users.find((u) => u.email.toLowerCase() === email);
+    if (byEmail) {
+      memoryIdentities.set(identityKey, byEmail.id);
+      byEmail.lastLoginAt = nowIso;
+      return withConnectedAccount(byEmail, provider);
+    }
+  }
+  const user = {
+    id: secureId("usr"),
+    email: email || fallbackOAuthEmail(provider, providerId),
+    name,
+    username: usernameFromEmail(email || `${provider}${providerId}`, (u) => db.users.some((x) => x.username === u)),
+    avatarUrl,
+    role: await pickInitialRole(email),
+    twoFactorEnabled: false,
+    createdAt: nowIso,
+    lastLoginAt: nowIso,
+    connectedAccounts: { google: false, github: false, discord: false }
+  };
+  db.users.push(user);
+  memoryIdentities.set(identityKey, user.id);
+  return withConnectedAccount(user, provider);
+}
+async function markSocialLogin(userId, provider) {
+  await databasePool.query(
+    `update public.users
+     set last_login_at = now(),
+         connected_accounts = jsonb_set(
+           coalesce(connected_accounts, '{"google":false,"github":false,"discord":false}'::jsonb),
+           array[$2]::text[], 'true')
+     where id = $1`,
+    [userId, provider]
+  );
+}
+var SESSION_TTL_MS, RESOLVE_CACHE_TTL_MS, DEFAULT_AVATAR, dummyHashPromise, memoryPasswords, memorySessions, resolveCache, memoryIdentities;
 var init_authStore = __esm({
   "src/server/authStore.ts"() {
     init_pg();
@@ -1428,6 +1540,205 @@ var init_authStore = __esm({
     memoryPasswords = /* @__PURE__ */ new Map();
     memorySessions = /* @__PURE__ */ new Map();
     resolveCache = /* @__PURE__ */ new Map();
+    memoryIdentities = /* @__PURE__ */ new Map();
+  }
+});
+
+// src/server/oauth.ts
+import crypto4 from "crypto";
+function isOAuthProvider(value) {
+  return OAUTH_PROVIDERS.includes(value);
+}
+function env(name) {
+  return (process.env[name] || "").trim();
+}
+function getProviderConfig(provider) {
+  const prefix = provider.toUpperCase();
+  const clientId = env(`${prefix}_CLIENT_ID`);
+  const clientSecret = env(`${prefix}_CLIENT_SECRET`);
+  if (!clientId || !clientSecret) return null;
+  const d = DEFAULTS[provider];
+  return {
+    provider,
+    clientId,
+    clientSecret,
+    authorizeUrl: env(`${prefix}_AUTHORIZE_URL`) || d.authorizeUrl,
+    tokenUrl: env(`${prefix}_TOKEN_URL`) || d.tokenUrl,
+    profileUrl: env(`${prefix}_PROFILE_URL`) || d.profileUrl,
+    scope: d.scope,
+    scopeInTokenRequest: d.scopeInTokenRequest
+  };
+}
+function listConfiguredProviders() {
+  const out = {};
+  for (const p of OAUTH_PROVIDERS) out[p] = getProviderConfig(p) !== null;
+  return out;
+}
+function signState(provider, clientSecret) {
+  const payload = `${provider}.${Date.now() + STATE_TTL_MS}`;
+  const sig = crypto4.createHmac("sha256", clientSecret).update(payload).digest("base64url");
+  return `${Buffer.from(payload, "utf8").toString("base64url")}.${sig}`;
+}
+function verifyState(provider, clientSecret, state) {
+  if (typeof state !== "string" || state.length < 8 || state.length > 512) return false;
+  const [p64, sig] = state.split(".");
+  if (!p64 || !sig) return false;
+  const payload = Buffer.from(p64, "base64url").toString("utf8");
+  const expected = crypto4.createHmac("sha256", clientSecret).update(payload).digest("base64url");
+  const a = Buffer.from(sig, "utf8");
+  const b = Buffer.from(expected, "utf8");
+  if (a.length !== b.length || !crypto4.timingSafeEqual(a, b)) return false;
+  const [p, expStr] = payload.split(".");
+  const exp = Number(expStr);
+  return p === provider && Number.isFinite(exp) && exp > Date.now();
+}
+function appBaseUrl(req) {
+  const configured = (process.env.FRONTEND_URL || "").trim().replace(/\/+$/, "");
+  if (configured) {
+    try {
+      const u = new URL(configured);
+      if (u.protocol === "http:" || u.protocol === "https:") return u.origin;
+    } catch {
+    }
+  }
+  const host = String(req.headers.host || "");
+  if (!/^[a-z0-9.:\-_[\]]+$/i.test(host)) return "http://localhost:3000";
+  const forwarded = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
+  const proto = forwarded === "https" || process.env.VERCEL ? "https" : "http";
+  return `${proto}://${host}`;
+}
+function callbackUrl(req, provider) {
+  return `${appBaseUrl(req)}/api/v1/auth/oauth/${provider}/callback`;
+}
+function buildAuthorizeUrl(cfg, state, redirectUri) {
+  const u = new URL(cfg.authorizeUrl);
+  if (cfg.provider === "github") {
+    u.searchParams.set("client_id", cfg.clientId);
+    u.searchParams.set("redirect_uri", redirectUri);
+    u.searchParams.set("scope", cfg.scope);
+    u.searchParams.set("state", state);
+  } else {
+    u.searchParams.set("client_id", cfg.clientId);
+    u.searchParams.set("redirect_uri", redirectUri);
+    u.searchParams.set("response_type", "code");
+    u.searchParams.set("scope", cfg.scope);
+    u.searchParams.set("state", state);
+    if (cfg.provider === "google") u.searchParams.set("prompt", "select_account");
+  }
+  return u.toString();
+}
+async function toRecord(res) {
+  const text = await res.text();
+  try {
+    const json = JSON.parse(text);
+    if (json && typeof json === "object") return json;
+  } catch {
+  }
+  return Object.fromEntries(new URLSearchParams(text));
+}
+async function exchangeCode(cfg, code, redirectUri) {
+  const body = new URLSearchParams({
+    client_id: cfg.clientId,
+    client_secret: cfg.clientSecret,
+    grant_type: "authorization_code",
+    code,
+    redirect_uri: redirectUri
+  });
+  if (cfg.scopeInTokenRequest) body.set("scope", cfg.scope);
+  const res = await fetch(cfg.tokenUrl, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      accept: "application/json"
+    },
+    body
+  });
+  const data = await toRecord(res);
+  if (!res.ok || data.error || !data.access_token) {
+    throw new Error(`token exchange failed (${res.status}): ${String(data.error || "missing access_token")}`);
+  }
+  return data.access_token;
+}
+async function fetchJson(url, accessToken) {
+  const res = await fetch(url, {
+    headers: {
+      accept: "application/json",
+      authorization: `Bearer ${accessToken}`,
+      "user-agent": "Vanitas-Auth"
+    }
+  });
+  if (!res.ok) throw new Error(`profile fetch failed: ${res.status}`);
+  return res.json();
+}
+async function fetchProfile(cfg, accessToken) {
+  const data = await fetchJson(cfg.profileUrl, accessToken);
+  if (cfg.provider === "discord") {
+    return {
+      providerId: String(data.id || ""),
+      email: String(data.email || ""),
+      emailVerified: !!data.verified,
+      name: String(data.global_name || data.username || "Discord User"),
+      avatarUrl: data.avatar ? `https://cdn.discordapp.com/avatars/${data.id}/${data.avatar}.png?size=256` : `https://cdn.discordapp.com/embed/avatars/${Number(data.discriminator || 0) % 5}.png`
+    };
+  }
+  if (cfg.provider === "google") {
+    return {
+      providerId: String(data.sub || ""),
+      email: String(data.email || ""),
+      emailVerified: !!(data.verified_email ?? data.email_verified),
+      name: String(data.name || data.given_name || "Google User"),
+      avatarUrl: String(data.picture || "")
+    };
+  }
+  let email = String(data.email || "");
+  let emailVerified = false;
+  try {
+    const emails = await fetchJson("https://api.github.com/user/emails", accessToken);
+    if (Array.isArray(emails)) {
+      const entry = emails.find((e) => e.primary && e.verified) || emails.find((e) => e.verified);
+      if (entry?.email) {
+        email = String(entry.email);
+        emailVerified = !!entry.verified;
+      }
+    }
+  } catch {
+  }
+  return {
+    providerId: String(data.id || ""),
+    email,
+    emailVerified,
+    name: String(data.name || data.login || "GitHub User"),
+    avatarUrl: String(data.avatar_url || "")
+  };
+}
+var OAUTH_PROVIDERS, DEFAULTS, STATE_TTL_MS;
+var init_oauth = __esm({
+  "src/server/oauth.ts"() {
+    OAUTH_PROVIDERS = ["discord", "google", "github"];
+    DEFAULTS = {
+      discord: {
+        authorizeUrl: "https://discord.com/api/oauth2/authorize",
+        tokenUrl: "https://discord.com/api/oauth2/token",
+        profileUrl: "https://discord.com/api/users/@me",
+        scope: "identify email",
+        scopeInTokenRequest: true
+      },
+      google: {
+        authorizeUrl: "https://accounts.google.com/o/oauth2/v2/auth",
+        tokenUrl: "https://oauth2.googleapis.com/token",
+        profileUrl: "https://openidconnect.googleapis.com/v1/userinfo",
+        scope: "openid email profile",
+        scopeInTokenRequest: false
+      },
+      github: {
+        authorizeUrl: "https://github.com/login/oauth/authorize",
+        tokenUrl: "https://github.com/login/oauth/access_token",
+        profileUrl: "https://api.github.com/user",
+        scope: "read:user user:email",
+        scopeInTokenRequest: true
+      }
+    };
+    STATE_TTL_MS = 10 * 60 * 1e3;
   }
 });
 
@@ -2368,7 +2679,7 @@ __export(server_exports, {
 });
 import express from "express";
 import path from "path";
-import crypto4 from "crypto";
+import crypto5 from "crypto";
 function mapSuggestion(row) {
   return {
     id: row.id,
@@ -2465,7 +2776,7 @@ async function buildApp() {
   });
   app.use((req, _res, next) => {
     const incoming = sanitizeText(req.headers["x-request-id"], 64);
-    req.requestId = incoming || crypto4.randomUUID();
+    req.requestId = incoming || crypto5.randomUUID();
     next();
   });
   function detectSource(req) {
@@ -2619,6 +2930,64 @@ async function buildApp() {
       console.error("[auth] logout failed:", err);
     }
     res.json({ success: true });
+  });
+  app.get("/api/v1/auth/providers", (_req, res) => {
+    res.json({ providers: listConfiguredProviders() });
+  });
+  app.get("/api/v1/auth/oauth/:provider", (req, res) => {
+    const base = appBaseUrl(req);
+    const provider = sanitizeText(req.params.provider, 20).toLowerCase();
+    if (!isOAuthProvider(provider)) return res.redirect(`${base}/login#vnt_error=unknown_provider`);
+    const cfg = getProviderConfig(provider);
+    if (!cfg) return res.redirect(`${base}/login#vnt_error=not_configured`);
+    const state = signState(provider, cfg.clientSecret);
+    return res.redirect(buildAuthorizeUrl(cfg, state, callbackUrl(req, provider)));
+  });
+  app.get("/api/v1/auth/oauth/:provider/callback", async (req, res) => {
+    const base = appBaseUrl(req);
+    const provider = sanitizeText(req.params.provider, 20).toLowerCase();
+    if (!isOAuthProvider(provider)) return res.redirect(`${base}/login#vnt_error=unknown_provider`);
+    const cfg = getProviderConfig(provider);
+    if (!cfg) return res.redirect(`${base}/login#vnt_error=not_configured`);
+    const code = typeof req.query.code === "string" ? req.query.code : "";
+    const state = typeof req.query.state === "string" ? req.query.state : "";
+    if (typeof req.query.error === "string" && req.query.error) {
+      return res.redirect(`${base}/login#vnt_error=provider_denied`);
+    }
+    if (!code || !verifyState(provider, cfg.clientSecret, state)) {
+      return res.redirect(`${base}/login#vnt_error=invalid_state`);
+    }
+    try {
+      const accessToken = await exchangeCode(cfg, code, callbackUrl(req, provider));
+      const profile = await fetchProfile(cfg, accessToken);
+      const user = await upsertOAuthUser({
+        provider,
+        providerId: profile.providerId,
+        email: profile.email,
+        emailVerified: profile.emailVerified,
+        name: profile.name,
+        avatarUrl: profile.avatarUrl
+      });
+      const token = await createSession(user, { ip: req.ip, userAgent: String(req.headers["user-agent"] || "") });
+      db.recordAuditLog({
+        actorId: user.id,
+        actorName: user.name,
+        actorEmail: user.email,
+        action: `OAUTH_LOGIN_${provider.toUpperCase()}`,
+        category: "AUTH",
+        target: `User Account: ${user.id}`,
+        source: detectSource(req),
+        status: "SUCCESS",
+        ipAddress: req.ip || "unknown",
+        metadata: { provider }
+      });
+      return res.redirect(`${base}/login#vnt_oauth=${token}`);
+    } catch (err) {
+      console.error(`[auth] oauth ${provider} failed:`, err);
+      const msg = err.message || "";
+      if (msg.includes("db:migrate")) return res.redirect(`${base}/login#vnt_error=storage`);
+      return res.redirect(`${base}/login#vnt_error=provider_failed`);
+    }
   });
   app.post("/api/v1/auth/oauth", async (req, res) => {
     const provider = sanitizeText(req.body?.provider, 32).toUpperCase() || "GENERIC";
@@ -3032,7 +3401,7 @@ async function buildApp() {
       event: "ping.test",
       status: "delivered",
       statusCode: 200,
-      latencyMs: 90 + crypto4.randomInt(80),
+      latencyMs: 90 + crypto5.randomInt(80),
       timestamp: (/* @__PURE__ */ new Date()).toISOString(),
       payload: { event: "ping.test", timestamp: (/* @__PURE__ */ new Date()).toISOString(), message: "Vanitas ping verification handshake" }
     };
@@ -3398,6 +3767,7 @@ var init_server = __esm({
     init_db();
     init_pg();
     init_authStore();
+    init_oauth();
     init_aiService();
     init_security();
     server_default = buildApp;

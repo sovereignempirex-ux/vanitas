@@ -144,6 +144,23 @@ create table if not exists public.auth_sessions (
 create index if not exists auth_sessions_user_idx on public.auth_sessions (user_id);
 create index if not exists auth_sessions_expires_idx on public.auth_sessions (expires_at);
 
+-- ---------------------------------------------------------------------------
+-- OAuth identities (Discord / Google / GitHub) — maps a provider account to
+-- a local user. One identity per provider per user; cascade-deleted with the
+-- user. Never contains tokens or secrets.
+-- ---------------------------------------------------------------------------
+create table if not exists public.user_identities (
+  provider text not null check (provider in ('discord', 'google', 'github')),
+  provider_id text not null check (char_length(provider_id) between 1 and 64),
+  user_id text not null references public.users(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  primary key (provider, provider_id)
+);
+create unique index if not exists user_identities_user_provider_uniq
+  on public.user_identities (user_id, provider);
+create index if not exists user_identities_user_idx on public.user_identities (user_id);
+
 -- RLS for auth tables: deny direct browser access — server role only.
 alter table public.users enable row level security;
 alter table public.auth_sessions enable row level security;
+alter table public.user_identities enable row level security;

@@ -148,5 +148,64 @@ await must('users cascade-delete their sessions', async () => {
   if (r.rows.length !== 0) throw new Error('orphan sessions remain');
 });
 
+// ---- 3. OAuth identities ----------------------------------------------------
+await must('RLS enabled on user_identities', async () => {
+  const r = await db.query(`select relrowsecurity from pg_class where oid = 'public.user_identities'::regclass`);
+  if (!r.rows[0]?.relrowsecurity) throw new Error('row security is OFF');
+});
+
+await must('identity insert + join resolves the user', async () => {
+  await db.query(`insert into public.users (id, email, name, password_hash) values ('usr_oauth_t', 'oauth@test.com', 'O', '')`);
+  await db.query(`insert into public.user_identities (provider, provider_id, user_id) values ('discord', 'd123', 'usr_oauth_t')`);
+  const r = await db.query(
+    `select u.* from public.user_identities i join public.users u on u.id = i.user_id where i.provider = $1 and i.provider_id = $2`,
+    ['discord', 'd123'],
+  );
+  if (r.rows[0]?.id !== 'usr_oauth_t') throw new Error('join failed');
+});
+
+await must('duplicate identity / second link on same provider rejected (23505)', async () => {
+  const expectConflict = async (sql, params) => {
+    try {
+      await db.query(sql, params);
+      throw new Error('constraint was not enforced');
+    } catch (err) {
+      if (err.code !== '23505') throw err;
+    }
+  };
+  await expectConflict(`insert into public.user_identities (provider, provider_id, user_id) values ('discord', 'd123', 'usr_oauth_t')`, []);
+  await expectConflict(`insert into public.user_identities (provider, provider_id, user_id) values ('discord', 'd999', 'usr_oauth_t')`, []);
+  // invalid provider is rejected by the CHECK constraint (23514), not the PK
+  try {
+    await db.query(`insert into public.user_identities (provider, provider_id, user_id) values ('other', 'x1', 'usr_oauth_t')`);
+    throw new Error('invalid provider accepted');
+  } catch (err) {
+    if (err.code !== '23514') throw err;
+  }
+});
+
+await must('OAuth account + identity atomic CTE insert (as used by upsertOAuthUser)', async () => {
+  await db.query(
+    `with new_user as (
+       insert into public.users (id, email, name, username, avatar_url, role, password_hash, created_at, last_login_at)
+       values ($1, lower($2), $3, $4, $5, $6, '', now(), now())
+       returning id
+     )
+     insert into public.user_identities (provider, provider_id, user_id)
+     select $7, $8, id from new_user`,
+    ['usr_cte_1', 'CTE@Test.com', 'Cte User', 'cte_user', 'https://x/y.png', 'USER', 'google', 'g555'],
+  );
+  const u = await db.query('select 1 from public.users where id = $1', ['usr_cte_1']);
+  const i = await db.query('select 1 from public.user_identities where provider_id = $1', ['g555']);
+  if (!u.rows.length || !i.rows.length) throw new Error('CTE insert incomplete');
+  await db.query('delete from public.users where id = $1', ['usr_cte_1']);
+});
+
+await must('identities cascade-delete with their user', async () => {
+  await db.query(`delete from public.users where id = 'usr_oauth_t'`);
+  const r = await db.query(`select 1 from public.user_identities where provider_id = 'd123'`);
+  if (r.rows.length) throw new Error('orphan identity remains');
+});
+
 console.log(failures ? `\n${failures} FAILED` : '\nALL SQL CHECKS PASSED');
 process.exit(failures ? 1 : 0);

@@ -98,3 +98,47 @@ curl -X PATCH https://<رابطك>/api/v1/admin/users/<userId>/role \
  -H "Content-Type: application/json" \
  -d '{"role":"ADMIN"}'
 ```
+
+## 7) صفحات تسجيل مستقلة + دخول عبر Discord / Google / GitHub
+
+### الروابط الجاهزة للمشاركة
+
+- `https://<رابطك>/register` — صفحة إنشاء حساب مستقلة
+- `https://<رابطك>/login` — صفحة تسجيل الدخول المستقلة
+
+كل صفحة فيها حقول البريد/كلمة المرور + أزرار Discord و Google و GitHub.
+الأزرار تتفعل **تلقائياً** بمجرد إضافة مفاتيح المنصة في متغيرات البيئة،
+وإن لم تُضف مفاتيحها تظهر رسالة "غير مفعّلة" بدل الخطأ.
+
+### تفعيل المنصات (اختر ما تشاء منها)
+
+1. **Discord** — https://discord.com/developers/applications → New Application
+   → OAuth2 → أضف Redirect:
+   `https://<رابطك>/api/v1/auth/oauth/discord/callback`
+   ثم انسخ *Application ID* و *Client Secret*.
+2. **Google** — https://console.cloud.google.com/apis/credentials
+   → Create OAuth client ID (Web application) → Authorized redirect URI:
+   `https://<رابطك>/api/v1/auth/oauth/google/callback`
+3. **GitHub** — https://github.com/settings/developers → New OAuth App
+   → Authorization callback URL:
+   `https://<رابطك>/api/v1/auth/oauth/github/callback`
+
+### إضافة المفاتيح في Vercel
+
+Settings → Environment Variables، أضف (كل منصة على حدة):
+
+```
+DISCORD_CLIENT_ID=...        DISCORD_CLIENT_SECRET=...
+GOOGLE_CLIENT_ID=...         GOOGLE_CLIENT_SECRET=...
+GITHUB_CLIENT_ID=...         GITHUB_CLIENT_SECRET=...
+FRONTEND_URL=https://<رابطك>
+```
+
+ثم Redeploy. من هذا اللحظة أزرار المنصات تعمل فعلياً:
+يدخل المستخدم بحسابه، ويُنشأ له حساب Vanitas تلقائياً (دور `USER`)،
+ويُربط بالبريد **المُتحقَّق منه فقط** من المنصة — ولا يمكن الاستيلاء
+على حساب موجود ببريد غير مُتحقق.
+
+> ملاحظة: روابط الـ callback هذه تظهر أيضاً في `.env.example` تحت قسم
+> Social login.
+

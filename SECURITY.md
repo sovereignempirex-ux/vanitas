@@ -25,6 +25,12 @@
 - New self-registered users are always `USER`. Admin promotion paths are only:
   `ADMIN_EMAILS` env (comma-separated), the first account on a fresh database,
   or `ADMIN_API_TOKEN` promoting via `/api/v1/admin/users/:id/role`.
+- **Social login** (Discord/Google/GitHub — OAuth 2.0 authorization code):
+  `state` is an HMAC signed with the provider's client_secret (10-min expiry,
+  verified with `timingSafeEqual`) so it works on serverless without shared
+  storage. Identities link by provider id or by **verified email only** — an
+  unverified email can never take over an existing account. Code/token/profile
+  exchange happens server-side only; tokens never appear in logs or HTML.
 - Local/demo sessions (OAuth sim, ingress-key tab) can never grant `ADMIN`.
 - Secrets use `crypto.randomBytes`. Raw API secrets are shown once only.
 - Webhook URLs: `https` only in production, private hosts blocked (SSRF guard).

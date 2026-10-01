@@ -71,6 +71,8 @@ interface AuthContextType {
   ) => Promise<{ success: boolean; error?: string }>;
   /** Offline/demo-only session (ingress key tab) — never hits the server. */
   loginLocalSynthetic: (email: string, name?: string) => { success: boolean };
+  /** Adopt the session token delivered by the OAuth callback (#vnt_oauth=…). */
+  completeOAuthLogin: (token: string) => Promise<void>;
   loginAsDemoAccount: (account: DemoAccount) => void;
   logout: () => void;
   clientSource: ClientSource;
@@ -260,6 +262,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setIsAuthModalOpen(false);
   };
 
+  /** Complete a real social login: the OAuth callback redirected to the SPA
+   *  with a session token in the URL fragment — adopt it and load the user. */
+  const completeOAuthLogin = async (token: string) => {
+    api.setAuthToken(token);
+    await refreshUser();
+  };
+
   const loginLocalSynthetic = (email: string, name?: string) => {
     const cleanEmail = email.trim().toLowerCase().slice(0, 120);
     const generatedUser: User = {
@@ -410,6 +419,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setRole,
         toggleRole,
         loginOAuth,
+        completeOAuthLogin,
         loginWithEmail,
         loginLocalSynthetic,
         loginAsDemoAccount,

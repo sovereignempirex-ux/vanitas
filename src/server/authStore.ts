@@ -18,6 +18,20 @@ const DEFAULT_AVATAR = 'https://i.postimg.cc/SNN169kT/orders.png';
 
 export type AuthOutcome = { ok: true; user: User } | { ok: false; status: number; error: string };
 
+/**
+ * ADMIN if the email is listed in ADMIN_EMAILS; otherwise USER — except the
+ * very first account on a fresh database, which bootstraps as ADMIN.
+ * Shared by password registration and OAuth sign-in.
+ */
+async function pickInitialRole(email: string): Promise<UserRole> {
+  if (isAdminEmail(email)) return 'ADMIN';
+  if (databasePool) {
+    const count = await databasePool.query('select count(*)::int as n from public.users');
+    if ((count.rows[0]?.n ?? 0) === 0) return 'ADMIN';
+  }
+  return 'USER';
+}
+
 // ---- password hashing -----------------------------------------------------
 
 function scryptAsync(password: string, salt: Buffer, keylen: number, opts: { N: number; r: number; p: number }): Promise<Buffer> {
@@ -112,19 +126,12 @@ const resolveCache = new Map<string, { user: User | null; until: number }>();
 export async function createAccount(params: { email: string; password: string; name: string }): Promise<AuthOutcome> {
   const email = params.email.trim().toLowerCase();
   const passwordHash = await hashPassword(params.password);
-  const role: UserRole = isAdminEmail(email) ? 'ADMIN' : 'USER';
+  const role = await pickInitialRole(email);
 
   if (databasePool) {
     try {
       const existing = await databasePool.query('select 1 from public.users where lower(email) = $1', [email]);
       if (existing.rowCount) return { ok: false, status: 409, error: 'An account with this email already exists' };
-
-      // Fresh install: the very first account becomes the administrator.
-      let finalRole = role;
-      if (finalRole === 'USER') {
-        const count = await databasePool.query('select count(*)::int as n from public.users');
-        if ((count.rows[0]?.n ?? 0) === 0) finalRole = 'ADMIN';
-      }
 
       const id = secureId('usr');
       const username = usernameFromEmail(email, () => false);
@@ -132,7 +139,7 @@ export async function createAccount(params: { email: string; password: string; n
         `insert into public.users (id, email, name, username, avatar_url, role, password_hash, created_at, last_login_at)
          values ($1, lower($2), $3, $4, $5, $6, $7, now(), now())
          returning *`,
-        [id, email, params.name, username, DEFAULT_AVATAR, finalRole, passwordHash],
+        [id, email, params.name, username, DEFAULT_AVATAR, role, passwordHash],
       );
       return { ok: true, user: rowToUser(result.rows[0]) };
     } catch (err: any) {
@@ -287,4 +294,145 @@ export async function revokeSession(token: string): Promise<void> {
   } else {
     memorySessions.delete(hash);
   }
+}
+
+// ---- OAuth identities (Discord / Google / GitHub) -------------------------
+//
+// A user may link one identity per provider. Sign-in order:
+//   1. known (provider, provider_id)  → that account
+//   2. verified email match           → link identity to the existing account
+//   3. otherwise                      → create a new USER account
+// Unverified emails are NEVER used to take over an existing account.
+
+const memoryIdentities = new Map<string, string>(); // `${provider}:${providerId}` → userId
+
+function fallbackOAuthEmail(provider: string, providerId: string): string {
+  return `${provider}_${providerId}@oauth.vanitas.local`;
+}
+
+export interface OAuthIdentityParams {
+  provider: string;
+  providerId: string;
+  email: string;
+  emailVerified: boolean;
+  name: string;
+  avatarUrl: string;
+}
+
+function withConnectedAccount(user: User, provider: string): User {
+  if (provider === 'google' || provider === 'github' || provider === 'discord') {
+    user.connectedAccounts = { ...user.connectedAccounts, [provider]: true };
+  }
+  return user;
+}
+
+export async function upsertOAuthUser(p: OAuthIdentityParams): Promise<User> {
+  const provider = p.provider.toLowerCase().slice(0, 20);
+  const providerId = String(p.providerId).slice(0, 64);
+  if (!providerId) throw new Error('oauth profile missing provider id');
+  const identityKey = `${provider}:${providerId}`;
+  const email = p.emailVerified && p.email ? p.email.trim().toLowerCase().slice(0, 120) : '';
+  const name = (p.name || 'OAuth User').trim().slice(0, 80) || 'OAuth User';
+  const avatarUrl = String(p.avatarUrl || '').slice(0, 500) || DEFAULT_AVATAR;
+  const nowIso = new Date().toISOString();
+
+  if (databasePool) {
+    try {
+      // 1) Same social account as before → straight login.
+      const existing = await databasePool.query(
+        `select u.* from public.user_identities i
+         join public.users u on u.id = i.user_id
+         where i.provider = $1 and i.provider_id = $2`,
+        [provider, providerId],
+      );
+      if (existing.rows[0]) {
+        const row = existing.rows[0];
+        await markSocialLogin(row.id, provider);
+        return withConnectedAccount(rowToUser({ ...row, last_login_at: nowIso }), provider);
+      }
+
+      // 2) Verified email already registered → link identity to that account.
+      if (email) {
+        const byEmail = await databasePool.query('select * from public.users where lower(email) = $1', [email]);
+        if (byEmail.rows[0]) {
+          const row = byEmail.rows[0];
+          await databasePool.query(
+            'insert into public.user_identities (provider, provider_id, user_id) values ($1, $2, $3) on conflict (provider, provider_id) do nothing',
+            [provider, providerId, row.id],
+          );
+          await markSocialLogin(row.id, provider);
+          return withConnectedAccount(rowToUser({ ...row, last_login_at: nowIso }), provider);
+        }
+      }
+
+      // 3) Brand new account + identity, created atomically (CTE).
+      const finalRole = await pickInitialRole(email || 'oauth@unknown');
+      const id = secureId('usr');
+      const username = usernameFromEmail(email || `${provider}${providerId}`, () => false);
+      await databasePool.query(
+        `with new_user as (
+           insert into public.users (id, email, name, username, avatar_url, role, password_hash, created_at, last_login_at)
+           values ($1, lower($2), $3, $4, $5, $6, '', now(), now())
+           returning id
+         )
+         insert into public.user_identities (provider, provider_id, user_id)
+         select $7, $8, id from new_user`,
+        [id, email || fallbackOAuthEmail(provider, providerId), name, username, avatarUrl, finalRole, provider, providerId],
+      );
+      const created = await databasePool.query('select * from public.users where id = $1', [id]);
+      return withConnectedAccount(rowToUser(created.rows[0]), provider);
+    } catch (err: any) {
+      if (err?.code === '42P01' || err?.code === '42703') {
+        throw new Error('user_identities table missing — run: npm run db:migrate (supabase/schema.sql)');
+      }
+      throw err;
+    }
+  }
+
+  // ---- in-memory fallback (no DATABASE_URL) ----
+  const knownUserId = memoryIdentities.get(identityKey);
+  if (knownUserId) {
+    const user = db.users.find((u) => u.id === knownUserId);
+    if (user) {
+      user.lastLoginAt = nowIso;
+      return withConnectedAccount(user, provider);
+    }
+    memoryIdentities.delete(identityKey);
+  }
+  if (email) {
+    const byEmail = db.users.find((u) => u.email.toLowerCase() === email);
+    if (byEmail) {
+      memoryIdentities.set(identityKey, byEmail.id);
+      byEmail.lastLoginAt = nowIso;
+      return withConnectedAccount(byEmail, provider);
+    }
+  }
+  const user: User = {
+    id: secureId('usr'),
+    email: email || fallbackOAuthEmail(provider, providerId),
+    name,
+    username: usernameFromEmail(email || `${provider}${providerId}`, (u) => db.users.some((x) => x.username === u)),
+    avatarUrl,
+    role: await pickInitialRole(email),
+    twoFactorEnabled: false,
+    createdAt: nowIso,
+    lastLoginAt: nowIso,
+    connectedAccounts: { google: false, github: false, discord: false },
+  };
+  db.users.push(user);
+  memoryIdentities.set(identityKey, user.id);
+  return withConnectedAccount(user, provider);
+}
+
+/** DB-mode touch: stamp last_login_at and flag the provider as connected. */
+async function markSocialLogin(userId: string, provider: string): Promise<void> {
+  await databasePool!.query(
+    `update public.users
+     set last_login_at = now(),
+         connected_accounts = jsonb_set(
+           coalesce(connected_accounts, '{"google":false,"github":false,"discord":false}'::jsonb),
+           array[$2]::text[], 'true')
+     where id = $1`,
+    [userId, provider],
+  );
 }

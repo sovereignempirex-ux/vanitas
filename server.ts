@@ -3,7 +3,19 @@ import path from 'path';
 import crypto from 'crypto';
 import { db, ALL_SCOPES } from './src/server/db.ts';
 import { databasePool } from './src/server/pg.ts';
-import { createAccount, verifyAccount, createSession, resolveSession, revokeSession } from './src/server/authStore.ts';
+import { createAccount, verifyAccount, createSession, resolveSession, revokeSession, upsertOAuthUser } from './src/server/authStore.ts';
+import {
+  getProviderConfig,
+  isOAuthProvider,
+  listConfiguredProviders,
+  signState,
+  verifyState,
+  buildAuthorizeUrl,
+  callbackUrl,
+  appBaseUrl,
+  exchangeCode,
+  fetchProfile,
+} from './src/server/oauth.ts';
 import { processAiQuery, diagnoseAndFixCode, performSemanticSearch, searchYouTubeVideos } from './src/server/aiService.ts';
 import { ClientSource, UserRole, PermissionScope, ProductSuggestion } from './src/types.ts';
 import { getActorUser, requireAdmin, rateLimit, sanitizeText, sanitizeUrl, csvCell, parsePagination, secureToken, secureId, isValidScope } from './src/server/security.ts';
@@ -311,6 +323,78 @@ export async function buildApp() {
       console.error('[auth] logout failed:', err);
     }
     res.json({ success: true });
+  });
+
+  // ----------------------------------------------------
+  // REAL SOCIAL LOGIN: Discord / Google / GitHub (OAuth 2.0)
+  // Activated by adding <PROVIDER>_CLIENT_ID + <PROVIDER>_CLIENT_SECRET env.
+  // ----------------------------------------------------
+
+  // Which providers are configured — lets the UI enable/disable buttons.
+  app.get('/api/v1/auth/providers', (_req, res) => {
+    res.json({ providers: listConfiguredProviders() });
+  });
+
+  // Step 1: send the browser to the provider's consent screen.
+  app.get('/api/v1/auth/oauth/:provider', (req, res) => {
+    const base = appBaseUrl(req);
+    const provider = sanitizeText(req.params.provider, 20).toLowerCase();
+    if (!isOAuthProvider(provider)) return res.redirect(`${base}/login#vnt_error=unknown_provider`);
+    const cfg = getProviderConfig(provider);
+    if (!cfg) return res.redirect(`${base}/login#vnt_error=not_configured`);
+    const state = signState(provider, cfg.clientSecret);
+    return res.redirect(buildAuthorizeUrl(cfg, state, callbackUrl(req, provider)));
+  });
+
+  // Step 2: provider redirects back with ?code&state → session → SPA.
+  app.get('/api/v1/auth/oauth/:provider/callback', async (req, res) => {
+    const base = appBaseUrl(req);
+    const provider = sanitizeText(req.params.provider, 20).toLowerCase();
+    if (!isOAuthProvider(provider)) return res.redirect(`${base}/login#vnt_error=unknown_provider`);
+    const cfg = getProviderConfig(provider);
+    if (!cfg) return res.redirect(`${base}/login#vnt_error=not_configured`);
+
+    const code = typeof req.query.code === 'string' ? req.query.code : '';
+    const state = typeof req.query.state === 'string' ? req.query.state : '';
+    if (typeof req.query.error === 'string' && req.query.error) {
+      return res.redirect(`${base}/login#vnt_error=provider_denied`);
+    }
+    if (!code || !verifyState(provider, cfg.clientSecret, state)) {
+      return res.redirect(`${base}/login#vnt_error=invalid_state`);
+    }
+
+    try {
+      const accessToken = await exchangeCode(cfg, code, callbackUrl(req, provider));
+      const profile = await fetchProfile(cfg, accessToken);
+      const user = await upsertOAuthUser({
+        provider,
+        providerId: profile.providerId,
+        email: profile.email,
+        emailVerified: profile.emailVerified,
+        name: profile.name,
+        avatarUrl: profile.avatarUrl,
+      });
+      const token = await createSession(user, { ip: req.ip, userAgent: String(req.headers['user-agent'] || '') });
+      db.recordAuditLog({
+        actorId: user.id,
+        actorName: user.name,
+        actorEmail: user.email,
+        action: `OAUTH_LOGIN_${provider.toUpperCase()}`,
+        category: 'AUTH',
+        target: `User Account: ${user.id}`,
+        source: detectSource(req),
+        status: 'SUCCESS',
+        ipAddress: req.ip || 'unknown',
+        metadata: { provider },
+      });
+      // Token travels in the fragment (never sent to the server in requests).
+      return res.redirect(`${base}/login#vnt_oauth=${token}`);
+    } catch (err) {
+      console.error(`[auth] oauth ${provider} failed:`, err);
+      const msg = (err as Error).message || '';
+      if (msg.includes('db:migrate')) return res.redirect(`${base}/login#vnt_error=storage`);
+      return res.redirect(`${base}/login#vnt_error=provider_failed`);
+    }
   });
 
   // Auth OAuth Simulation (validated + secure token, no Math.random)

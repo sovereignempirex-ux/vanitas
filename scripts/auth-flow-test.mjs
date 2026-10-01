@@ -104,5 +104,19 @@ console.log('— session still valid —');
 r = await call('GET', '/auth/me', { token: loginToken });
 check('session still valid for login token', r.json?.user?.id === userId, r.json?.user);
 
+console.log('— social login providers —');
+r = await call('GET', '/auth/providers');
+const prov = r.json?.providers || {};
+check('providers endpoint lists discord/google/github', prov.discord === false && prov.google === false && prov.github === false, r.json);
+
+const startRes = await fetch(`${BASE}/auth/oauth/discord`, { redirect: 'manual' });
+check('oauth start without keys → 3xx redirect', startRes.status >= 300 && startRes.status < 400, { status: startRes.status });
+const startLoc = startRes.headers.get('location') || '';
+check('redirect reports not_configured', startLoc.includes('vnt_error=not_configured'), startLoc);
+
+const unknownRes = await fetch(`${BASE}/auth/oauth/nonsense`, { redirect: 'manual' });
+const unknownLoc = unknownRes.headers.get('location') || '';
+check('unknown provider → unknown_provider', unknownLoc.includes('vnt_error=unknown_provider'), unknownLoc);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
