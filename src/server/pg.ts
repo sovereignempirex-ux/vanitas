@@ -14,3 +14,41 @@ export const databasePool = process.env.DATABASE_URL
 if (databasePool) {
   databasePool.on('error', (err) => console.error('[db] pool error:', (err as Error).message));
 }
+
+// ---------------------------------------------------------------------------
+// Lazy schema guard: supabase/schema.sql also ships the comments table, but a
+// database provisioned before that change won't have it. Create it on first
+// use so every deployment works without manual database access.
+// Idempotent (IF NOT EXISTS) and memoized — runs at most once per process.
+// ---------------------------------------------------------------------------
+const COMMENTS_DDL = `
+create table if not exists public.comments (
+  id text primary key,
+  doc_id text not null,
+  user_id text not null references public.users(id) on delete cascade,
+  author_name text not null default '',
+  author_avatar text not null default '',
+  body text not null check (char_length(body) between 2 and 2000),
+  created_at timestamptz not null default now()
+);
+create index if not exists comments_doc_created_idx on public.comments (doc_id, created_at desc);
+create index if not exists comments_user_idx on public.comments (user_id);
+alter table public.comments enable row level security;
+`;
+
+let commentsSchemaReady: Promise<void> | null = null;
+
+export function ensureCommentsSchema(): Promise<void> {
+  if (!databasePool) return Promise.resolve();
+  if (!commentsSchemaReady) {
+    commentsSchemaReady = databasePool
+      .query(COMMENTS_DDL)
+      .then(() => undefined)
+      .catch((err: Error) => {
+        console.error('[schema/comments] ensure failed:', err.message);
+        commentsSchemaReady = null; // retry on the next request
+        throw err;
+      });
+  }
+  return commentsSchemaReady;
+}

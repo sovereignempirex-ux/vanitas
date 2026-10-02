@@ -2,7 +2,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import crypto from 'crypto';
 import { db, ALL_SCOPES } from './src/server/db.ts';
-import { databasePool } from './src/server/pg.ts';
+import { databasePool, ensureCommentsSchema } from './src/server/pg.ts';
 import { createAccount, verifyAccount, createSession, resolveSession, revokeSession, upsertOAuthUser, updateProfile } from './src/server/authStore.ts';
 import {
   getProviderConfig,
@@ -97,6 +97,7 @@ function mapComment(row: Record<string, any>): DocComment {
 
 async function listComments(docId: string): Promise<DocComment[]> {
   if (!databasePool) return memoryComments.filter((c) => c.docId === docId);
+  await ensureCommentsSchema();
   const result = await databasePool.query(
     'select * from public.comments where doc_id = $1 order by created_at asc limit 500',
     [docId],
@@ -125,6 +126,7 @@ async function createComment(params: {
     memoryComments.push(comment);
     return comment;
   }
+  await ensureCommentsSchema();
   const result = await databasePool.query(
     `insert into public.comments (id, doc_id, user_id, author_name, author_avatar, body)
      values ($1, $2, $3, $4, $5, $6) returning *`,
@@ -141,6 +143,7 @@ async function deleteComment(id: string, actor: { id: string; role: UserRole }):
     memoryComments.splice(idx, 1);
     return 'deleted';
   }
+  await ensureCommentsSchema();
   const existing = await databasePool.query('select user_id from public.comments where id = $1', [id]);
   if (!existing.rows[0]) return 'not_found';
   if (existing.rows[0].user_id !== actor.id && actor.role !== 'ADMIN') return 'forbidden';

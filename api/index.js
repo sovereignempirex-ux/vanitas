@@ -765,7 +765,18 @@ var init_db = __esm({
 
 // src/server/pg.ts
 import { Pool } from "pg";
-var databasePool;
+function ensureCommentsSchema() {
+  if (!databasePool) return Promise.resolve();
+  if (!commentsSchemaReady) {
+    commentsSchemaReady = databasePool.query(COMMENTS_DDL).then(() => void 0).catch((err) => {
+      console.error("[schema/comments] ensure failed:", err.message);
+      commentsSchemaReady = null;
+      throw err;
+    });
+  }
+  return commentsSchemaReady;
+}
+var databasePool, COMMENTS_DDL, commentsSchemaReady;
 var init_pg = __esm({
   "src/server/pg.ts"() {
     databasePool = process.env.DATABASE_URL ? new Pool({
@@ -776,6 +787,21 @@ var init_pg = __esm({
     if (databasePool) {
       databasePool.on("error", (err) => console.error("[db] pool error:", err.message));
     }
+    COMMENTS_DDL = `
+create table if not exists public.comments (
+  id text primary key,
+  doc_id text not null,
+  user_id text not null references public.users(id) on delete cascade,
+  author_name text not null default '',
+  author_avatar text not null default '',
+  body text not null check (char_length(body) between 2 and 2000),
+  created_at timestamptz not null default now()
+);
+create index if not exists comments_doc_created_idx on public.comments (doc_id, created_at desc);
+create index if not exists comments_user_idx on public.comments (user_id);
+alter table public.comments enable row level security;
+`;
+    commentsSchemaReady = null;
   }
 });
 
@@ -2817,6 +2843,7 @@ function mapComment(row) {
 }
 async function listComments(docId) {
   if (!databasePool) return memoryComments.filter((c) => c.docId === docId);
+  await ensureCommentsSchema();
   const result = await databasePool.query(
     "select * from public.comments where doc_id = $1 order by created_at asc limit 500",
     [docId]
@@ -2838,6 +2865,7 @@ async function createComment(params) {
     memoryComments.push(comment);
     return comment;
   }
+  await ensureCommentsSchema();
   const result = await databasePool.query(
     `insert into public.comments (id, doc_id, user_id, author_name, author_avatar, body)
      values ($1, $2, $3, $4, $5, $6) returning *`,
@@ -2853,6 +2881,7 @@ async function deleteComment(id, actor) {
     memoryComments.splice(idx, 1);
     return "deleted";
   }
+  await ensureCommentsSchema();
   const existing = await databasePool.query("select user_id from public.comments where id = $1", [id]);
   if (!existing.rows[0]) return "not_found";
   if (existing.rows[0].user_id !== actor.id && actor.role !== "ADMIN") return "forbidden";
