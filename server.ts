@@ -1255,6 +1255,12 @@ export async function buildApp() {
       stats.activeUsers = db.users.length;
       stats.activeApiKeys = db.apiKeys.filter((k) => k.status === 'active').length;
     }
+    // Honest error rate: derived from today's real request metrics — never a
+    // static "healthy" placeholder number.
+    const breakdown = stats.requestBreakdown || [];
+    const totalReqs = breakdown.reduce((sum, p) => sum + Number(p.count || 0), 0);
+    const totalErrs = breakdown.reduce((sum, p) => sum + Number(p.errorCount || 0), 0);
+    stats.errorRate = totalReqs > 0 ? totalErrs / totalReqs : 0;
     res.json({ stats, threats: db.securityThreats });
   });
 

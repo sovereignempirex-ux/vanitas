@@ -138,6 +138,14 @@ export const OverviewView: React.FC = () => {
     }
   };
 
+  // Real request metrics reported by the server today — never fabricated.
+  const breakdown = stats?.requestBreakdown ?? [];
+  const reqCount = breakdown.reduce((sum, p) => sum + Number(p.count || 0), 0);
+  const errCount = breakdown.reduce((sum, p) => sum + Number(p.errorCount || 0), 0);
+  const avgLatencyMs = reqCount
+    ? Math.round(breakdown.reduce((sum, p) => sum + Number(p.count || 0) * Number(p.avgLatencyMs || 0), 0) / reqCount)
+    : null;
+
   return (
     <div className="space-y-8 vnt-fade-up">
       {/* Hero Glass Banner */}
@@ -220,27 +228,24 @@ export const OverviewView: React.FC = () => {
                 {stats?.apiRequestsToday?.toLocaleString() ?? '0'}
               </p>
               <div className="flex items-center gap-1 mt-1 text-[10px] text-emerald-400">
-                <ArrowUpRight className="h-3 w-3" />
-                <span>+14.2% vs yesterday</span>
+                <span>{breakdown.length ? `from ${breakdown.length} endpoints` : 'no requests yet'}</span>
               </div>
             </div>
 
             <div className="rounded-2xl border border-white/10 bg-black/40 p-4 backdrop-blur-xl">
-              <p className="text-[11px] font-mono text-slate-400">p95 Latency</p>
+              <p className="text-[11px] font-mono text-slate-400">Avg Latency</p>
               <p className="text-2xl font-bold font-mono text-cyan-300 mt-1">
-                {stats?.p95LatencyMs || 24}ms
+                {avgLatencyMs != null ? `${avgLatencyMs}ms` : '—'}
               </p>
               <div className="flex items-center gap-1 mt-1 text-[10px] text-emerald-400">
                 <CheckCircle2 className="h-3 w-3" />
-                <span>Nominal performance</span>
+                <span>{reqCount ? `measured across ${reqCount} requests` : 'no traffic yet'}</span>
               </div>
             </div>
 
             <div className="rounded-2xl border border-white/10 bg-black/40 p-4 backdrop-blur-xl">
               <p className="text-[11px] font-mono text-slate-400">Active Keys</p>
-              <p className="text-2xl font-bold font-mono text-blue-300 mt-1">
-                {stats?.activeApiKeys || 18}
-              </p>
+              <p className="text-2xl font-bold font-mono text-blue-300 mt-1">{stats ? stats.activeApiKeys : '—'}</p>
               <div className="flex items-center gap-1 mt-1 text-[10px] text-blue-400">
                 <span>Scoped tokens</span>
               </div>
@@ -249,10 +254,10 @@ export const OverviewView: React.FC = () => {
             <div className="rounded-2xl border border-white/10 bg-black/40 p-4 backdrop-blur-xl">
               <p className="text-[11px] font-mono text-slate-400">Error Rate</p>
               <p className="text-2xl font-bold font-mono text-emerald-300 mt-1">
-                {((stats?.errorRate || 0.0004) * 100).toFixed(2)}%
+                {stats ? `${(stats.errorRate * 100).toFixed(2)}%` : '—'}
               </p>
               <div className="flex items-center gap-1 mt-1 text-[10px] text-slate-400">
-                <span>99.98% uptime</span>
+                <span>{errCount ? `${errCount} failed requests today` : 'no failed requests today'}</span>
               </div>
             </div>
           </div>
@@ -759,7 +764,7 @@ export const OverviewView: React.FC = () => {
                 <div className="mt-1.5 h-1.5 w-full rounded-full bg-slate-800 overflow-hidden">
                   <div
                     className="h-full bg-blue-500 rounded-full"
-                    style={{ width: `${Math.min(100, (ep.count / (stats.apiRequestsToday || 10000)) * 100 * 2)}%` }}
+                    style={{ width: `${Math.min(100, (ep.count / Math.max(1, stats.apiRequestsToday)) * 100 * 2)}%` }}
                   />
                 </div>
               </div>
@@ -1056,7 +1061,7 @@ export const OverviewView: React.FC = () => {
                 <div className="mt-1.5 h-1.5 w-full rounded-full bg-slate-800 overflow-hidden">
                   <div
                     className="h-full bg-blue-500 rounded-full"
-                    style={{ width: `${Math.min(100, (ep.count / (stats.apiRequestsToday || 10000)) * 100 * 2)}%` }}
+                    style={{ width: `${Math.min(100, (ep.count / Math.max(1, stats.apiRequestsToday)) * 100 * 2)}%` }}
                   />
                 </div>
               </div>
