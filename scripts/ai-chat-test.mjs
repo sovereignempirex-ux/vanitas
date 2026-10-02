@@ -12,7 +12,8 @@ function check(name, cond, detail) {
     console.log(`  PASS  ${name}`);
   } else {
     fail++;
-    console.log(`  FAIL  ${name}${detail ? ` — ${detail}` : ''}`);
+    const shown = typeof detail === 'string' ? detail : JSON.stringify(detail);
+    console.log(`  FAIL  ${name}${shown ? ` — ${shown}` : ''}`);
   }
 }
 

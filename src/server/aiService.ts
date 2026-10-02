@@ -62,15 +62,49 @@ async function queryOllama(systemInstruction: string, prompt: string): Promise<s
 // ---------------------------------------------------------------------------
 // Free, keyless model: Pollinations.ai (OpenAI-compatible, no API key).
 // This is the DEFAULT provider on Vercel — a real LLM answer with zero setup.
-// One quick retry: the free tier intermittently answers 402/500 under load.
+// Rate window (APIDOCS.md): anonymous = 1 request / 15s, Bearer token = 1 / 5s.
+// A 402 means "outside the window" — wait it out instead of hammering it.
 // ---------------------------------------------------------------------------
-async function queryPollinations(systemInstruction: string, prompt: string): Promise<string | null> {
-  for (let attempt = 0; attempt < 2; attempt++) {
+const POLLI_WINDOW_MS = (process.env.POLLINATIONS_TOKEN ? 5 : 15) * 1000;
+// Whole-request budget: Vercel kills the function at 30s — leave room for
+// streamed attempt → window wait → retry → disclosed local-KB fallback.
+const POLLI_BUDGET_MS = 26_000;
+
+/**
+ * Backoff schedule for Pollinations' flaky free tier: a fast 2s retry catches
+ * node-inconsistent rate slots, a longer wait to firstAttempt+window catches
+ * the strict 15s (anonymous) / 5s (token) window. Returns false when the
+ * remaining budget wouldn't leave room for a meaningful retry.
+ */
+async function pollinationsRetryDelay(
+  attempt: number,
+  firstAttemptAt: number,
+  budgetUntil: number,
+): Promise<boolean> {
+  const wait =
+    attempt === 0
+      ? POLLI_WINDOW_MS > 5_000
+        ? 2_000 // cheap probe of the next slot — 402s sometimes clear instantly
+        : 5_500
+      : firstAttemptAt + POLLI_WINDOW_MS + 1_500 - Date.now();
+  if (Date.now() + Math.max(wait, 0) + 4_000 > budgetUntil) return false;
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  return true;
+}
+
+async function queryPollinations(
+  systemInstruction: string,
+  prompt: string,
+  budgetUntil = Date.now() + POLLI_BUDGET_MS,
+): Promise<string | null> {
+  const firstAttemptAt = Date.now();
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (budgetUntil - Date.now() < 4_000) return null;
     try {
       const response = await fetch('https://text.pollinations.ai/openai', {
         method: 'POST',
         headers: pollinationsHeaders({ 'Content-Type': 'application/json', Accept: 'application/json' }),
-        signal: AbortSignal.timeout(20_000),
+        signal: AbortSignal.timeout(Math.min(20_000, budgetUntil - Date.now())),
         body: JSON.stringify({
           model: 'openai',
           messages: [
@@ -82,10 +116,7 @@ async function queryPollinations(systemInstruction: string, prompt: string): Pro
       if (!response.ok) {
         lastAiUpstream = `pollinations_http_${response.status}`;
         console.warn(`Pollinations HTTP ${response.status} (attempt ${attempt + 1});`);
-        if (attempt === 0) {
-          await new Promise((r) => setTimeout(r, 600));
-          continue;
-        }
+        if (await pollinationsRetryDelay(attempt, firstAttemptAt, budgetUntil)) continue;
         return null;
       }
       const data = await response.json() as { choices?: { message?: { content?: string } }[] };
@@ -95,10 +126,7 @@ async function queryPollinations(systemInstruction: string, prompt: string): Pro
         return text;
       }
       lastAiUpstream = 'pollinations_empty_reply';
-      if (attempt === 0) {
-        await new Promise((r) => setTimeout(r, 600));
-        continue;
-      }
+      if (await pollinationsRetryDelay(attempt, firstAttemptAt, budgetUntil)) continue;
       return null;
     } catch (error) {
       lastAiUpstream = `pollinations_${(error as Error)?.name || 'network_error'}`;
@@ -119,16 +147,20 @@ async function queryPollinationsStream(
   systemInstruction: string,
   prompt: string,
   onDelta: (chunk: string) => void,
+  budgetUntil = Date.now() + POLLI_BUDGET_MS,
 ): Promise<string | null> {
-  // Budget: the Vercel function is killed at 30s, so the stream must leave
-  // room for the full-response fallback below.
+  const firstAttemptAt = Date.now();
   for (let attempt = 0; attempt < 2; attempt++) {
+    if (budgetUntil - Date.now() < 4_000) return null;
     let response: Response;
     try {
       response = await fetch('https://text.pollinations.ai/openai', {
         method: 'POST',
         headers: pollinationsHeaders({ 'Content-Type': 'application/json', Accept: 'text/event-stream' }),
-        signal: AbortSignal.timeout(24_000),
+        // 12s cap: a hung attempt must leave room for the full-query fallback;
+        // a partial stream already emitted is re-synced by the caller's
+        // authoritative `done.text`, so restarting here costs nothing visible.
+        signal: AbortSignal.timeout(Math.min(12_000, budgetUntil - Date.now())),
         body: JSON.stringify({
           model: 'openai',
           stream: true,
@@ -146,10 +178,7 @@ async function queryPollinationsStream(
     if (!response.ok || !response.body) {
       lastAiUpstream = `pollinations_stream_http_${response.status}`;
       console.warn(`Pollinations stream HTTP ${response.status} (attempt ${attempt + 1});`);
-      if (attempt === 0) {
-        await new Promise((r) => setTimeout(r, 600));
-        continue;
-      }
+      if (attempt + 1 < 2 && (await pollinationsRetryDelay(attempt, firstAttemptAt, budgetUntil))) continue;
       return null;
     }
 
@@ -215,12 +244,17 @@ async function queryPollinationsStream(
  * Legacy plain endpoint — same Pollinations models at a different route, used
  * when /openai misbehaves. Still a REAL model answer (never the local KB).
  */
-async function queryPollinationsLegacy(systemInstruction: string, prompt: string): Promise<string | null> {
+async function queryPollinationsLegacy(
+  systemInstruction: string,
+  prompt: string,
+  budgetUntil = Date.now() + POLLI_BUDGET_MS,
+): Promise<string | null> {
+  if (budgetUntil - Date.now() < 3_000) return null;
   try {
     const response = await fetch('https://text.pollinations.ai/', {
       method: 'POST',
       headers: pollinationsHeaders({ 'Content-Type': 'application/json' }),
-      signal: AbortSignal.timeout(20_000),
+      signal: AbortSignal.timeout(Math.min(20_000, budgetUntil - Date.now())),
       body: JSON.stringify({
         model: 'openai',
         messages: [
@@ -231,6 +265,7 @@ async function queryPollinationsLegacy(systemInstruction: string, prompt: string
     });
     if (!response.ok) {
       lastAiUpstream = `pollinations_legacy_http_${response.status}`;
+      console.warn(`Pollinations legacy HTTP ${response.status};`);
       return null;
     }
     const text = (await response.text()).trim();
@@ -468,7 +503,11 @@ async function prepareAiQuery(options: GenerateAiOptions): Promise<PreparedQuery
 }
 
 /** Full (non-streaming) provider chain: Ollama → Gemini → Pollinations → local. */
-async function runFullQuery(options: GenerateAiOptions, prep: PreparedQuery): Promise<AiQueryResult> {
+async function runFullQuery(
+  options: GenerateAiOptions,
+  prep: PreparedQuery,
+  budgetUntil = Date.now() + POLLI_BUDGET_MS,
+): Promise<AiQueryResult> {
   const { persona, toneStyle = 'developer', prompt, context, enableWebSearch } = options;
   const selectedInstruction = prep.instruction;
   const retrievedVideos = prep.videos;
@@ -540,14 +579,14 @@ async function runFullQuery(options: GenerateAiOptions, prep: PreparedQuery): Pr
 
   // Free keyless model (Pollinations) — real answers whenever no paid
   // provider is configured (or they all failed).
-  const freeText = await queryPollinations(selectedInstruction, prompt);
+  const freeText = await queryPollinations(selectedInstruction, prompt, budgetUntil);
   if (freeText) {
     return { text: freeText, engine: 'pollinations' as const, videos: retrievedVideos, videoQuery: videoQueryStr };
   }
 
   // Second real route on the same free engine (legacy endpoint) — still a
   // live model answer whenever it responds.
-  const legacyText = await queryPollinationsLegacy(selectedInstruction, prompt);
+  const legacyText = await queryPollinationsLegacy(selectedInstruction, prompt, budgetUntil);
   if (legacyText) {
     return { text: legacyText, engine: 'pollinations_legacy' as const, videos: retrievedVideos, videoQuery: videoQueryStr };
   }
@@ -584,6 +623,9 @@ export async function processAiQueryStream(
   options: GenerateAiOptions,
   onDelta: (chunk: string) => void,
 ): Promise<AiQueryResult> {
+  // One budget for the whole request: stream attempt → rate-window wait →
+  // retry → full query → disclosed fallback, all inside Vercel's 30s kill.
+  const budgetUntil = Date.now() + POLLI_BUDGET_MS;
   const prep = await prepareAiQuery(options);
   let emitted = false;
   const emit = (chunk: string) => {
@@ -601,14 +643,14 @@ export async function processAiQueryStream(
       return { text: ollamaStreamed, engine: 'ollama' as const, videos: prep.videos, videoQuery: prep.videoQuery };
     }
     if (!emitted) {
-      const polliStreamed = await queryPollinationsStream(prep.instruction, options.prompt, emit);
+      const polliStreamed = await queryPollinationsStream(prep.instruction, options.prompt, emit, budgetUntil);
       if (polliStreamed !== null) {
         return { text: polliStreamed, engine: 'pollinations' as const, videos: prep.videos, videoQuery: prep.videoQuery };
       }
     }
   }
 
-  const full = await runFullQuery(options, prep);
+  const full = await runFullQuery(options, prep, budgetUntil);
   // A partial stream already went out → don't repeat it; the caller's final
   // event carries `full.text`, which the client syncs to.
   if (full.text && !emitted) onDelta(full.text);
