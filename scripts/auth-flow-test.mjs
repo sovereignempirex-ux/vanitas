@@ -1,4 +1,6 @@
 // Local end-to-end test of the real auth flow (in-memory storage mode).
+import crypto from 'crypto';
+
 const BASE = process.env.TEST_BASE || 'http://127.0.0.1:3111/api/v1';
 
 let pass = 0;
@@ -29,6 +31,33 @@ function check(name, cond, detail) {
     fail++;
     console.log(`  FAIL  ${name} → ${JSON.stringify(detail)}`);
   }
+}
+
+// ---- RFC 6238 helper (independent implementation of src/server/totp.ts) ----
+const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+function base32Decode(s) {
+  let bits = 0;
+  let value = 0;
+  const out = [];
+  for (const ch of s.toUpperCase()) {
+    const idx = B32.indexOf(ch);
+    if (idx === -1) break;
+    value = (value << 5) | idx;
+    bits += 5;
+    while (bits >= 8) {
+      out.push((value >>> (bits - 8)) & 255);
+      bits -= 8;
+    }
+  }
+  return Buffer.from(out);
+}
+function totp(secret) {
+  const msg = Buffer.alloc(8);
+  msg.writeBigUInt64BE(BigInt(Math.floor(Date.now() / 30000)));
+  const hmac = crypto.createHmac('sha1', base32Decode(secret)).update(msg).digest();
+  const off = hmac[hmac.length - 1] & 0x0f;
+  const bin = ((hmac[off] & 0x7f) << 24) | (hmac[off + 1] << 16) | (hmac[off + 2] << 8) | hmac[off + 3];
+  return String(bin % 1000000).padStart(6, '0');
 }
 
 const email = `user_${Date.now()}@example.com`;
@@ -132,6 +161,56 @@ check('redirect reports not_configured', startLoc.includes('vnt_error=not_config
 const unknownRes = await fetch(`${BASE}/social/nonsense`, { redirect: 'manual' });
 const unknownLoc = unknownRes.headers.get('location') || '';
 check('unknown provider → unknown_provider', unknownLoc.includes('vnt_error=unknown_provider'), unknownLoc);
+
+console.log('— real 2FA (RFC 6238 TOTP) —');
+r = await call('POST', '/auth/2fa/setup');
+check('2FA setup without session → 401', r.status === 401, r);
+
+r = await call('POST', '/auth/2fa/setup', { token: loginToken });
+check(
+  '2FA setup → real secret + otpauth URL',
+  r.status === 200 && typeof r.json?.secret === 'string' && r.json.secret.length >= 16 && String(r.json?.otpauthUrl || '').startsWith('otpauth://totp/'),
+  r.json,
+);
+const totpSecret = r.json?.secret;
+
+const liveForWrong = totp(totpSecret);
+const wrongCode = liveForWrong === '999999' ? '123456' : '999999';
+r = await call('POST', '/auth/2fa/enable', { token: loginToken, body: { code: wrongCode } });
+check('enable with wrong code → 400', r.status === 400, r);
+
+r = await call('GET', '/auth/me', { token: loginToken });
+check('wrong attempt did NOT enable 2FA', r.json?.user?.twoFactorEnabled === false, r.json?.user);
+
+r = await call('POST', '/auth/2fa/enable', { token: loginToken, body: { code: totp(totpSecret) } });
+check('enable with live code → success', r.status === 200 && r.json?.success === true, r);
+
+r = await call('GET', '/auth/me', { token: loginToken });
+check('/auth/me shows twoFactorEnabled (cache invalidated)', r.json?.user?.twoFactorEnabled === true, r.json?.user);
+
+r = await call('POST', '/auth/2fa/setup', { token: loginToken });
+check('setup again while enabled → 409', r.status === 409, r);
+
+r = await call('POST', '/auth/login', { body: { email, password } });
+check('login without code → 401 + twoFactorRequired', r.status === 401 && r.json?.twoFactorRequired === true, r);
+
+const liveCode = totp(totpSecret);
+const badCode = liveCode === '000000' ? '123456' : '000000';
+r = await call('POST', '/auth/login', { body: { email, password, code: badCode } });
+check('login with wrong code → 401', r.status === 401, r);
+
+r = await call('POST', '/auth/login', { body: { email, password, code: totp(totpSecret) } });
+check('login with live code → 200 + session', r.status === 200 && typeof r.json?.token === 'string', r);
+const twoFaLoginToken = r.json?.token;
+
+r = await call('POST', '/auth/2fa/disable', { token: twoFaLoginToken, body: { code: totp(totpSecret) } });
+check('disable with live code → success', r.status === 200 && r.json?.success === true, r);
+
+r = await call('GET', '/auth/me', { token: loginToken });
+check('2FA off again after disable', r.json?.user?.twoFactorEnabled === false, r.json?.user);
+
+r = await call('POST', '/auth/login', { body: { email, password } });
+check('plain password login works again after disable', r.status === 200 && typeof r.json?.token === 'string', r);
 
 console.log('— account self-deletion (real lifecycle) —');
 r = await call('DELETE', '/auth/account');

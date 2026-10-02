@@ -221,8 +221,14 @@ export const Header: React.FC<HeaderProps> = ({ onOpenCommandPalette }) => {
                     <p className="text-xs font-semibold text-white truncate">{user.name}</p>
                     <p className="text-[11px] font-mono text-slate-400 truncate">{user.email}</p>
                     <div className="mt-1 flex items-center gap-1.5">
-                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400"></span>
-                      <span className="text-[10px] font-medium text-emerald-400">2FA Active</span>
+                      <span
+                        className={`h-1.5 w-1.5 rounded-full ${user.twoFactorEnabled ? 'bg-emerald-400' : 'bg-slate-500'}`}
+                      ></span>
+                      <span
+                        className={`text-[10px] font-medium ${user.twoFactorEnabled ? 'text-emerald-400' : 'text-slate-400'}`}
+                      >
+                        {user.twoFactorEnabled ? '2FA Active' : '2FA Off'}
+                      </span>
                     </div>
                   </div>
 

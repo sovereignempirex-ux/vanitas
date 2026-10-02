@@ -765,18 +765,18 @@ var init_db = __esm({
 
 // src/server/pg.ts
 import { Pool } from "pg";
-function ensureCommentsSchema() {
+function ensureSchema() {
   if (!databasePool) return Promise.resolve();
-  if (!commentsSchemaReady) {
-    commentsSchemaReady = databasePool.query(COMMENTS_DDL).then(() => void 0).catch((err) => {
-      console.error("[schema/comments] ensure failed:", err.message);
-      commentsSchemaReady = null;
+  if (!schemaReady) {
+    schemaReady = databasePool.query(SCHEMA_DDL).then(() => void 0).catch((err) => {
+      console.error("[schema] ensure failed:", err.message);
+      schemaReady = null;
       throw err;
     });
   }
-  return commentsSchemaReady;
+  return schemaReady;
 }
-var databasePool, COMMENTS_DDL, commentsSchemaReady;
+var databasePool, SCHEMA_DDL, schemaReady;
 var init_pg = __esm({
   "src/server/pg.ts"() {
     databasePool = process.env.DATABASE_URL ? new Pool({
@@ -787,7 +787,7 @@ var init_pg = __esm({
     if (databasePool) {
       databasePool.on("error", (err) => console.error("[db] pool error:", err.message));
     }
-    COMMENTS_DDL = `
+    SCHEMA_DDL = `
 create table if not exists public.comments (
   id text primary key,
   doc_id text not null,
@@ -800,8 +800,9 @@ create table if not exists public.comments (
 create index if not exists comments_doc_created_idx on public.comments (doc_id, created_at desc);
 create index if not exists comments_user_idx on public.comments (user_id);
 alter table public.comments enable row level security;
+alter table if exists public.users add column if not exists two_factor_secret text not null default '';
 `;
-    commentsSchemaReady = null;
+    schemaReady = null;
   }
 });
 
@@ -1103,8 +1104,37 @@ async function forgetAccount(userId) {
     db.apiKeys = db.apiKeys.filter((k) => k.ownerId !== userId);
     for (const [key, rec] of memorySessions) if (rec.userId === userId) memorySessions.delete(key);
     for (const [key, uid] of memoryIdentities) if (uid === userId) memoryIdentities.delete(key);
+    memoryTwoFactor.delete(userId);
   }
   resolveCache.clear();
+}
+async function getTwoFactorSecret(userId) {
+  if (databasePool) {
+    const result = await databasePool.query("select two_factor_secret from public.users where id = $1", [userId]);
+    return result.rows[0]?.two_factor_secret || null;
+  }
+  return memoryTwoFactor.get(userId) || null;
+}
+async function setTwoFactor(userId, secret, enabled) {
+  if (databasePool) {
+    await databasePool.query(
+      "update public.users set two_factor_secret = $2, two_factor_enabled = $3 where id = $1",
+      [userId, secret, enabled]
+    );
+  } else {
+    if (secret) memoryTwoFactor.set(userId, secret);
+    else memoryTwoFactor.delete(userId);
+    const user = db.users.find((u) => u.id === userId);
+    if (user) user.twoFactorEnabled = enabled;
+  }
+  invalidateResolveCache(userId);
+}
+async function findUserById(userId) {
+  if (databasePool) {
+    const result = await databasePool.query("select * from public.users where id = $1", [userId]);
+    return result.rows[0] ? rowToUser(result.rows[0]) : null;
+  }
+  return db.users.find((u) => u.id === userId) || null;
 }
 async function verifyAccount(email, password) {
   const clean = email.trim().toLowerCase();
@@ -1323,7 +1353,7 @@ async function markSocialLogin(userId, provider) {
     [userId, provider]
   );
 }
-var SESSION_TTL_MS, RESOLVE_CACHE_TTL_MS, DEFAULT_AVATAR, dummyHashPromise, memoryPasswords, memorySessions, resolveCache, memoryIdentities;
+var SESSION_TTL_MS, RESOLVE_CACHE_TTL_MS, DEFAULT_AVATAR, dummyHashPromise, memoryPasswords, memorySessions, resolveCache, memoryTwoFactor, memoryIdentities;
 var init_authStore = __esm({
   "src/server/authStore.ts"() {
     init_pg();
@@ -1336,12 +1366,75 @@ var init_authStore = __esm({
     memoryPasswords = /* @__PURE__ */ new Map();
     memorySessions = /* @__PURE__ */ new Map();
     resolveCache = /* @__PURE__ */ new Map();
+    memoryTwoFactor = /* @__PURE__ */ new Map();
     memoryIdentities = /* @__PURE__ */ new Map();
   }
 });
 
-// src/server/oauth.ts
+// src/server/totp.ts
 import crypto4 from "crypto";
+function base32Encode(buf) {
+  let bits = 0;
+  let value = 0;
+  let out = "";
+  for (const byte of buf) {
+    value = value << 8 | byte;
+    bits += 8;
+    while (bits >= 5) {
+      out += B32_ALPHABET[value >>> bits - 5 & 31];
+      bits -= 5;
+    }
+  }
+  if (bits > 0) out += B32_ALPHABET[value << 5 - bits & 31];
+  return out;
+}
+function base32Decode(input) {
+  const clean = input.replace(/=+$/, "").toUpperCase();
+  let bits = 0;
+  let value = 0;
+  const out = [];
+  for (const ch of clean) {
+    const idx = B32_ALPHABET.indexOf(ch);
+    if (idx === -1) throw new Error("invalid base32 input");
+    value = value << 5 | idx;
+    bits += 5;
+    while (bits >= 8) {
+      out.push(value >>> bits - 8 & 255);
+      bits -= 8;
+    }
+  }
+  return Buffer.from(out);
+}
+function generateTotpSecret() {
+  return base32Encode(crypto4.randomBytes(20));
+}
+function totpAt(secretB32, counter) {
+  const key = base32Decode(secretB32);
+  const msg = Buffer.alloc(8);
+  msg.writeBigUInt64BE(BigInt(counter < 0 ? 0 : counter));
+  const hmac = crypto4.createHmac("sha1", key).update(msg).digest();
+  const offset = hmac[hmac.length - 1] & 15;
+  const bin = (hmac[offset] & 127) << 24 | hmac[offset + 1] << 16 | hmac[offset + 2] << 8 | hmac[offset + 3];
+  return String(bin % 1e6).padStart(6, "0");
+}
+function verifyTotp(secretB32, code) {
+  if (!/^\d{6}$/.test(code)) return false;
+  const counter = Math.floor(Date.now() / 3e4);
+  return totpAt(secretB32, counter - 1) === code || totpAt(secretB32, counter) === code || totpAt(secretB32, counter + 1) === code;
+}
+function totpOtpauthUrl(email, secret) {
+  const label = `Vanitas:${encodeURIComponent(email)}`;
+  return `otpauth://totp/${label}?secret=${secret}&issuer=Vanitas&algorithm=SHA1&digits=6&period=30`;
+}
+var B32_ALPHABET;
+var init_totp = __esm({
+  "src/server/totp.ts"() {
+    B32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  }
+});
+
+// src/server/oauth.ts
+import crypto5 from "crypto";
 function isOAuthProvider(value) {
   return OAUTH_PROVIDERS.includes(value);
 }
@@ -1372,7 +1465,7 @@ function listConfiguredProviders() {
 }
 function signState(provider, clientSecret) {
   const payload = `${provider}.${Date.now() + STATE_TTL_MS}`;
-  const sig = crypto4.createHmac("sha256", clientSecret).update(payload).digest("base64url");
+  const sig = crypto5.createHmac("sha256", clientSecret).update(payload).digest("base64url");
   return `${Buffer.from(payload, "utf8").toString("base64url")}.${sig}`;
 }
 function verifyState(provider, clientSecret, state) {
@@ -1380,10 +1473,10 @@ function verifyState(provider, clientSecret, state) {
   const [p64, sig] = state.split(".");
   if (!p64 || !sig) return false;
   const payload = Buffer.from(p64, "base64url").toString("utf8");
-  const expected = crypto4.createHmac("sha256", clientSecret).update(payload).digest("base64url");
+  const expected = crypto5.createHmac("sha256", clientSecret).update(payload).digest("base64url");
   const a = Buffer.from(sig, "utf8");
   const b = Buffer.from(expected, "utf8");
-  if (a.length !== b.length || !crypto4.timingSafeEqual(a, b)) return false;
+  if (a.length !== b.length || !crypto5.timingSafeEqual(a, b)) return false;
   const [p, expStr] = payload.split(".");
   const exp = Number(expStr);
   return p === provider && Number.isFinite(exp) && exp > Date.now();
@@ -2530,7 +2623,7 @@ var init_aiService = __esm({
 });
 
 // src/server/apiKeyAuth.ts
-import crypto5 from "crypto";
+import crypto6 from "crypto";
 function stateFor(key) {
   let state = rateStates.get(key.id);
   if (!state) {
@@ -2659,7 +2752,7 @@ function findKeyBySecret(raw) {
   for (const key of db.apiKeys) {
     const stored = key.secretHash;
     if (typeof stored !== "string" || stored.length !== target.length) continue;
-    if (crypto5.timingSafeEqual(Buffer.from(stored, "utf8"), target)) return key;
+    if (crypto6.timingSafeEqual(Buffer.from(stored, "utf8"), target)) return key;
   }
   return null;
 }
@@ -2815,7 +2908,7 @@ __export(server_exports, {
 });
 import express from "express";
 import path from "path";
-import crypto6 from "crypto";
+import crypto7 from "crypto";
 function mapSuggestion(row) {
   return {
     id: row.id,
@@ -2869,7 +2962,7 @@ function mapComment(row) {
 }
 async function listComments(docId) {
   if (!databasePool) return memoryComments.filter((c) => c.docId === docId);
-  await ensureCommentsSchema();
+  await ensureSchema();
   const result = await databasePool.query(
     "select * from public.comments where doc_id = $1 order by created_at asc limit 500",
     [docId]
@@ -2891,7 +2984,7 @@ async function createComment(params) {
     memoryComments.push(comment);
     return comment;
   }
-  await ensureCommentsSchema();
+  await ensureSchema();
   const result = await databasePool.query(
     `insert into public.comments (id, doc_id, user_id, author_name, author_avatar, body)
      values ($1, $2, $3, $4, $5, $6) returning *`,
@@ -2907,7 +3000,7 @@ async function deleteComment(id, actor) {
     memoryComments.splice(idx, 1);
     return "deleted";
   }
-  await ensureCommentsSchema();
+  await ensureSchema();
   const existing = await databasePool.query("select user_id from public.comments where id = $1", [id]);
   if (!existing.rows[0]) return "not_found";
   if (existing.rows[0].user_id !== actor.id && actor.role !== "ADMIN") return "forbidden";
@@ -2977,7 +3070,7 @@ async function buildApp() {
   });
   app.use((req, _res, next) => {
     const incoming = sanitizeText(req.headers["x-request-id"], 64);
-    req.requestId = incoming || crypto6.randomUUID();
+    req.requestId = incoming || crypto7.randomUUID();
     next();
   });
   function detectSource(req) {
@@ -3122,6 +3215,13 @@ async function buildApp() {
     try {
       const outcome = await verifyAccount(email, password);
       if (outcome.ok === false) return res.status(outcome.status).json({ error: outcome.error });
+      if (outcome.user.twoFactorEnabled) {
+        const secret = await getTwoFactorSecret(outcome.user.id);
+        const code = sanitizeText(req.body?.code, 16);
+        if (!secret || !verifyTotp(secret, code)) {
+          return res.status(401).json({ twoFactorRequired: true, error: "Enter the 6-digit code from your authenticator app" });
+        }
+      }
       const token = await createSession(outcome.user, { ip: req.ip, userAgent: String(req.headers["user-agent"] || "") });
       db.recordAuditLog({
         actorId: outcome.user.id,
@@ -3189,6 +3289,122 @@ async function buildApp() {
     } catch (err) {
       console.error("[auth/account] delete failed:", err.message);
       res.status(500).json({ error: "Account deletion failed" });
+    }
+  });
+  const twoFactorStateKey = crypto7.createHash("sha256").update(process.env.DATABASE_URL || process.env.ADMIN_API_TOKEN || "vanitas-local-2fa").digest();
+  function makeTwoFactorState(userId) {
+    const payload = Buffer.from(`${userId}.${Date.now() + 10 * 6e4}`).toString("base64url");
+    const sig = crypto7.createHmac("sha256", twoFactorStateKey).update(payload).digest("base64url");
+    return `${payload}.${sig}`;
+  }
+  function readTwoFactorState(state) {
+    const [payload, sig] = state.split(".");
+    if (!payload || !sig) return null;
+    const expect = crypto7.createHmac("sha256", twoFactorStateKey).update(payload).digest("base64url");
+    const a = Buffer.from(sig);
+    const b = Buffer.from(expect);
+    if (a.length !== b.length || !crypto7.timingSafeEqual(a, b)) return null;
+    const [userId, expStr] = Buffer.from(payload, "base64url").toString().split(".");
+    if (!userId || !expStr || Number(expStr) < Date.now()) return null;
+    return userId;
+  }
+  app.post("/api/v1/auth/2fa/setup", async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
+    if (actor.twoFactorEnabled) return res.status(409).json({ error: "Two-factor authentication is already enabled" });
+    try {
+      await ensureSchema();
+      const secret = generateTotpSecret();
+      await setTwoFactor(actor.id, secret, false);
+      res.json({ secret, otpauthUrl: totpOtpauthUrl(actor.email, secret) });
+    } catch (err) {
+      console.error("[2fa/setup]", err.message);
+      res.status(500).json({ error: "Could not start two-factor setup" });
+    }
+  });
+  app.post("/api/v1/auth/2fa/enable", async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
+    if (actor.twoFactorEnabled) return res.status(409).json({ error: "Two-factor authentication is already enabled" });
+    const code = sanitizeText(req.body?.code, 16);
+    try {
+      const secret = await getTwoFactorSecret(actor.id);
+      if (!secret) return res.status(400).json({ error: "Run two-factor setup first" });
+      if (!verifyTotp(secret, code)) return res.status(400).json({ error: "Invalid 6-digit code" });
+      await setTwoFactor(actor.id, secret, true);
+      db.recordAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorEmail: actor.email,
+        action: "TWO_FACTOR_ENABLED",
+        category: "AUTH",
+        target: `User Account: ${actor.id}`,
+        source: detectSource(req),
+        status: "SUCCESS",
+        ipAddress: req.ip || "unknown"
+      });
+      res.json({ success: true });
+    } catch (err) {
+      console.error("[2fa/enable]", err.message);
+      res.status(500).json({ error: "Could not enable two-factor authentication" });
+    }
+  });
+  app.post("/api/v1/auth/2fa/disable", async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
+    if (!actor.twoFactorEnabled) return res.status(409).json({ error: "Two-factor authentication is not enabled" });
+    const code = sanitizeText(req.body?.code, 16);
+    try {
+      const secret = await getTwoFactorSecret(actor.id);
+      if (!secret || !verifyTotp(secret, code)) {
+        return res.status(400).json({ error: "Invalid 6-digit code" });
+      }
+      await setTwoFactor(actor.id, "", false);
+      db.recordAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorEmail: actor.email,
+        action: "TWO_FACTOR_DISABLED",
+        category: "AUTH",
+        target: `User Account: ${actor.id}`,
+        source: detectSource(req),
+        status: "WARNING",
+        ipAddress: req.ip || "unknown"
+      });
+      res.json({ success: true });
+    } catch (err) {
+      console.error("[2fa/disable]", err.message);
+      res.status(500).json({ error: "Could not disable two-factor authentication" });
+    }
+  });
+  app.post("/api/v1/auth/2fa/complete", async (req, res) => {
+    const state = sanitizeText(req.body?.state, 400);
+    const code = sanitizeText(req.body?.code, 16);
+    const userId = readTwoFactorState(state);
+    if (!userId) return res.status(401).json({ error: "Two-factor challenge expired \u2014 sign in again" });
+    try {
+      const result = await findUserById(userId);
+      if (!result) return res.status(401).json({ error: "Two-factor challenge expired \u2014 sign in again" });
+      if (!result.twoFactorEnabled) return res.status(400).json({ error: "Two-factor authentication is not enabled" });
+      const secret = await getTwoFactorSecret(result.id);
+      if (!secret || !verifyTotp(secret, code)) return res.status(400).json({ error: "Invalid 6-digit code" });
+      const token = await createSession(result, { ip: req.ip, userAgent: String(req.headers["user-agent"] || "") });
+      db.recordAuditLog({
+        actorId: result.id,
+        actorName: result.name,
+        actorEmail: result.email,
+        action: "LOGIN_SUCCESS",
+        category: "AUTH",
+        target: `User Account: ${result.id}`,
+        source: detectSource(req),
+        status: "SUCCESS",
+        ipAddress: req.ip || "unknown",
+        metadata: { via: "oauth_totp" }
+      });
+      res.json({ token, user: result, permissions: permissionsFor(result) });
+    } catch (err) {
+      console.error("[2fa/complete]", err.message);
+      res.status(500).json({ error: "Two-factor verification failed" });
     }
   });
   const DOC_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -3279,6 +3495,9 @@ async function buildApp() {
         name: profile.name,
         avatarUrl: profile.avatarUrl
       });
+      if (user.twoFactorEnabled) {
+        return res.redirect(`${base}/login#vnt_2fa=${makeTwoFactorState(user.id)}`);
+      }
       const token = await createSession(user, { ip: req.ip, userAgent: String(req.headers["user-agent"] || "") });
       db.recordAuditLog({
         actorId: user.id,
@@ -3803,7 +4022,7 @@ async function buildApp() {
       event: "ping.test",
       status: "delivered",
       statusCode: 200,
-      latencyMs: 90 + crypto6.randomInt(80),
+      latencyMs: 90 + crypto7.randomInt(80),
       timestamp: (/* @__PURE__ */ new Date()).toISOString(),
       payload: { event: "ping.test", timestamp: (/* @__PURE__ */ new Date()).toISOString(), message: "Vanitas ping verification handshake" }
     };
@@ -4172,6 +4391,7 @@ var init_server = __esm({
     init_db();
     init_pg();
     init_authStore();
+    init_totp();
     init_oauth();
     init_aiService();
     init_apiKeyAuth();

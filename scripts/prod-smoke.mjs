@@ -2,6 +2,8 @@
 // up after itself completely — afterwards the database must be empty again
 // (so the owner's first registration bootstraps as ADMIN).
 // Run: node scripts/prod-smoke.mjs
+import crypto from 'crypto';
+
 const BASE = process.env.TEST_BASE || 'https://vanitas-bot.vercel.app/api/v1';
 const SITE = BASE.replace(/\/api\/v1$/, '');
 
@@ -42,6 +44,33 @@ function check(name, cond, detail) {
     fail++;
     console.log(`  FAIL  ${name} → ${JSON.stringify(detail)}`);
   }
+}
+
+// ---- RFC 6238 helper (independent implementation of src/server/totp.ts) ----
+const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+function base32Decode(s) {
+  let bits = 0;
+  let value = 0;
+  const out = [];
+  for (const ch of s.toUpperCase()) {
+    const idx = B32.indexOf(ch);
+    if (idx === -1) break;
+    value = (value << 5) | idx;
+    bits += 5;
+    while (bits >= 8) {
+      out.push((value >>> (bits - 8)) & 255);
+      bits -= 8;
+    }
+  }
+  return Buffer.from(out);
+}
+function totp(secret) {
+  const msg = Buffer.alloc(8);
+  msg.writeBigUInt64BE(BigInt(Math.floor(Date.now() / 30000)));
+  const hmac = crypto.createHmac('sha1', base32Decode(secret)).update(msg).digest();
+  const off = hmac[hmac.length - 1] & 0x0f;
+  const bin = ((hmac[off] & 0x7f) << 24) | (hmac[off + 1] << 16) | (hmac[off + 2] << 8) | hmac[off + 3];
+  return String(bin % 1000000).padStart(6, '0');
 }
 
 console.log('— platform —');
@@ -112,6 +141,30 @@ r = await call('POST', '/ai/chat', {
 });
 const aiText = r.json?.text || '';
 check('POST /ai/chat → 200 with a real reply', r.status === 200 && typeof aiText === 'string' && aiText.length >= 30, { status: r.status, text: aiText.slice(0, 220) });
+
+console.log('— real 2FA (TOTP) —');
+r = await call('POST', '/auth/2fa/setup', { token });
+check(
+  '2FA setup → real secret + otpauth URL',
+  r.status === 200 && typeof r.json?.secret === 'string' && String(r.json?.otpauthUrl || '').startsWith('otpauth://totp/'),
+  r,
+);
+const secret2fa = r.json?.secret;
+const live2fa = secret2fa ? totp(secret2fa) : '000000';
+const wrong2fa = live2fa === '000000' ? '123456' : '000000';
+r = await call('POST', '/auth/2fa/enable', { token, body: { code: wrong2fa } });
+check('enable with wrong code → 400', r.status === 400, r);
+r = await call('POST', '/auth/2fa/enable', { token, body: { code: totp(secret2fa) } });
+check('enable with live code → success (lazy PG column added)', r.status === 200 && r.json?.success === true, r);
+r = await call('POST', '/auth/login', { body: { email, password } });
+check('login without code → 401 + twoFactorRequired', r.status === 401 && r.json?.twoFactorRequired === true, r);
+r = await call('POST', '/auth/login', { body: { email, password, code: totp(secret2fa) } });
+check('login with live code → 200 + session', r.status === 200 && String(r.json?.token).startsWith('vnt_sess_'), r);
+const token2fa = r.json?.token;
+r = await call('POST', '/auth/2fa/disable', { token: token2fa, body: { code: totp(secret2fa) } });
+check('disable with live code → success', r.status === 200 && r.json?.success === true, r);
+r = await call('POST', '/auth/login', { body: { email, password } });
+check('plain password login works after disable', r.status === 200, r);
 
 console.log('— account cleanup —');
 r = await call('DELETE', '/auth/account', { token });

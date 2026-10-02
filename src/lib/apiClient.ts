@@ -76,14 +76,17 @@ class ApiClient {
 
     if (!res.ok) {
       let errMsg = `Request failed: ${res.status} ${res.statusText}`;
+      let errBody: unknown = null;
       try {
         const errorJson = await res.json();
+        errBody = errorJson;
         if (errorJson.error) errMsg = errorJson.error;
       } catch {
         // ignore json parse error
       }
-      const error: Error & { status?: number } = new Error(errMsg);
+      const error: Error & { status?: number; body?: unknown } = new Error(errMsg);
       error.status = res.status; // callers can distinguish server rejection (4xx/5xx) from network failure
+      error.body = errBody; // structured flags (e.g. twoFactorRequired) survive the throw
       throw error;
     }
 
@@ -114,8 +117,10 @@ class ApiClient {
     return data;
   }
 
-  /** Password login. Returns a session token stored as Bearer. */
-  async login(params: { email: string; password: string }) {
+  /** Password login. Returns a session token stored as Bearer.
+   *  When the account has real 2FA enabled, pass the 6-digit TOTP `code` —
+   *  without it the server answers 401 with `twoFactorRequired: true`. */
+  async login(params: { email: string; password: string; code?: string }) {
     const data = await this.request<{ token: string; user: User; permissions: PermissionScope[] }>('/auth/login', {
       method: 'POST',
       body: JSON.stringify(params),
@@ -139,6 +144,35 @@ class ApiClient {
       method: 'PATCH',
       body: JSON.stringify(params),
     });
+  }
+
+  // Real two-factor authentication (RFC 6238 TOTP).
+  async setupTwoFactor() {
+    return this.request<{ secret: string; otpauthUrl: string }>('/auth/2fa/setup', { method: 'POST' });
+  }
+
+  async enableTwoFactor(code: string) {
+    return this.request<{ success: boolean }>('/auth/2fa/enable', {
+      method: 'POST',
+      body: JSON.stringify({ code }),
+    });
+  }
+
+  async disableTwoFactor(code: string) {
+    return this.request<{ success: boolean }>('/auth/2fa/disable', {
+      method: 'POST',
+      body: JSON.stringify({ code }),
+    });
+  }
+
+  /** Finish an OAuth login paused for a TOTP code (#vnt_2fa challenge). */
+  async completeTwoFactor(state: string, code: string) {
+    const data = await this.request<{ token: string; user: User; permissions: PermissionScope[] }>(
+      '/auth/2fa/complete',
+      { method: 'POST', body: JSON.stringify({ state, code }) },
+    );
+    this.setAuthToken(data.token);
+    return data;
   }
 
   // Doc comments — real, DB-backed discussion under each docs page.

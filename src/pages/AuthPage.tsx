@@ -53,13 +53,17 @@ interface AuthPageProps {
 }
 
 export const AuthPage: React.FC<AuthPageProps> = ({ mode }) => {
-  const { loginWithEmail, completeOAuthLogin } = useAuth();
+  const { loginWithEmail, completeOAuthLogin, completeTwoFactorLogin } = useAuth();
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Real 2FA step: server answered twoFactorRequired (password flow, state
+  // undefined) or an OAuth callback paused with #vnt_2fa=<signed challenge>.
+  const [twoFactor, setTwoFactor] = useState<{ state?: string } | null>(null);
+  const [twoCode, setTwoCode] = useState('');
   const [providers, setProviders] = useState<Record<string, boolean>>({});
   const [providersLoaded, setProvidersLoaded] = useState(false);
 
@@ -79,6 +83,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({ mode }) => {
     const params = new URLSearchParams(hash);
     const token = params.get('vnt_oauth');
     const oauthError = params.get('vnt_error');
+    const twoFaState = params.get('vnt_2fa');
     // Clear the fragment from history immediately — the token must not linger.
     window.history.replaceState(null, '', window.location.pathname);
     if (token) {
@@ -89,6 +94,9 @@ export const AuthPage: React.FC<AuthPageProps> = ({ mode }) => {
           setError(OAUTH_ERROR_MESSAGES.provider_failed);
           setLoading(false);
         });
+    } else if (twoFaState) {
+      // OAuth sign-in paused for the account's real TOTP code.
+      setTwoFactor({ state: twoFaState });
     } else if (oauthError) {
       setError(OAUTH_ERROR_MESSAGES[oauthError] || OAUTH_ERROR_MESSAGES.provider_failed);
     }
@@ -117,12 +125,43 @@ export const AuthPage: React.FC<AuthPageProps> = ({ mode }) => {
     try {
       const result = await loginWithEmail(email, password, mode, mode === 'register' ? name : undefined);
       if (!result.success) {
+        if (result.twoFactorRequired) {
+          // Real 2FA — password accepted, now ask for the authenticator code.
+          setTwoFactor({});
+          setTwoCode('');
+          setError(null);
+          return;
+        }
         setError(result.error || 'Authentication failed');
         return;
       }
       window.location.assign('/');
     } catch (err: any) {
       setError(err?.message || 'Authentication failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleTwoFactorSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!/^\d{6}$/.test(twoCode)) {
+      setError('Enter the 6-digit code from your authenticator app.');
+      return;
+    }
+    setError(null);
+    setLoading(true);
+    try {
+      const result = twoFactor?.state
+        ? await completeTwoFactorLogin(twoFactor.state, twoCode)
+        : await loginWithEmail(email, password, 'login', undefined, twoCode);
+      if (!result.success) {
+        setError(result.error || 'Invalid code');
+        return;
+      }
+      window.location.assign('/');
+    } catch (err: any) {
+      setError(err?.message || 'Two-factor verification failed');
     } finally {
       setLoading(false);
     }
@@ -199,6 +238,54 @@ export const AuthPage: React.FC<AuthPageProps> = ({ mode }) => {
             ))}
           </div>
 
+          {twoFactor ? (
+            /* Real 2FA — authenticator code step */
+            <form onSubmit={handleTwoFactorSubmit} className="space-y-4">
+              <div className="flex items-start gap-2 rounded-xl border border-amber-500/20 bg-amber-500/10 px-3 py-2.5 text-[11px] leading-relaxed text-amber-200">
+                <Shield className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                <span>
+                  Two-factor check — enter the 6-digit code from your authenticator app.
+                  <span className="mt-0.5 block text-amber-300/70">تحقّق ثنائي — أدخل الرمز من تطبيق المصادق</span>
+                </span>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-300">Authenticator Code / رمز المصادق</label>
+                <div className="relative mt-1">
+                  <Shield className="absolute left-3.5 top-3 h-4 w-4 text-slate-500" />
+                  <input
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    maxLength={6}
+                    required
+                    value={twoCode}
+                    onChange={(e) => setTwoCode(e.target.value.replace(/\D/g, ''))}
+                    placeholder="123456"
+                    className={`${inputClass} text-center text-sm font-mono tracking-[0.5em]`}
+                  />
+                </div>
+              </div>
+              <button
+                type="submit"
+                disabled={loading || twoCode.length !== 6}
+                className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 py-2.5 text-xs font-semibold text-white transition-all hover:from-cyan-400 hover:to-blue-500 disabled:opacity-50"
+              >
+                {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Lock className="h-4 w-4" />}
+                Verify &amp; Enter Console
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setTwoFactor(null);
+                  setTwoCode('');
+                  setError(null);
+                }}
+                className="w-full text-[11px] text-slate-400 transition-colors hover:text-slate-200"
+              >
+                ← Back to sign in
+              </button>
+            </form>
+          ) : (
+            <>
           {/* Divider */}
           <div className="my-5 flex items-center gap-3 text-[10px] uppercase tracking-wider text-slate-500">
             <span className="h-px flex-1 bg-white/10" />
@@ -294,6 +381,8 @@ export const AuthPage: React.FC<AuthPageProps> = ({ mode }) => {
               )}
             </button>
           </form>
+            </>
+          )}
 
           {/* Switch between login / register */}
           <p className="mt-4 text-center text-[11px] text-slate-400">
@@ -317,7 +406,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({ mode }) => {
           <div className="mt-4 pt-3 border-t border-white/10 flex items-center justify-between text-[11px] text-slate-400">
             <div className="flex items-center gap-1.5">
               <Shield className="h-3.5 w-3.5 text-emerald-400" />
-              <span>scrypt + OAuth 2.0 secured</span>
+              <span>scrypt + TOTP 2FA + OAuth 2.0 secured</span>
             </div>
             <span className="font-mono text-[10px] text-cyan-400">Vanitas Ingress v1.4</span>
           </div>

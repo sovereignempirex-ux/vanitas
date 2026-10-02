@@ -16,12 +16,13 @@ if (databasePool) {
 }
 
 // ---------------------------------------------------------------------------
-// Lazy schema guard: supabase/schema.sql also ships the comments table, but a
-// database provisioned before that change won't have it. Create it on first
-// use so every deployment works without manual database access.
-// Idempotent (IF NOT EXISTS) and memoized — runs at most once per process.
+// Lazy schema guard: supabase/schema.sql also ships newer objects (comments
+// table, TOTP secret column) that a database provisioned before those changes
+// won't have. Create them on first use so every deployment works without
+// manual database access. Idempotent (IF NOT EXISTS) and memoized — runs at
+// most once per process.
 // ---------------------------------------------------------------------------
-const COMMENTS_DDL = `
+const SCHEMA_DDL = `
 create table if not exists public.comments (
   id text primary key,
   doc_id text not null,
@@ -34,21 +35,22 @@ create table if not exists public.comments (
 create index if not exists comments_doc_created_idx on public.comments (doc_id, created_at desc);
 create index if not exists comments_user_idx on public.comments (user_id);
 alter table public.comments enable row level security;
+alter table if exists public.users add column if not exists two_factor_secret text not null default '';
 `;
 
-let commentsSchemaReady: Promise<void> | null = null;
+let schemaReady: Promise<void> | null = null;
 
-export function ensureCommentsSchema(): Promise<void> {
+export function ensureSchema(): Promise<void> {
   if (!databasePool) return Promise.resolve();
-  if (!commentsSchemaReady) {
-    commentsSchemaReady = databasePool
-      .query(COMMENTS_DDL)
+  if (!schemaReady) {
+    schemaReady = databasePool
+      .query(SCHEMA_DDL)
       .then(() => undefined)
       .catch((err: Error) => {
-        console.error('[schema/comments] ensure failed:', err.message);
-        commentsSchemaReady = null; // retry on the next request
+        console.error('[schema] ensure failed:', err.message);
+        schemaReady = null; // retry on the next request
         throw err;
       });
   }
-  return commentsSchemaReady;
+  return schemaReady;
 }

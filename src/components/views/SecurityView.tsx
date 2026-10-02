@@ -19,15 +19,16 @@ import {
 } from 'lucide-react';
 
 export const SecurityView: React.FC = () => {
-  const { user, updateUserProfile } = useAuth();
+  const { user, refreshUser } = useAuth();
   const [sessions, setSessions] = useState<SessionDevice[]>([]);
   const [loading, setLoading] = useState(true);
-  const [copiedTotp, setCopiedTotp] = useState(false);
+  const [copied, setCopied] = useState<'secret' | 'url' | null>(null);
+  // Real TOTP setup payload from POST /auth/2fa/setup (stored, not enabled yet).
+  const [setup, setSetup] = useState<{ secret: string; otpauthUrl: string } | null>(null);
   const [totpInput, setTotpInput] = useState('');
-  const [totpSuccess, setTotpSuccess] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [formMsg, setFormMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
-
-  const totpSecret = 'JBSWY3DPEHPK3PXP';
 
   const loadSessions = async () => {
     try {
@@ -56,19 +57,67 @@ export const SecurityView: React.FC = () => {
     }
   };
 
-  const handleVerify2Fa = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (totpInput.length === 6) {
-      setTotpSuccess(true);
-      updateUserProfile({ twoFactorEnabled: true });
-      setTimeout(() => setTotpSuccess(false), 3000);
+  /** Step 1: the server generates a fresh real TOTP secret for this account. */
+  const handleStartSetup = async () => {
+    setBusy(true);
+    setFormMsg(null);
+    try {
+      const res = await api.setupTwoFactor();
+      setSetup({ secret: res.secret, otpauthUrl: res.otpauthUrl });
+    } catch (err: any) {
+      setFormMsg({ kind: 'err', text: err?.message || 'Could not start two-factor setup' });
+    } finally {
+      setBusy(false);
     }
   };
 
-  const copySecret = () => {
-    navigator.clipboard.writeText(totpSecret);
-    setCopiedTotp(true);
-    setTimeout(() => setCopiedTotp(false), 2000);
+  /** Step 2: prove the authenticator app with a live 6-digit code → ENABLED. */
+  const handleEnable = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!/^\d{6}$/.test(totpInput)) {
+      setFormMsg({ kind: 'err', text: 'Enter the 6-digit code from your authenticator app.' });
+      return;
+    }
+    setBusy(true);
+    setFormMsg(null);
+    try {
+      await api.enableTwoFactor(totpInput);
+      await refreshUser(); // the server is the source of truth for this state
+      setSetup(null);
+      setTotpInput('');
+      setFormMsg({ kind: 'ok', text: 'Two-factor authentication is now ENFORCED at sign-in.' });
+    } catch (err: any) {
+      setFormMsg({ kind: 'err', text: err?.message || 'Invalid code' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** Turning it off also requires a live code — a stolen session can't do it. */
+  const handleDisable = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!/^\d{6}$/.test(totpInput)) {
+      setFormMsg({ kind: 'err', text: 'Enter the 6-digit code from your authenticator app.' });
+      return;
+    }
+    setBusy(true);
+    setFormMsg(null);
+    try {
+      await api.disableTwoFactor(totpInput);
+      await refreshUser();
+      setTotpInput('');
+      setFormMsg({ kind: 'ok', text: 'Two-factor authentication disabled.' });
+    } catch (err: any) {
+      setFormMsg({ kind: 'err', text: err?.message || 'Invalid code' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const copyText = (what: 'secret' | 'url', text: string) => {
+    navigator.clipboard.writeText(text);
+    setCopied(what);
+    setTimeout(() => setCopied(null), 2000);
   };
 
   return (
@@ -115,57 +164,135 @@ export const SecurityView: React.FC = () => {
           </span>
         </div>
 
-        <div className="mt-6 grid grid-cols-1 lg:grid-cols-12 gap-6 items-center">
-          {/* QR Code display */}
-          <div className="lg:col-span-4 flex flex-col items-center justify-center p-4 rounded-2xl border border-white/10 bg-slate-900/60 text-center">
-            {/* SVG QR Code Simulation */}
-            <div className="bg-white p-3 rounded-xl shadow-lg">
-              <svg className="h-32 w-32" viewBox="0 0 100 100" fill="currentColor">
-                <path d="M0 0h30v30H0zm40 0h20v10H40zm30 0h30v30H70zM10 10v10h10V10zm70 0v10h10V10zm-40 10h10v10H40zm10 10h10v10H50zm-50 10h10v10H0zm20 0h20v20H20zm50 0h10v10H70zm10 10h20v10H80zM0 70h30v30H0zm10 10v10h10V80zm30-10h10v10H40zm20 0h10v20H60zm20 0h10v10H80zm-40 20h20v10H40zm40 0h20v10H80z" />
-              </svg>
+        {/* Real TOTP — state driven entirely by the server */}
+        {user?.twoFactorEnabled ? (
+          /* Enabled: enforced at sign-in; disabling requires a live code */
+          <div className="mt-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+            <div className="lg:col-span-5 flex flex-col items-center justify-center rounded-2xl border border-emerald-500/20 bg-emerald-950/20 p-6 text-center">
+              <Shield className="h-8 w-8 text-emerald-400" />
+              <p className="mt-3 text-xs font-semibold text-emerald-300">Real TOTP enforced at sign-in</p>
+              <p className="mt-1 text-[11px] text-emerald-200/60">مفعّل فعليًا — يُطلب رمزه عند كل تسجيل دخول</p>
             </div>
-            <p className="mt-3 text-[11px] font-medium text-slate-300">Scan with Authenticator App</p>
-          </div>
-
-          {/* Setup Instructions & Verification */}
-          <div className="lg:col-span-8 space-y-4">
-            <div>
-              <label className="block text-xs font-medium text-slate-300">Manual Setup Key</label>
-              <div className="mt-1 flex items-center justify-between rounded-xl border border-white/10 bg-black/40 p-2.5">
-                <code className="font-mono text-xs text-blue-300">{totpSecret}</code>
+            <div className="lg:col-span-7 flex flex-col justify-center gap-4">
+              <form onSubmit={handleDisable} className="flex gap-3">
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  placeholder="Enter 6-digit code"
+                  maxLength={6}
+                  value={totpInput}
+                  onChange={(e) => setTotpInput(e.target.value.replace(/\D/g, ''))}
+                  className="flex-1 rounded-xl border border-white/10 bg-slate-900 px-3.5 py-2 text-xs font-mono text-white placeholder:text-slate-600 focus:border-blue-500 focus:outline-none"
+                />
                 <button
-                  onClick={copySecret}
-                  className="rounded p-1 text-slate-400 hover:text-white hover:bg-white/10"
+                  type="submit"
+                  disabled={busy || totpInput.length !== 6}
+                  className="rounded-xl border border-rose-500/30 bg-rose-950/30 px-5 py-2 text-xs font-semibold text-rose-300 hover:bg-rose-900/40 transition-all disabled:opacity-50"
                 >
-                  {copiedTotp ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+                  {busy ? 'Verifying…' : 'Disable 2FA'}
                 </button>
+              </form>
+            </div>
+          </div>
+        ) : setup ? (
+          /* Setup in progress: the server's real secret, verified before enabling */
+          <div className="mt-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+            <div className="lg:col-span-5 space-y-3 rounded-2xl border border-white/10 bg-slate-900/60 p-4">
+              <p className="text-[11px] leading-relaxed text-slate-300">
+                In your authenticator app choose <span className="text-white">“Enter a setup key”</span> and paste the
+                real server-generated key below, then enter the code it shows.
+              </p>
+              <div>
+                <label className="block text-[10px] font-medium uppercase tracking-wider text-slate-400">
+                  Setup key (real, server-generated)
+                </label>
+                <div className="mt-1 flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-black/40 p-2.5">
+                  <code className="break-all font-mono text-[11px] leading-relaxed text-blue-300">{setup.secret}</code>
+                  <button
+                    onClick={() => copyText('secret', setup.secret)}
+                    className="shrink-0 rounded p-1 text-slate-400 hover:text-white hover:bg-white/10"
+                  >
+                    {copied === 'secret' ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+                  </button>
+                </div>
+              </div>
+              <div>
+                <label className="block text-[10px] font-medium uppercase tracking-wider text-slate-400">
+                  otpauth:// link (paste into the app)
+                </label>
+                <div className="mt-1 flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-black/40 p-2.5">
+                  <code className="truncate font-mono text-[10px] text-slate-400">{setup.otpauthUrl}</code>
+                  <button
+                    onClick={() => copyText('url', setup.otpauthUrl)}
+                    className="shrink-0 rounded p-1 text-slate-400 hover:text-white hover:bg-white/10"
+                  >
+                    {copied === 'url' ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+                  </button>
+                </div>
               </div>
             </div>
 
-            <form onSubmit={handleVerify2Fa} className="flex gap-3">
-              <input
-                type="text"
-                placeholder="Enter 6-digit code"
-                maxLength={6}
-                value={totpInput}
-                onChange={(e) => setTotpInput(e.target.value)}
-                className="flex-1 rounded-xl border border-white/10 bg-slate-900 px-3.5 py-2 text-xs font-mono text-white placeholder:text-slate-600 focus:border-blue-500 focus:outline-none"
-              />
+            <div className="lg:col-span-7 flex flex-col justify-center gap-3">
+              <form onSubmit={handleEnable} className="flex gap-3">
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  placeholder="Enter 6-digit code"
+                  maxLength={6}
+                  value={totpInput}
+                  onChange={(e) => setTotpInput(e.target.value.replace(/\D/g, ''))}
+                  className="flex-1 rounded-xl border border-white/10 bg-slate-900 px-3.5 py-2 text-xs font-mono text-white placeholder:text-slate-600 focus:border-blue-500 focus:outline-none"
+                />
+                <button
+                  type="submit"
+                  disabled={busy || totpInput.length !== 6}
+                  className="rounded-xl bg-blue-600 px-5 py-2 text-xs font-semibold text-white shadow-lg shadow-blue-600/30 hover:bg-blue-500 transition-all disabled:opacity-50"
+                >
+                  {busy ? 'Verifying…' : 'Verify & Enable'}
+                </button>
+              </form>
               <button
-                type="submit"
-                className="rounded-xl bg-blue-600 px-5 py-2 text-xs font-semibold text-white shadow-lg shadow-blue-600/30 hover:bg-blue-500 transition-all"
+                type="button"
+                onClick={() => {
+                  setSetup(null);
+                  setTotpInput('');
+                  setFormMsg(null);
+                }}
+                className="self-start text-[11px] text-slate-400 transition-colors hover:text-slate-200"
               >
-                Verify & Enable
+                ← Cancel setup
               </button>
-            </form>
-
-            {totpSuccess && (
-              <p className="text-xs text-emerald-400 font-medium">
-                ✓ Two-factor authentication successfully enabled for this account!
-              </p>
-            )}
+            </div>
           </div>
-        </div>
+        ) : (
+          /* Not configured — honest empty state */
+          <div className="mt-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 rounded-2xl border border-white/10 bg-slate-900/40 p-5">
+            <div className="flex items-center gap-3">
+              <Smartphone className="h-5 w-5 text-slate-400" />
+              <div>
+                <p className="text-xs font-medium text-white">
+                  Not configured — add this account to Google Authenticator, Authy, or 1Password
+                </p>
+                <p className="text-[11px] text-slate-400">لم يُفعَّل بعد — أضِف الحساب بتطبيق المصادق ثم أكّد الرمز</p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={handleStartSetup}
+              disabled={busy}
+              className="rounded-xl bg-gradient-to-r from-blue-600 to-cyan-600 px-5 py-2 text-xs font-semibold text-white shadow-lg shadow-cyan-600/20 hover:from-blue-500 hover:to-cyan-500 transition-all disabled:opacity-50"
+            >
+              {busy ? 'Generating…' : 'Generate Setup Key'}
+            </button>
+          </div>
+        )}
+
+        {formMsg && (
+          <p className={`mt-4 text-xs font-medium ${formMsg.kind === 'ok' ? 'text-emerald-400' : 'text-rose-400'}`}>
+            {formMsg.kind === 'ok' ? '✓ ' : '✕ '}
+            {formMsg.text}
+          </p>
+        )}
       </div>
 
       {/* Active Device Sessions Manager */}

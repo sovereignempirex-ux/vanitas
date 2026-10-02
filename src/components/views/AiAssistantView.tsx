@@ -166,7 +166,7 @@ export const AiAssistantView: React.FC = () => {
     {
       id: 'init-1',
       sender: 'ai',
-      text: `### 🌌 مرحباً بك في نظام الذكاء الاصطناعي لمنصة Vanitas\n\nأنا وكيل الذكاء الاصطناعي المدمج والمطور لمنصة فانيتاس المركزية. تم تزويدي بنماذج استدلال متقدمة (**Gemini 3.7 Flash**) وأدوات ذكية متخصصة:\n\n1. **مصلح الكود الذكي ومحلل الأخطاء (Automated Code Doctor)**: تحليل الكود المصدري، اكتشاف الأخطاء البرمجية (Syntax Errors) والثغرات الأمنية (Security Flaws)، واقتراح حلول التحسين وإعادة الهيكلة (Refactoring Improvements).\n2. **توليد الكود وبناء الـ Payloads**: كتابة أكواد TypeScript و Python و cURL جاهزة للإنتاج.\n3. **فحص ومصفوفة الصلاحيات**: التحقق من \`assertGrantableScopes\` ومعدلات التدفق (Rate Limits).\n4. **دعم كامل للغة العربية والإنجليزية** مع إمكانية التبديل بين أساليب الحوار (مهندس نظم، مدقق أمني، مبرمج عملي، ديمون البوت).\n\nكيف يمكنني مساعدتك اليوم؟`,
+      text: `### 🌌 مرحباً بك في نظام الذكاء الاصطناعي لمنصة Vanitas\n\nأنا وكيل الذكاء الاصطناعي المدمج والمطور لمنصة فانيتاس المركزية. تم تزويدي بنموذج ذكاء اصطناعي مجاني مدمج (**Pollinations · بدون مفتاح**) وأدوات ذكية متخصصة:\n\n1. **مصلح الكود الذكي ومحلل الأخطاء (Automated Code Doctor)**: تحليل الكود المصدري، اكتشاف الأخطاء البرمجية (Syntax Errors) والثغرات الأمنية (Security Flaws)، واقتراح حلول التحسين وإعادة الهيكلة (Refactoring Improvements).\n2. **توليد الكود وبناء الـ Payloads**: كتابة أكواد TypeScript و Python و cURL جاهزة للإنتاج.\n3. **فحص ومصفوفة الصلاحيات**: التحقق من \`assertGrantableScopes\` ومعدلات التدفق (Rate Limits).\n4. **دعم كامل للغة العربية والإنجليزية** مع إمكانية التبديل بين أساليب الحوار (مهندس نظم، مدقق أمني، مبرمج عملي، ديمون البوت).\n\nكيف يمكنني مساعدتك اليوم؟`,
       timestamp: new Date().toLocaleTimeString(),
     },
   ]);
@@ -905,7 +905,7 @@ export const AiAssistantView: React.FC = () => {
                 <div className="flex-1 min-h-[340px] flex flex-col items-center justify-center text-center p-6 space-y-3">
                   <Sparkles className="h-8 w-8 text-cyan-400 animate-spin" />
                   <p className="text-xs font-medium text-slate-300">Parsing syntax tree, security boundaries & refactoring patterns...</p>
-                  <p className="text-[11px] text-slate-500 font-mono">Gemini 3.7 Flash autonomous analysis in progress</p>
+                  <p className="text-[11px] text-slate-500 font-mono">Free AI autonomous analysis in progress</p>
                 </div>
               ) : doctorResult ? (
                 <div className="space-y-4 overflow-y-auto max-h-[520px] pr-1">

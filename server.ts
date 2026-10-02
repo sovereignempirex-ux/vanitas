@@ -2,8 +2,9 @@ import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import crypto from 'crypto';
 import { db, ALL_SCOPES } from './src/server/db.ts';
-import { databasePool, ensureCommentsSchema } from './src/server/pg.ts';
-import { createAccount, verifyAccount, createSession, resolveSession, revokeSession, upsertOAuthUser, updateProfile, forgetAccount } from './src/server/authStore.ts';
+import { databasePool, ensureSchema } from './src/server/pg.ts';
+import { createAccount, verifyAccount, createSession, resolveSession, revokeSession, upsertOAuthUser, updateProfile, forgetAccount, getTwoFactorSecret, setTwoFactor, findUserById } from './src/server/authStore.ts';
+import { generateTotpSecret, verifyTotp, totpOtpauthUrl } from './src/server/totp.ts';
 import {
   getProviderConfig,
   isOAuthProvider,
@@ -97,7 +98,7 @@ function mapComment(row: Record<string, any>): DocComment {
 
 async function listComments(docId: string): Promise<DocComment[]> {
   if (!databasePool) return memoryComments.filter((c) => c.docId === docId);
-  await ensureCommentsSchema();
+  await ensureSchema();
   const result = await databasePool.query(
     'select * from public.comments where doc_id = $1 order by created_at asc limit 500',
     [docId],
@@ -126,7 +127,7 @@ async function createComment(params: {
     memoryComments.push(comment);
     return comment;
   }
-  await ensureCommentsSchema();
+  await ensureSchema();
   const result = await databasePool.query(
     `insert into public.comments (id, doc_id, user_id, author_name, author_avatar, body)
      values ($1, $2, $3, $4, $5, $6) returning *`,
@@ -143,7 +144,7 @@ async function deleteComment(id: string, actor: { id: string; role: UserRole }):
     memoryComments.splice(idx, 1);
     return 'deleted';
   }
-  await ensureCommentsSchema();
+  await ensureSchema();
   const existing = await databasePool.query('select user_id from public.comments where id = $1', [id]);
   if (!existing.rows[0]) return 'not_found';
   if (existing.rows[0].user_id !== actor.id && actor.role !== 'ADMIN') return 'forbidden';
@@ -417,6 +418,18 @@ export async function buildApp() {
       const outcome = await verifyAccount(email, password);
       if (outcome.ok === false) return res.status(outcome.status).json({ error: outcome.error });
 
+      // Real 2FA (RFC 6238): once TOTP is enabled the password alone is no
+      // longer enough — a valid 6-digit authenticator code is required too.
+      if (outcome.user.twoFactorEnabled) {
+        const secret = await getTwoFactorSecret(outcome.user.id);
+        const code = sanitizeText(req.body?.code, 16);
+        if (!secret || !verifyTotp(secret, code)) {
+          return res
+            .status(401)
+            .json({ twoFactorRequired: true, error: 'Enter the 6-digit code from your authenticator app' });
+        }
+      }
+
       const token = await createSession(outcome.user, { ip: req.ip, userAgent: String(req.headers['user-agent'] || '') });
       db.recordAuditLog({
         actorId: outcome.user.id,
@@ -491,6 +504,142 @@ export async function buildApp() {
     } catch (err) {
       console.error('[auth/account] delete failed:', (err as Error).message);
       res.status(500).json({ error: 'Account deletion failed' });
+    }
+  });
+
+  // ----------------------------------------------------
+  // REAL two-factor authentication (RFC 6238 TOTP).
+  // setup → store a fresh secret (not enabled yet); enable/disable → prove
+  // possession of the authenticator app with a live 6-digit code; complete →
+  // finish an OAuth login that still needs the code.
+  // ----------------------------------------------------
+
+  // Stateless HMAC-signed challenge for the OAuth + 2FA path. Signed with a
+  // key derived from DATABASE_URL so any serverless instance can verify it.
+  const twoFactorStateKey = crypto
+    .createHash('sha256')
+    .update(process.env.DATABASE_URL || process.env.ADMIN_API_TOKEN || 'vanitas-local-2fa')
+    .digest();
+
+  function makeTwoFactorState(userId: string): string {
+    const payload = Buffer.from(`${userId}.${Date.now() + 10 * 60_000}`).toString('base64url');
+    const sig = crypto.createHmac('sha256', twoFactorStateKey).update(payload).digest('base64url');
+    return `${payload}.${sig}`;
+  }
+
+  function readTwoFactorState(state: string): string | null {
+    const [payload, sig] = state.split('.');
+    if (!payload || !sig) return null;
+    const expect = crypto.createHmac('sha256', twoFactorStateKey).update(payload).digest('base64url');
+    const a = Buffer.from(sig);
+    const b = Buffer.from(expect);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+    const [userId, expStr] = Buffer.from(payload, 'base64url').toString().split('.');
+    if (!userId || !expStr || Number(expStr) < Date.now()) return null;
+    return userId;
+  }
+
+  app.post('/api/v1/auth/2fa/setup', async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
+    if (actor.twoFactorEnabled) return res.status(409).json({ error: 'Two-factor authentication is already enabled' });
+    try {
+      await ensureSchema(); // legacy databases need the two_factor_secret column
+      const secret = generateTotpSecret();
+      await setTwoFactor(actor.id, secret, false); // stored, not enabled until verified
+      res.json({ secret, otpauthUrl: totpOtpauthUrl(actor.email, secret) });
+    } catch (err) {
+      console.error('[2fa/setup]', (err as Error).message);
+      res.status(500).json({ error: 'Could not start two-factor setup' });
+    }
+  });
+
+  app.post('/api/v1/auth/2fa/enable', async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
+    if (actor.twoFactorEnabled) return res.status(409).json({ error: 'Two-factor authentication is already enabled' });
+    const code = sanitizeText(req.body?.code, 16);
+    try {
+      const secret = await getTwoFactorSecret(actor.id);
+      if (!secret) return res.status(400).json({ error: 'Run two-factor setup first' });
+      if (!verifyTotp(secret, code)) return res.status(400).json({ error: 'Invalid 6-digit code' });
+      await setTwoFactor(actor.id, secret, true);
+      db.recordAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorEmail: actor.email,
+        action: 'TWO_FACTOR_ENABLED',
+        category: 'AUTH',
+        target: `User Account: ${actor.id}`,
+        source: detectSource(req),
+        status: 'SUCCESS',
+        ipAddress: req.ip || 'unknown',
+      });
+      res.json({ success: true });
+    } catch (err) {
+      console.error('[2fa/enable]', (err as Error).message);
+      res.status(500).json({ error: 'Could not enable two-factor authentication' });
+    }
+  });
+
+  app.post('/api/v1/auth/2fa/disable', async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
+    if (!actor.twoFactorEnabled) return res.status(409).json({ error: 'Two-factor authentication is not enabled' });
+    const code = sanitizeText(req.body?.code, 16);
+    try {
+      const secret = await getTwoFactorSecret(actor.id);
+      if (!secret || !verifyTotp(secret, code)) {
+        return res.status(400).json({ error: 'Invalid 6-digit code' });
+      }
+      await setTwoFactor(actor.id, '', false);
+      db.recordAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorEmail: actor.email,
+        action: 'TWO_FACTOR_DISABLED',
+        category: 'AUTH',
+        target: `User Account: ${actor.id}`,
+        source: detectSource(req),
+        status: 'WARNING',
+        ipAddress: req.ip || 'unknown',
+      });
+      res.json({ success: true });
+    } catch (err) {
+      console.error('[2fa/disable]', (err as Error).message);
+      res.status(500).json({ error: 'Could not disable two-factor authentication' });
+    }
+  });
+
+  // Finish an OAuth login that was paused for the TOTP code (#vnt_2fa=state).
+  app.post('/api/v1/auth/2fa/complete', async (req, res) => {
+    const state = sanitizeText(req.body?.state, 400);
+    const code = sanitizeText(req.body?.code, 16);
+    const userId = readTwoFactorState(state);
+    if (!userId) return res.status(401).json({ error: 'Two-factor challenge expired — sign in again' });
+    try {
+      const result = await findUserById(userId);
+      if (!result) return res.status(401).json({ error: 'Two-factor challenge expired — sign in again' });
+      if (!result.twoFactorEnabled) return res.status(400).json({ error: 'Two-factor authentication is not enabled' });
+      const secret = await getTwoFactorSecret(result.id);
+      if (!secret || !verifyTotp(secret, code)) return res.status(400).json({ error: 'Invalid 6-digit code' });
+      const token = await createSession(result, { ip: req.ip, userAgent: String(req.headers['user-agent'] || '') });
+      db.recordAuditLog({
+        actorId: result.id,
+        actorName: result.name,
+        actorEmail: result.email,
+        action: 'LOGIN_SUCCESS',
+        category: 'AUTH',
+        target: `User Account: ${result.id}`,
+        source: detectSource(req),
+        status: 'SUCCESS',
+        ipAddress: req.ip || 'unknown',
+        metadata: { via: 'oauth_totp' },
+      });
+      res.json({ token, user: result, permissions: permissionsFor(result) });
+    } catch (err) {
+      console.error('[2fa/complete]', (err as Error).message);
+      res.status(500).json({ error: 'Two-factor verification failed' });
     }
   });
 
@@ -607,6 +756,13 @@ export async function buildApp() {
         name: profile.name,
         avatarUrl: profile.avatarUrl,
       });
+      // Real 2FA: an OAuth sign-in must still prove the authenticator code.
+      // Issue a short-lived signed challenge instead of a session token; the
+      // SPA collects the code and finishes via POST /auth/2fa/complete.
+      if (user.twoFactorEnabled) {
+        return res.redirect(`${base}/login#vnt_2fa=${makeTwoFactorState(user.id)}`);
+      }
+
       const token = await createSession(user, { ip: req.ip, userAgent: String(req.headers['user-agent'] || '') });
       db.recordAuditLog({
         actorId: user.id,

@@ -44,7 +44,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen, setIsMobileOpen 
     {
       title: 'INTELLIGENCE',
       items: [
-        { id: 'ai', label: 'Vanitas AI Copilot', icon: Sparkles, badge: 'Gemini 3.7', highlight: true },
+        { id: 'ai', label: 'Vanitas AI Copilot', icon: Sparkles, badge: 'FREE AI', highlight: true },
       ],
     },
     {

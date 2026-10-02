@@ -20,9 +20,12 @@ interface AuthContextType {
     pass: string,
     mode: 'login' | 'register',
     name?: string,
-  ) => Promise<{ success: boolean; error?: string }>;
+    code?: string,
+  ) => Promise<{ success: boolean; error?: string; twoFactorRequired?: boolean }>;
   /** Adopt the session token delivered by the OAuth callback (#vnt_oauth=…). */
   completeOAuthLogin: (token: string) => Promise<void>;
+  /** Finish an OAuth login paused for a TOTP code (#vnt_2fa=…). */
+  completeTwoFactorLogin: (state: string, code: string) => Promise<{ success: boolean; error?: string }>;
   logout: () => void;
   clientSource: ClientSource;
   setClientSource: (source: ClientSource) => void;
@@ -228,7 +231,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     await refreshUser();
   };
 
-  const loginWithEmail = async (email: string, password: string, mode: 'login' | 'register', name?: string) => {
+  /** Finish an OAuth login that the server paused for a real TOTP code. */
+  const completeTwoFactorLogin = async (state: string, code: string) => {
+    try {
+      const data = await api.completeTwoFactor(state, code);
+      setUser(data.user);
+      setRoleState(data.user.role);
+      setPermissions(data.permissions);
+      localStorage.setItem('vanitas_active_user', JSON.stringify(data.user));
+      setIsAuthModalOpen(false);
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Two-factor verification failed' };
+    }
+  };
+
+  const loginWithEmail = async (email: string, password: string, mode: 'login' | 'register', name?: string, code?: string) => {
     const cleanEmail = email.trim().toLowerCase().slice(0, 120);
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
       return { success: false, error: 'Invalid email address' };
@@ -244,7 +262,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const data =
         mode === 'register'
           ? await api.register({ email: cleanEmail, password, name: (name || cleanEmail.split('@')[0]).slice(0, 80) })
-          : await api.login({ email: cleanEmail, password });
+          : await api.login({ email: cleanEmail, password, code });
 
       // Server is the source of truth for role & permissions.
       setUser(data.user);
@@ -254,8 +272,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setIsAuthModalOpen(false);
       return { success: true };
     } catch (err: any) {
-      // Server answered (wrong password, duplicate email, storage down) → show it.
+      // Server answered (wrong password, duplicate email, 2FA needed, storage
+      // down) → show it. Real 2FA: the server asks for the authenticator code.
       if (err?.status) {
+        if (err?.body?.twoFactorRequired) {
+          return { success: false, twoFactorRequired: true, error: err.message || 'Two-factor code required' };
+        }
         return { success: false, error: err.message || 'Authentication failed' };
       }
       // Network/server unreachable → real accounts only: report it, never
@@ -342,6 +364,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         toggleRole,
         loginOAuth,
         completeOAuthLogin,
+        completeTwoFactorLogin,
         loginWithEmail,
         logout,
         clientSource,

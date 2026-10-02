@@ -225,9 +225,49 @@ export async function forgetAccount(userId: string): Promise<void> {
     db.apiKeys = db.apiKeys.filter((k) => k.ownerId !== userId);
     for (const [key, rec] of memorySessions) if (rec.userId === userId) memorySessions.delete(key);
     for (const [key, uid] of memoryIdentities) if (uid === userId) memoryIdentities.delete(key);
+    memoryTwoFactor.delete(userId);
   }
   // Cached session resolutions must not outlive the account they point to.
   resolveCache.clear();
+}
+
+// ---- two-factor authentication (real TOTP) -------------------------------
+// The TOTP secret lives server-side only: PostgreSQL persists it, memory mode
+// keeps it in-process. No API ever returns an enabled account's secret, and
+// setTwoFactor always invalidates the session resolve-cache so /auth/me and
+// every Bearer request see the new state immediately.
+const memoryTwoFactor = new Map<string, string>();
+
+export async function getTwoFactorSecret(userId: string): Promise<string | null> {
+  if (databasePool) {
+    const result = await databasePool.query('select two_factor_secret from public.users where id = $1', [userId]);
+    return result.rows[0]?.two_factor_secret || null;
+  }
+  return memoryTwoFactor.get(userId) || null;
+}
+
+export async function setTwoFactor(userId: string, secret: string, enabled: boolean): Promise<void> {
+  if (databasePool) {
+    await databasePool.query(
+      'update public.users set two_factor_secret = $2, two_factor_enabled = $3 where id = $1',
+      [userId, secret, enabled],
+    );
+  } else {
+    if (secret) memoryTwoFactor.set(userId, secret);
+    else memoryTwoFactor.delete(userId);
+    const user = db.users.find((u) => u.id === userId);
+    if (user) user.twoFactorEnabled = enabled;
+  }
+  invalidateResolveCache(userId);
+}
+
+/** Load one account by id (both storage modes). */
+export async function findUserById(userId: string): Promise<User | null> {
+  if (databasePool) {
+    const result = await databasePool.query('select * from public.users where id = $1', [userId]);
+    return result.rows[0] ? rowToUser(result.rows[0]) : null;
+  }
+  return db.users.find((u) => u.id === userId) || null;
 }
 
 export async function verifyAccount(email: string, password: string): Promise<AuthOutcome> {
