@@ -96,7 +96,7 @@ function adminToken(): string | null {
   return null;
 }
 
-export function getActorUser(req: Request): User {
+export function getActorUser(req: Request): User | null {
   const demoMode = process.env.DEMO_MODE === 'true' && process.env.NODE_ENV !== 'production';
 
   // 1. Admin bootstrap token (for initial setup / CI). Never log it.
@@ -108,7 +108,22 @@ export function getActorUser(req: Request): User {
       const a = Buffer.from(token);
       const b = Buffer.from(expected);
       if (a.length === b.length && crypto.timingSafeEqual(a, b)) {
-        return db.users.find((u) => u.role === 'ADMIN') || db.users[0];
+        const adminUser = db.users.find((u) => u.role === 'ADMIN');
+        if (adminUser) return adminUser;
+        // No admin row exists yet — act as the machine identity itself so CI
+        // can bootstrap (this is a service principal, not a fake human user).
+        return {
+          id: 'usr_admin_api_token',
+          email: 'admin-api-token@vanitas.local',
+          name: 'Admin API Token',
+          username: 'admin_api_token',
+          avatarUrl: '',
+          role: 'ADMIN',
+          twoFactorEnabled: false,
+          createdAt: '1970-01-01T00:00:00.000Z',
+          lastLoginAt: new Date().toISOString(),
+          connectedAccounts: { google: false, github: false, discord: false },
+        };
       }
     } catch {
       // fall through
@@ -129,16 +144,21 @@ export function getActorUser(req: Request): User {
     }
     const roleHeader = req.headers['x-user-role'] as string | undefined;
     if (roleHeader === 'ADMIN') {
-      return db.users.find((u) => u.role === 'ADMIN') || db.users[0];
+      return db.users.find((u) => u.role === 'ADMIN') || null;
     }
   }
 
-  // 3. Default: least-privilege regular user object (no admin rights).
-  return db.users.find((u) => u.role === 'USER') || db.users[0];
+  // 3. No session → NO actor. Real accounts only: routes must answer 401
+  //    instead of falling back to a demo persona.
+  return null;
 }
 
 export function requireAdmin(req: Request, res: Response): User | null {
   const actor = getActorUser(req);
+  if (!actor) {
+    res.status(401).json({ error: 'Authentication required' });
+    return null;
+  }
   if (actor.role !== 'ADMIN') {
     res.status(403).json({ error: 'Administrator access required' });
     return null;

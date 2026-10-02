@@ -78,296 +78,21 @@ function attachSecretHash(key, hash) {
   });
 }
 var VanitasDatabase = class {
-  productSuggestions = [
-    {
-      id: "sug_welcome_001",
-      title: "Improve empty-state guidance",
-      details: "Show a clearer first action for new developers.",
-      category: "ux",
-      status: "open",
-      createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-      authorName: "Vanitas Team"
-    }
-  ];
-  users = [
-    {
-      id: "usr_owner_001",
-      email: "sovereign.empirex@gmail.com",
-      name: "Vanitas Prime",
-      username: "vanitas_sovereign",
-      avatarUrl: "https://i.postimg.cc/SNN169kT/orders.png",
-      bio: "Master Architect of the Vanitas Unified Ecosystem & Celestial API Gateway.",
-      role: "ADMIN",
-      twoFactorEnabled: true,
-      createdAt: "2026-01-15T08:00:00.000Z",
-      lastLoginAt: (/* @__PURE__ */ new Date()).toISOString(),
-      connectedAccounts: {
-        google: true,
-        github: true,
-        discord: true
-      }
-    },
-    {
-      id: "usr_dev_002",
-      email: "no\xE9.archiviste@altus.org",
-      name: "No\xE9 Archiviste",
-      username: "noe_vampire",
-      avatarUrl: "https://images.unsplash.com/photo-1534447677768-be436bb09401?q=80&w=400&auto=format&fit=crop",
-      bio: "Vampire liaison & API integration engineer.",
-      role: "USER",
-      twoFactorEnabled: false,
-      createdAt: "2026-02-10T14:30:00.000Z",
-      lastLoginAt: "2026-08-24T19:20:00.000Z",
-      connectedAccounts: {
-        google: true,
-        github: false,
-        discord: true
-      }
-    },
-    {
-      id: "usr_bot_003",
-      email: "bot.gateway@vanitas.internal",
-      name: "Vanitas Autonomous Bot",
-      username: "vanitas_bot_svc",
-      avatarUrl: "https://i.postimg.cc/pXXcfjRk/Test.png",
-      bio: "System Service Account for Discord & WhatsApp automated dispatch.",
-      role: "USER",
-      twoFactorEnabled: true,
-      createdAt: "2026-03-01T00:00:00.000Z",
-      lastLoginAt: (/* @__PURE__ */ new Date()).toISOString(),
-      connectedAccounts: {
-        google: false,
-        github: true,
-        discord: true
-      }
-    }
-  ];
-  apiKeys = [
-    {
-      id: "key_live_celestial_01",
-      name: "Central Production Gateway",
-      keyPrefix: "sk_live_celest",
-      maskedSecret: "sk_live_\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u20228819",
-      ownerId: "usr_owner_001",
-      ownerName: "Vanitas Prime",
-      scopes: ["api.read", "api.write", "users.read", "logs.read", "bot.execute", "system.read"],
-      status: "active",
-      rateLimitPerMin: 1200,
-      burstLimit: 60,
-      rateLimitAlgorithm: "sliding_window",
-      actionOnExceed: "reject_429",
-      monthlyQuota: 5e5,
-      currentUsageThisMonth: 124800,
-      currentRpmUsage: 480,
-      usageCount: 8420,
-      createdAt: "2026-04-10T12:00:00.000Z",
-      lastUsedAt: (/* @__PURE__ */ new Date()).toISOString(),
-      expiresAt: null,
-      environment: "live"
-    },
-    {
-      id: "key_bot_discord_02",
-      name: "Discord & WhatsApp Dispatcher",
-      keyPrefix: "sk_live_discord",
-      maskedSecret: "sk_live_\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u20224402",
-      ownerId: "usr_bot_003",
-      ownerName: "Vanitas Autonomous Bot",
-      scopes: ["api.read", "bot.execute", "analytics.read"],
-      status: "active",
-      rateLimitPerMin: 600,
-      burstLimit: 30,
-      rateLimitAlgorithm: "token_bucket",
-      actionOnExceed: "throttle_delay",
-      monthlyQuota: 2e5,
-      currentUsageThisMonth: 89400,
-      currentRpmUsage: 310,
-      usageCount: 14205,
-      createdAt: "2026-05-18T10:15:00.000Z",
-      lastUsedAt: new Date(Date.now() - 1e3 * 60 * 3).toISOString(),
-      expiresAt: null,
-      environment: "live"
-    },
-    {
-      id: "key_test_sandbox_03",
-      name: "Mobile SDK Sandbox Key",
-      keyPrefix: "sk_test_mobile",
-      maskedSecret: "sk_test_\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u20229100",
-      ownerId: "usr_dev_002",
-      ownerName: "No\xE9 Archiviste",
-      scopes: ["api.read", "users.read", "analytics.read"],
-      status: "active",
-      rateLimitPerMin: 200,
-      burstLimit: 15,
-      rateLimitAlgorithm: "fixed_window",
-      actionOnExceed: "alert_only",
-      monthlyQuota: 5e4,
-      currentUsageThisMonth: 8200,
-      currentRpmUsage: 42,
-      usageCount: 1240,
-      createdAt: "2026-07-02T16:45:00.000Z",
-      lastUsedAt: new Date(Date.now() - 1e3 * 60 * 60 * 2).toISOString(),
-      expiresAt: "2026-12-31T23:59:59.000Z",
-      environment: "test"
-    }
-  ];
-  auditLogs = [
-    {
-      id: "log_99182",
-      timestamp: new Date(Date.now() - 1e3 * 60 * 2).toISOString(),
-      actorId: "usr_owner_001",
-      actorName: "Vanitas Prime",
-      actorEmail: "sovereign.empirex@gmail.com",
-      action: "API_KEY_ROTATED",
-      category: "KEYS",
-      target: "key_live_celestial_01 (Central Production Gateway)",
-      source: "WEB",
-      status: "SUCCESS",
-      requestId: "req_rot_88921a",
-      ipAddress: "194.230.14.88",
-      metadata: { reason: "Scheduled security rotation cycle", previousPrefix: "sk_live_oldc" }
-    },
-    {
-      id: "log_99181",
-      timestamp: new Date(Date.now() - 1e3 * 60 * 18).toISOString(),
-      actorId: "usr_bot_003",
-      actorName: "Vanitas Autonomous Bot",
-      actorEmail: "bot.gateway@vanitas.internal",
-      action: "BOT_COMMAND_EXECUTED",
-      category: "BOT",
-      target: "discord_guild_44901 (#system-status)",
-      source: "BOT",
-      status: "SUCCESS",
-      requestId: "req_bot_77192b",
-      ipAddress: "10.0.4.12",
-      metadata: { command: "/vanitas status --all", latencyMs: 14 }
-    },
-    {
-      id: "log_99180",
-      timestamp: new Date(Date.now() - 1e3 * 60 * 45).toISOString(),
-      actorId: "usr_owner_001",
-      actorName: "Vanitas Prime",
-      actorEmail: "sovereign.empirex@gmail.com",
-      action: "USER_ROLE_PROMOTED",
-      category: "ADMIN",
-      target: "usr_owner_001 -> ADMIN (Bootstrap verification)",
-      source: "WEB",
-      status: "SUCCESS",
-      requestId: "req_adm_11029c",
-      ipAddress: "194.230.14.88",
-      metadata: { priorRole: "USER", newRole: "ADMIN", systemTrigger: "Console Confirmation" }
-    },
-    {
-      id: "log_99179",
-      timestamp: new Date(Date.now() - 1e3 * 60 * 120).toISOString(),
-      actorId: "anonymous_attacker",
-      actorName: "Unauthenticated Request",
-      actorEmail: "unknown",
-      action: "RATE_LIMIT_EXCEEDED",
-      category: "SECURITY",
-      target: "/api/v1/admin/users",
-      source: "OTHER",
-      status: "WARNING",
-      requestId: "req_sec_44910d",
-      ipAddress: "45.155.205.233",
-      metadata: { attemptedRequests: 42, allowedThreshold: 10, actionTaken: "IP Throttled for 15m" }
-    },
-    {
-      id: "log_99178",
-      timestamp: new Date(Date.now() - 1e3 * 60 * 360).toISOString(),
-      actorId: "usr_dev_002",
-      actorName: "No\xE9 Archiviste",
-      actorEmail: "no\xE9.archiviste@altus.org",
-      action: "SESSION_REVOKED",
-      category: "AUTH",
-      target: "Session device: Safari on macOS (178.62.204.1)",
-      source: "WEB",
-      status: "SUCCESS",
-      requestId: "req_ses_00291e",
-      ipAddress: "82.165.197.1",
-      metadata: { deviceId: "dev_old_mac_safari" }
-    }
-  ];
-  sessions = [
-    {
-      id: "dev_curr_browser",
-      browser: "Chrome 133.0",
-      os: "macOS Sequoia 15.2",
-      device: "Desktop / Workstation",
-      ip: "194.230.14.88",
-      source: "WEB",
-      isCurrent: true,
-      createdAt: "2026-08-25T11:00:00.000Z",
-      lastActiveAt: (/* @__PURE__ */ new Date()).toISOString()
-    },
-    {
-      id: "dev_mobile_iphone",
-      browser: "Vanitas Native Client v1.4",
-      os: "iOS 19.1",
-      device: "Apple iPhone 16 Pro",
-      ip: "82.165.197.10",
-      source: "MOBILE",
-      isCurrent: false,
-      createdAt: "2026-08-23T09:30:00.000Z",
-      lastActiveAt: new Date(Date.now() - 1e3 * 60 * 120).toISOString()
-    },
-    {
-      id: "dev_discord_bot_runner",
-      browser: "Node.js / Axios v1.7",
-      os: "Linux Ubuntu 24.04 LTS",
-      device: "Cloud Run Worker Cluster",
-      ip: "10.0.4.12",
-      source: "BOT",
-      isCurrent: false,
-      createdAt: "2026-08-01T00:00:00.000Z",
-      lastActiveAt: (/* @__PURE__ */ new Date()).toISOString()
-    }
-  ];
-  webhooks = [
-    {
-      id: "wh_prod_alerts",
-      name: "Security & Key Alert Dispatcher",
-      url: "https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX",
-      events: ["api_key.rotated", "api_key.revoked", "security.alert", "role.changed"],
-      secret: "whsec_99a8b7c6d5e4f3a2b1c0",
-      status: "active",
-      createdAt: "2026-04-01T10:00:00.000Z",
-      lastTriggeredAt: new Date(Date.now() - 1e3 * 60 * 2).toISOString(),
-      failureCount: 0
-    },
-    {
-      id: "wh_crm_sync",
-      name: "User Lifecycle Sync Service",
-      url: "https://api.internal-sync.org/vanitas/events",
-      events: ["user.created", "user.updated"],
-      secret: "whsec_11223344556677889900",
-      status: "active",
-      createdAt: "2026-05-10T15:30:00.000Z",
-      lastTriggeredAt: new Date(Date.now() - 1e3 * 60 * 60 * 5).toISOString(),
-      failureCount: 0
-    }
-  ];
-  webhookLogs = [
-    {
-      id: "wh_log_01",
-      webhookId: "wh_prod_alerts",
-      event: "api_key.rotated",
-      status: "delivered",
-      statusCode: 200,
-      latencyMs: 142,
-      timestamp: new Date(Date.now() - 1e3 * 60 * 2).toISOString(),
-      payload: { event: "api_key.rotated", keyId: "key_live_celestial_01", actor: "Vanitas Prime" }
-    },
-    {
-      id: "wh_log_02",
-      webhookId: "wh_crm_sync",
-      event: "user.created",
-      status: "delivered",
-      statusCode: 200,
-      latencyMs: 210,
-      timestamp: new Date(Date.now() - 1e3 * 60 * 60 * 5).toISOString(),
-      payload: { event: "user.created", userId: "usr_dev_002", email: "no\xE9.archiviste@altus.org" }
-    }
-  ];
+  // DELIBERATELY EMPTY: no seeded/fake suggestions or comments — ever.
+  productSuggestions = [];
+  // DELIBERATELY EMPTY: real accounts only. The first registration bootstraps
+  // as ADMIN (pickInitialRole) — no demo personas exist anywhere.
+  users = [];
+  // DELIBERATELY EMPTY: keys are created by real accounts only.
+  apiKeys = [];
+  // DELIBERATELY EMPTY: only real audit events are recorded at runtime.
+  auditLogs = [];
+  // DELIBERATELY EMPTY: no fake devices — real sessions live in auth_sessions.
+  sessions = [];
+  // DELIBERATELY EMPTY: only real webhook endpoints configured by users.
+  webhooks = [];
+  // DELIBERATELY EMPTY: only real delivery logs at runtime.
+  webhookLogs = [];
   bots = [
     {
       id: "bot_discord_main",
@@ -436,37 +161,20 @@ var VanitasDatabase = class {
       updatedAt: "2026-08-01T00:00:00.000Z"
     }
   ];
-  securityThreats = [
-    {
-      id: "thr_001",
-      level: "HIGH",
-      title: "Excessive Failed Authentication Attempts",
-      description: "27 repeated invalid token handshakes detected within 3 minutes from single IP range.",
-      source: "OTHER",
-      ip: "45.155.205.233",
-      timestamp: new Date(Date.now() - 1e3 * 60 * 35).toISOString(),
-      resolved: false
-    },
-    {
-      id: "thr_002",
-      level: "MEDIUM",
-      title: "New Geographical Ingress Detected",
-      description: "Account access requested from new autonomous system in Frankfurt data center.",
-      source: "APPLICATION",
-      ip: "194.230.14.88",
-      timestamp: new Date(Date.now() - 1e3 * 60 * 120).toISOString(),
-      resolved: true
-    }
-  ];
+  // DELIBERATELY EMPTY: threats are detected/reported at runtime, never faked.
+  securityThreats = [];
   systemStats = {
-    totalUsers: 1420,
-    activeUsers: 388,
-    apiRequestsToday: 8420,
-    apiRequestsThisMonth: 194300,
+    // Counters start at ZERO and are counted for real at runtime
+    // (incrementRequestCount + live DB counts in /admin/statistics).
+    // No fabricated telemetry.
+    totalUsers: 0,
+    activeUsers: 0,
+    apiRequestsToday: 0,
+    apiRequestsThisMonth: 0,
     apiQuotaLimit: 25e4,
-    p95LatencyMs: 24,
-    errorRate: 0.04,
-    activeApiKeys: 18,
+    p95LatencyMs: 0,
+    errorRate: 0,
+    activeApiKeys: 0,
     services: {
       api: "operational",
       auth: "operational",
@@ -475,22 +183,8 @@ var VanitasDatabase = class {
       bot: "operational",
       webhooks: "operational"
     },
-    requestBreakdown: [
-      { endpoint: "/api/v1/auth/me", count: 3200, avgLatencyMs: 12, errorCount: 1 },
-      { endpoint: "/api/v1/bot/execute", count: 2840, avgLatencyMs: 18, errorCount: 0 },
-      { endpoint: "/api/v1/api-keys", count: 1100, avgLatencyMs: 22, errorCount: 2 },
-      { endpoint: "/api/v1/ai/chat", count: 780, avgLatencyMs: 340, errorCount: 0 },
-      { endpoint: "/api/v1/admin/logs", count: 500, avgLatencyMs: 35, errorCount: 0 }
-    ],
-    hourlyTraffic: [
-      { hour: "00:00", requests: 210, errors: 0 },
-      { hour: "04:00", requests: 140, errors: 0 },
-      { hour: "08:00", requests: 620, errors: 1 },
-      { hour: "12:00", requests: 1450, errors: 2 },
-      { hour: "16:00", requests: 2100, errors: 3 },
-      { hour: "20:00", requests: 1800, errors: 1 },
-      { hour: "Now", requests: 2100, errors: 0 }
-    ]
+    requestBreakdown: [],
+    hourlyTraffic: []
   };
   // --- Methods ---
   recordAuditLog(entry) {
@@ -982,11 +676,16 @@ var VanitasDatabase = class {
   }
   incrementRequestCount(endpoint, status, latencyMs) {
     this.systemStats.apiRequestsToday += 1;
-    const ep = this.systemStats.requestBreakdown.find((b) => b.endpoint === endpoint);
-    if (ep) {
-      ep.count += 1;
-      if (status >= 400) ep.errorCount += 1;
+    this.systemStats.apiRequestsThisMonth += 1;
+    let ep = this.systemStats.requestBreakdown.find((b) => b.endpoint === endpoint);
+    if (!ep) {
+      if (this.systemStats.requestBreakdown.length >= 12) return;
+      ep = { endpoint, count: 0, avgLatencyMs: latencyMs, errorCount: 0 };
+      this.systemStats.requestBreakdown.push(ep);
     }
+    ep.count += 1;
+    if (status >= 400) ep.errorCount += 1;
+    ep.avgLatencyMs = Math.round(ep.avgLatencyMs * 0.85 + latencyMs * 0.15);
   }
   getKeyUsageAnalytics(period = "24h") {
     const activeKeys = this.apiKeys;
@@ -1178,7 +877,20 @@ function getActorUser(req) {
       const a = Buffer.from(token);
       const b = Buffer.from(expected);
       if (a.length === b.length && import_crypto2.default.timingSafeEqual(a, b)) {
-        return db.users.find((u) => u.role === "ADMIN") || db.users[0];
+        const adminUser = db.users.find((u) => u.role === "ADMIN");
+        if (adminUser) return adminUser;
+        return {
+          id: "usr_admin_api_token",
+          email: "admin-api-token@vanitas.local",
+          name: "Admin API Token",
+          username: "admin_api_token",
+          avatarUrl: "",
+          role: "ADMIN",
+          twoFactorEnabled: false,
+          createdAt: "1970-01-01T00:00:00.000Z",
+          lastLoginAt: (/* @__PURE__ */ new Date()).toISOString(),
+          connectedAccounts: { google: false, github: false, discord: false }
+        };
       }
     } catch {
     }
@@ -1193,13 +905,17 @@ function getActorUser(req) {
     }
     const roleHeader = req.headers["x-user-role"];
     if (roleHeader === "ADMIN") {
-      return db.users.find((u) => u.role === "ADMIN") || db.users[0];
+      return db.users.find((u) => u.role === "ADMIN") || null;
     }
   }
-  return db.users.find((u) => u.role === "USER") || db.users[0];
+  return null;
 }
 function requireAdmin(req, res) {
   const actor = getActorUser(req);
+  if (!actor) {
+    res.status(401).json({ error: "Authentication required" });
+    return null;
+  }
   if (actor.role !== "ADMIN") {
     res.status(403).json({ error: "Administrator access required" });
     return null;
@@ -1222,7 +938,7 @@ function isValidScope(s) {
 // src/server/authStore.ts
 var SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1e3;
 var RESOLVE_CACHE_TTL_MS = 6e4;
-var DEFAULT_AVATAR = "https://i.postimg.cc/SNN169kT/orders.png";
+var DEFAULT_AVATAR = "/images/avatar-default.svg";
 async function pickInitialRole(email) {
   if (isAdminEmail(email)) return "ADMIN";
   if (databasePool) {
@@ -1345,6 +1061,20 @@ async function createAccount(params) {
   db.users.push(user);
   memoryPasswords.set(email, { userId: user.id, hash: passwordHash });
   return { ok: true, user };
+}
+async function updateProfile(userId, updates) {
+  if (databasePool) {
+    const result = await databasePool.query(
+      "update public.users set name = $2, avatar_url = $3 where id = $1 returning *",
+      [userId, updates.name, updates.avatarUrl]
+    );
+    return result.rows[0] ? rowToUser(result.rows[0]) : null;
+  }
+  const user = db.users.find((u) => u.id === userId);
+  if (!user) return null;
+  user.name = updates.name;
+  user.avatarUrl = updates.avatarUrl || DEFAULT_AVATAR;
+  return user;
 }
 async function verifyAccount(email, password) {
   const clean = email.trim().toLowerCase();
@@ -1804,6 +1534,32 @@ async function queryOllama(systemInstruction, prompt) {
     return null;
   }
 }
+async function queryPollinations(systemInstruction, prompt) {
+  try {
+    const response = await fetch("https://text.pollinations.ai/openai", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: AbortSignal.timeout(25e3),
+      body: JSON.stringify({
+        model: "openai",
+        messages: [
+          { role: "system", content: systemInstruction },
+          { role: "user", content: prompt }
+        ]
+      })
+    });
+    if (!response.ok) {
+      console.warn(`Pollinations HTTP ${response.status}; using fallback.`);
+      return null;
+    }
+    const data = await response.json();
+    const text = data.choices?.[0]?.message?.content?.trim();
+    return text || null;
+  } catch (error) {
+    console.warn("Pollinations unavailable; using the local deterministic fallback.", error instanceof Error ? error.message : error);
+    return null;
+  }
+}
 async function processAiQuery(options) {
   const { persona, toneStyle = "developer", prompt, context, enableWebSearch, enableVideoSearch } = options;
   const isVideoQuery = enableVideoSearch || persona === "video" || /\b(video|videos|tutorial|tutorials|youtube|watch|walkthrough|screencast|guide|setup|course|learn)\b/i.test(prompt) || /[\u0600-\u06FF]/.test(prompt) && /(فيديو|فيديوهات|شرح|مرئي|يوتيوب|دروس|دورة|تطبيق|مشاهدة)/i.test(prompt);
@@ -1890,6 +1646,10 @@ Note: ${retrievedVideos.length} educational YouTube video tutorials have been re
         }
       }
     }
+  }
+  const freeText = await queryPollinations(selectedInstruction, prompt);
+  if (freeText) {
+    return { text: freeText, videos: retrievedVideos, videoQuery: videoQueryStr };
   }
   const fallback = generateFallbackResponse(persona, toneStyle, prompt, context);
   return {
@@ -2081,9 +1841,11 @@ run();
 async function diagnoseAndFixCode(req) {
   const { code, language, context, analysisMode = "full" } = req;
   const ai = getAiClient();
-  if (ai && code.trim().length > 0) {
+  const hasCode = code.trim().length > 0;
+  let diagnosisPrompt = "";
+  if (hasCode) {
     try {
-      const prompt = `You are the Vanitas Autonomous Code Analysis & Refactoring Engine powered by Gemini.
+      diagnosisPrompt = `You are the Vanitas Autonomous Code Analysis & Refactoring Engine powered by Gemini.
 You analyze developer code snippets for:
 1. Syntax errors, invalid grammar, missing brackets, broken imports, type violations, and compilation issues.
 2. Security vulnerabilities, exposed raw secrets, missing Bearer authentication, missing HMAC verification, and injection flaws.
@@ -2132,11 +1894,11 @@ Code to analyze:
 \`\`\`${language}
 ${code}
 \`\`\``;
-      for (const modelName of CANDIDATE_MODELS) {
+      if (ai) for (const modelName of CANDIDATE_MODELS) {
         try {
           const response = await ai.models.generateContent({
             model: modelName,
-            contents: prompt,
+            contents: diagnosisPrompt,
             config: {
               responseMimeType: "application/json",
               temperature: 0.15
@@ -2168,6 +1930,36 @@ ${code}
       }
     } catch (err) {
       console.warn("AI Code Diagnosis fallback triggered:", err);
+    }
+  }
+  if (diagnosisPrompt) {
+    try {
+      const freeText = await queryPollinations(
+        "You are a strict code-analysis engine. Respond ONLY with the valid JSON object requested \u2014 no markdown fences, no prose.",
+        diagnosisPrompt
+      );
+      if (freeText) {
+        const parsed = JSON.parse(freeText.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, ""));
+        const issues = Array.isArray(parsed.issues) ? parsed.issues : [];
+        const syntaxErrorsCount = parsed.syntaxErrorsCount ?? issues.filter((i) => i.category === "syntax" || i.severity === "error").length;
+        const securityFlawsCount = parsed.securityFlawsCount ?? issues.filter((i) => i.category === "security" || i.severity === "security").length;
+        const refactoringCount = parsed.refactoringCount ?? issues.filter((i) => i.category === "refactor" || i.category === "performance").length;
+        return {
+          hasErrors: parsed.hasErrors ?? (syntaxErrorsCount > 0 || securityFlawsCount > 0),
+          score: Math.min(100, Math.max(0, parsed.score ?? 85)),
+          maintainabilityIndex: Math.min(100, Math.max(0, parsed.maintainabilityIndex ?? 88)),
+          syntaxErrorsCount,
+          securityFlawsCount,
+          refactoringCount,
+          issues,
+          fixedCode: parsed.fixedCode || code,
+          explanation: parsed.explanation || "Analyzed code structure and applied production refactorings.",
+          refactoringHighlights: Array.isArray(parsed.refactoringHighlights) ? parsed.refactoringHighlights : [],
+          securityChecks: Array.isArray(parsed.securityChecks) ? parsed.securityChecks : []
+        };
+      }
+    } catch (err) {
+      console.warn("Pollinations diagnosis unavailable; using local analyzer.", err.message);
     }
   }
   return analyzeCodeLocally(code, language);
@@ -2995,6 +2787,62 @@ async function findSuggestion(id) {
   const result = await databasePool.query("select * from public.product_suggestions where id = $1", [id]);
   return result.rows[0] ? mapSuggestion(result.rows[0]) : void 0;
 }
+var memoryComments = [];
+function mapComment(row) {
+  return {
+    id: row.id,
+    docId: row.doc_id,
+    userId: row.user_id,
+    authorName: row.author_name,
+    authorAvatar: row.author_avatar || "",
+    body: row.body,
+    createdAt: row.created_at
+  };
+}
+async function listComments(docId) {
+  if (!databasePool) return memoryComments.filter((c) => c.docId === docId);
+  const result = await databasePool.query(
+    "select * from public.comments where doc_id = $1 order by created_at asc limit 500",
+    [docId]
+  );
+  return result.rows.map(mapComment);
+}
+async function createComment(params) {
+  const id = secureId("cmt");
+  if (!databasePool) {
+    const comment = {
+      id,
+      docId: params.docId,
+      userId: params.userId,
+      authorName: params.authorName,
+      authorAvatar: params.authorAvatar,
+      body: params.body,
+      createdAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    memoryComments.push(comment);
+    return comment;
+  }
+  const result = await databasePool.query(
+    `insert into public.comments (id, doc_id, user_id, author_name, author_avatar, body)
+     values ($1, $2, $3, $4, $5, $6) returning *`,
+    [id, params.docId, params.userId, params.authorName, params.authorAvatar, params.body]
+  );
+  return mapComment(result.rows[0]);
+}
+async function deleteComment(id, actor) {
+  if (!databasePool) {
+    const idx = memoryComments.findIndex((c) => c.id === id);
+    if (idx === -1) return "not_found";
+    if (memoryComments[idx].userId !== actor.id && actor.role !== "ADMIN") return "forbidden";
+    memoryComments.splice(idx, 1);
+    return "deleted";
+  }
+  const existing = await databasePool.query("select user_id from public.comments where id = $1", [id]);
+  if (!existing.rows[0]) return "not_found";
+  if (existing.rows[0].user_id !== actor.id && actor.role !== "ADMIN") return "forbidden";
+  await databasePool.query("delete from public.comments where id = $1", [id]);
+  return "deleted";
+}
 async function buildApp() {
   const app = (0, import_express.default)();
   const PORT = Number(process.env.PORT) || 3e3;
@@ -3024,6 +2872,7 @@ async function buildApp() {
   app.use("/api/v1/auth/", rateLimit({ windowMs: 6e4, max: 60 }));
   app.use("/api/v1/ai/", rateLimit({ windowMs: 6e4, max: 60 }));
   app.use("/api/v1/bot/", rateLimit({ windowMs: 6e4, max: 120 }));
+  app.use("/api/v1/comments/", rateLimit({ windowMs: 6e4, max: 30 }));
   app.use("/api/", async (req, _res, next) => {
     try {
       const auth = req.headers.authorization || "";
@@ -3106,7 +2955,7 @@ async function buildApp() {
       ready: database !== "unreachable",
       database,
       auth: "ready",
-      ai: process.env.AI_PROVIDER === "ollama" ? "ollama_configured" : process.env.GEMINI_API_KEY ? "gemini_enabled" : "fallback_ready",
+      ai: process.env.AI_PROVIDER === "ollama" ? "ollama_configured" : process.env.GEMINI_API_KEY ? "gemini_enabled" : "pollinations_free",
       mode: process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "production" ? "demo" : "authenticated"
     });
   });
@@ -3126,10 +2975,33 @@ async function buildApp() {
   }
   app.get("/api/v1/auth/me", (req, res) => {
     const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
     res.json({
       user: actor,
       permissions: permissionsFor(actor)
     });
+  });
+  app.patch("/api/v1/auth/profile", async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
+    const name = typeof req.body?.name === "string" ? sanitizeText(req.body.name, 80) : "";
+    const avatarUrl = typeof req.body?.avatarUrl === "string" ? req.body.avatarUrl : "";
+    if (!name || name.length < 2) {
+      return res.status(400).json({ error: "Display name must be between 2 and 80 characters" });
+    }
+    const isHttpsUrl = avatarUrl === "" || /^https:\/\/[^\s]{5,500}$/.test(avatarUrl);
+    const isUploadedImage = avatarUrl.length <= 3e5 && /^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$/.test(avatarUrl);
+    if (!isHttpsUrl && !isUploadedImage) {
+      return res.status(400).json({ error: "Avatar must be an https URL or an uploaded image up to 300KB" });
+    }
+    try {
+      const updated = await updateProfile(actor.id, { name, avatarUrl });
+      if (!updated) return res.status(404).json({ error: "Account not found" });
+      res.json({ user: updated, permissions: permissionsFor(updated) });
+    } catch (err) {
+      console.error("[auth/profile]", err.message);
+      res.status(500).json({ error: "Profile update failed" });
+    }
   });
   app.post("/api/v1/auth/register", async (req, res) => {
     const email = sanitizeText(req.body?.email, 120).toLowerCase();
@@ -3212,6 +3084,55 @@ async function buildApp() {
     }
     res.json({ success: true });
   });
+  const DOC_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+  app.get("/api/v1/comments/:docId", async (req, res) => {
+    const docId = sanitizeText(req.params.docId, 64).toLowerCase();
+    if (!DOC_ID_RE.test(docId)) return res.status(400).json({ error: "Invalid doc id" });
+    try {
+      const comments = await listComments(docId);
+      res.json({ comments, total: comments.length });
+    } catch (err) {
+      console.error("[comments/list]", err.message);
+      res.status(500).json({ error: "Failed to load comments" });
+    }
+  });
+  app.post("/api/v1/comments/:docId", async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Sign in to post a comment" });
+    const docId = sanitizeText(req.params.docId, 64).toLowerCase();
+    if (!DOC_ID_RE.test(docId)) return res.status(400).json({ error: "Invalid doc id" });
+    const body = sanitizeText(typeof req.body?.body === "string" ? req.body.body : "", 2e3).trim();
+    if (body.length < 2) return res.status(400).json({ error: "Comment must be between 2 and 2000 characters" });
+    try {
+      const avatar = (actor.avatarUrl || "").slice(0, 2e3);
+      const comment = await createComment({
+        docId,
+        userId: actor.id,
+        authorName: actor.name,
+        authorAvatar: avatar.startsWith("data:") ? "" : avatar,
+        body
+      });
+      res.status(201).json({ comment });
+    } catch (err) {
+      console.error("[comments/create]", err.message);
+      res.status(500).json({ error: "Failed to post comment" });
+    }
+  });
+  app.delete("/api/v1/comments/:id", async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
+    const id = sanitizeText(req.params.id, 64);
+    if (!id) return res.status(400).json({ error: "Comment id is required" });
+    try {
+      const outcome = await deleteComment(id, actor);
+      if (outcome === "deleted") return res.json({ success: true });
+      if (outcome === "forbidden") return res.status(403).json({ error: "You can only delete your own comments" });
+      res.status(404).json({ error: "Comment not found" });
+    } catch (err) {
+      console.error("[comments/delete]", err.message);
+      res.status(500).json({ error: "Failed to delete comment" });
+    }
+  });
   app.get("/api/v1/auth/providers", (_req, res) => {
     res.json({ providers: listConfiguredProviders() });
   });
@@ -3270,44 +3191,15 @@ async function buildApp() {
       return res.redirect(`${base}/login#vnt_error=provider_failed`);
     }
   });
-  app.post("/api/v1/auth/oauth", async (req, res) => {
-    const provider = sanitizeText(req.body?.provider, 32).toUpperCase() || "GENERIC";
-    if (!/^[A-Z0-9_-]{1,32}$/.test(provider)) {
-      return res.status(400).json({ error: "Invalid provider" });
-    }
+  app.get("/api/v1/auth/sessions", (req, res) => {
     const actor = getActorUser(req);
-    const source = detectSource(req);
-    db.recordAuditLog({
-      actorId: actor.id,
-      actorName: actor.name,
-      actorEmail: actor.email,
-      action: `OAUTH_LOGIN_${provider}`,
-      category: "AUTH",
-      target: `User Account: ${actor.id}`,
-      source,
-      status: "SUCCESS",
-      ipAddress: req.ip || "unknown",
-      metadata: { provider }
-    });
-    let token;
-    try {
-      token = await createSession(actor, { ip: req.ip, userAgent: String(req.headers["user-agent"] || "") });
-    } catch (err) {
-      console.error("[auth] oauth session failed:", err);
-      token = secureToken("vnt_jwt_");
-    }
-    res.json({
-      success: true,
-      token,
-      user: actor
-    });
-  });
-  app.get("/api/v1/auth/sessions", (_req, res) => {
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
     res.json({ sessions: db.sessions });
   });
   app.delete("/api/v1/auth/sessions/:id", (req, res) => {
     const id = sanitizeText(req.params.id, 64);
     const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
     const idx = db.sessions.findIndex((s) => s.id === id);
     if (idx !== -1) {
       const removed = db.sessions.splice(idx, 1)[0];
@@ -3329,6 +3221,7 @@ async function buildApp() {
   });
   app.get("/api/v1/api-keys", (req, res) => {
     const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
     if (actor.role === "ADMIN") {
       return res.json({ keys: db.apiKeys, allScopes: ALL_SCOPES });
     }
@@ -3343,6 +3236,7 @@ async function buildApp() {
   app.post("/api/v1/api-keys", (req, res) => {
     try {
       const actor = getActorUser(req);
+      if (!actor) return res.status(401).json({ error: "Authentication required" });
       const name = sanitizeText(req.body?.name, 80);
       const scopes = req.body?.scopes;
       const environment = req.body?.environment === "test" ? "test" : "live";
@@ -3375,6 +3269,7 @@ async function buildApp() {
   app.post("/api/v1/api-keys/:id/rotate", (req, res) => {
     try {
       const actor = getActorUser(req);
+      if (!actor) return res.status(401).json({ error: "Authentication required" });
       const id = sanitizeText(req.params.id, 128);
       const result = db.rotateApiKey(id, actor);
       res.json({
@@ -3389,6 +3284,7 @@ async function buildApp() {
   app.delete("/api/v1/api-keys/:id", (req, res) => {
     try {
       const actor = getActorUser(req);
+      if (!actor) return res.status(401).json({ error: "Authentication required" });
       const id = sanitizeText(req.params.id, 128);
       const reason = sanitizeText(req.body?.reason, 200);
       const key = db.revokeApiKey(id, actor, reason || void 0);
@@ -3400,6 +3296,7 @@ async function buildApp() {
   app.patch("/api/v1/api-keys/:id/scopes", (req, res) => {
     try {
       const actor = getActorUser(req);
+      if (!actor) return res.status(401).json({ error: "Authentication required" });
       const id = sanitizeText(req.params.id, 128);
       const { scopes } = req.body;
       if (!scopes || !Array.isArray(scopes) || scopes.length > 30 || !scopes.every(isValidScope)) {
@@ -3414,6 +3311,7 @@ async function buildApp() {
   app.patch("/api/v1/api-keys/:id/rate-limit", (req, res) => {
     try {
       const actor = getActorUser(req);
+      if (!actor) return res.status(401).json({ error: "Authentication required" });
       const id = sanitizeText(req.params.id, 128);
       const { rateLimitPerMin, burstLimit, rateLimitAlgorithm, actionOnExceed, monthlyQuota } = req.body;
       const rpm = Number(rateLimitPerMin);
@@ -3530,6 +3428,14 @@ async function buildApp() {
       database = "in-memory-fallback";
     }
     const stats = db.systemStats;
+    let activeApiKeys = db.apiKeys.filter((k) => k.status === "active").length;
+    if (databasePool && database === "connected") {
+      try {
+        const keys = await databasePool.query("select count(*)::int as n from public.api_keys where status = 'active'");
+        activeApiKeys = keys.rows[0].n;
+      } catch {
+      }
+    }
     res.json({
       status: database === "unreachable" ? "degraded" : "operational",
       database,
@@ -3538,7 +3444,7 @@ async function buildApp() {
         apiRequestsToday: stats.apiRequestsToday,
         p95LatencyMs: stats.p95LatencyMs,
         errorRate: stats.errorRate,
-        activeApiKeys: stats.activeApiKeys
+        activeApiKeys
       },
       uptimeSeconds: Math.round(process.uptime()),
       serverTime: (/* @__PURE__ */ new Date()).toISOString()
@@ -3652,9 +3558,29 @@ async function buildApp() {
     res.setHeader("Content-Disposition", `attachment; filename="vanitas_audit_logs_${Date.now()}.csv"`);
     res.send(csvContent);
   });
-  app.get("/api/v1/admin/statistics", (req, res) => {
+  app.get("/api/v1/admin/statistics", async (req, res) => {
     if (!requireAdmin(req, res)) return;
-    res.json({ stats: db.systemStats, threats: db.securityThreats });
+    const stats = { ...db.systemStats };
+    if (databasePool) {
+      try {
+        const result = await databasePool.query(`select
+          (select count(*) from public.users) as total_users,
+          (select count(distinct user_id) from public.auth_sessions
+             where created_at > now() - interval '7 days') as active_users,
+          (select count(*) from public.api_keys where status = 'active') as active_keys`);
+        const row = result.rows[0];
+        stats.totalUsers = Number(row.total_users);
+        stats.activeUsers = Number(row.active_users);
+        stats.activeApiKeys = Number(row.active_keys);
+      } catch (err) {
+        console.error("[admin/statistics]", err.message);
+      }
+    } else {
+      stats.totalUsers = db.users.length;
+      stats.activeUsers = db.users.length;
+      stats.activeApiKeys = db.apiKeys.filter((k) => k.status === "active").length;
+    }
+    res.json({ stats, threats: db.securityThreats });
   });
   app.post("/api/v1/admin/emergency", (req, res) => {
     const actor = requireAdmin(req, res);
@@ -3721,6 +3647,7 @@ async function buildApp() {
   });
   app.post("/api/v1/webhooks", (req, res) => {
     const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
     const name = sanitizeText(req.body?.name, 80);
     const rawUrl = req.body?.url;
     const events = req.body?.events;
@@ -3779,6 +3706,7 @@ async function buildApp() {
   });
   app.post("/api/v1/bot/execute", (req, res) => {
     const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
     const platform = sanitizeText(req.body?.platform, 32) || "discord";
     const command = sanitizeText(req.body?.command, 200);
     const payload = req.body?.payload;
@@ -3862,6 +3790,7 @@ async function buildApp() {
   });
   app.post("/api/v1/suggestions", async (req, res) => {
     const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Sign in to submit a suggestion" });
     const title = sanitizeText(req.body?.title, 140);
     const details = sanitizeText(req.body?.details, 5e3);
     const category = sanitizeText(req.body?.category, 16) || "feature";
@@ -4046,6 +3975,7 @@ async function buildApp() {
   app.get("/api/v1/download/:type", (req, res) => {
     try {
       const actor = getActorUser(req);
+      if (!actor) return res.status(401).json({ error: "Authentication required" });
       const source = detectSource(req);
       const type = sanitizeText(req.params.type, 16);
       if (!["apk", "exe", "dmg", "appimage"].includes(type)) {

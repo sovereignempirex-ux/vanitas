@@ -22,7 +22,7 @@ import { ProfileView } from './components/views/ProfileView.tsx';
 import { DownloadsView } from './components/views/DownloadsView.tsx';
 
 const AppContent: React.FC = () => {
-  const { activeView } = useAuth();
+  const { activeView, user, authLoading } = useAuth();
   const [isSidebarMobileOpen, setIsSidebarMobileOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
 
@@ -68,6 +68,21 @@ const AppContent: React.FC = () => {
 
   if (authPage) {
     return <AuthPage mode={authPage} />;
+  }
+
+  // REAL ACCOUNTS ONLY: the dashboard is gated behind server-verified auth.
+  // Splash while /auth/me runs → sign-in/register page when signed out.
+  if (authLoading) {
+    return (
+      <div className="min-h-screen vnt-app-bg flex flex-col items-center justify-center gap-4 text-slate-300">
+        <div className="h-10 w-10 rounded-2xl border-2 border-cyan-400/30 border-t-cyan-300 animate-spin" />
+        <p className="font-mono text-xs tracking-widest text-cyan-300">VERIFYING SESSION…</p>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <AuthPage mode={path === '/register' ? 'register' : 'login'} />;
   }
 
   return (

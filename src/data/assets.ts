@@ -1,8 +1,9 @@
 import { getApiBaseUrl, getPortalUrl } from '../lib/runtime.ts';
 
 export const BRAND_ASSETS = {
-  logo: 'https://i.postimg.cc/SNN169kT/orders.png',
-  heroBanner: 'https://i.postimg.cc/pXXcfjRk/Test.png',
+  // Bundled locally in /public/images — no external image dependencies.
+  logo: '/images/logo.svg',
+  heroBanner: '/images/overview-hero.jpg',
   name: 'Vanitas',
   tagline: 'Centralized API, Developer, Security & Intelligence Platform',
   centralApiUrl: getApiBaseUrl(),

@@ -23,6 +23,7 @@ import {
   ExternalDatabaseConfig,
   VideoTutorialItem,
   ProductSuggestion,
+  DocComment,
 } from '../types.ts';
 
 class ApiClient {
@@ -132,16 +133,35 @@ class ApiClient {
     }
   }
 
+  /** Persist profile edits (display name + avatar) to the real account. */
+  async updateProfile(params: { name: string; avatarUrl: string }) {
+    return this.request<{ user: User; permissions: PermissionScope[] }>('/auth/profile', {
+      method: 'PATCH',
+      body: JSON.stringify(params),
+    });
+  }
+
+  // Doc comments — real, DB-backed discussion under each docs page.
+  async listComments(docId: string) {
+    return this.request<{ comments: DocComment[]; total: number }>(`/comments/${encodeURIComponent(docId)}`);
+  }
+
+  async postComment(docId: string, body: string) {
+    return this.request<{ comment: DocComment }>(`/comments/${encodeURIComponent(docId)}`, {
+      method: 'POST',
+      body: JSON.stringify({ body }),
+    });
+  }
+
+  async deleteComment(id: string) {
+    return this.request<{ success: boolean }>(`/comments/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  }
+
   /** Which social providers have keys configured server-side (for UI buttons). */
   async getProviders() {
     return this.request<{ providers: Record<string, boolean> }>('/auth/providers');
-  }
-
-  async oauthLogin(provider: string) {
-    return this.request<{ success: boolean; token: string; user: User }>('/auth/oauth', {
-      method: 'POST',
-      body: JSON.stringify({ provider }),
-    });
   }
 
   async getSessions() {

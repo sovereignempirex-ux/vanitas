@@ -3,7 +3,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { db, ALL_SCOPES } from './src/server/db.ts';
 import { databasePool } from './src/server/pg.ts';
-import { createAccount, verifyAccount, createSession, resolveSession, revokeSession, upsertOAuthUser } from './src/server/authStore.ts';
+import { createAccount, verifyAccount, createSession, resolveSession, revokeSession, upsertOAuthUser, updateProfile } from './src/server/authStore.ts';
 import {
   getProviderConfig,
   isOAuthProvider,
@@ -66,6 +66,88 @@ async function findSuggestion(id: string): Promise<ProductSuggestion | undefined
   return result.rows[0] ? mapSuggestion(result.rows[0]) : undefined;
 }
 
+// ---------------------------------------------------------------------------
+// Doc comments — REAL comments written by registered users under docs pages.
+// PostgreSQL when DATABASE_URL is set, in-memory otherwise. NEVER seeded:
+// a fresh install always starts with zero comments (no fake comments, ever).
+// ---------------------------------------------------------------------------
+export interface DocComment {
+  id: string;
+  docId: string;
+  userId: string;
+  authorName: string;
+  authorAvatar: string;
+  body: string;
+  createdAt: string;
+}
+
+const memoryComments: DocComment[] = [];
+
+function mapComment(row: Record<string, any>): DocComment {
+  return {
+    id: row.id,
+    docId: row.doc_id,
+    userId: row.user_id,
+    authorName: row.author_name,
+    authorAvatar: row.author_avatar || '',
+    body: row.body,
+    createdAt: row.created_at,
+  };
+}
+
+async function listComments(docId: string): Promise<DocComment[]> {
+  if (!databasePool) return memoryComments.filter((c) => c.docId === docId);
+  const result = await databasePool.query(
+    'select * from public.comments where doc_id = $1 order by created_at asc limit 500',
+    [docId],
+  );
+  return result.rows.map(mapComment);
+}
+
+async function createComment(params: {
+  docId: string;
+  userId: string;
+  authorName: string;
+  authorAvatar: string;
+  body: string;
+}): Promise<DocComment> {
+  const id = secureId('cmt');
+  if (!databasePool) {
+    const comment: DocComment = {
+      id,
+      docId: params.docId,
+      userId: params.userId,
+      authorName: params.authorName,
+      authorAvatar: params.authorAvatar,
+      body: params.body,
+      createdAt: new Date().toISOString(),
+    };
+    memoryComments.push(comment);
+    return comment;
+  }
+  const result = await databasePool.query(
+    `insert into public.comments (id, doc_id, user_id, author_name, author_avatar, body)
+     values ($1, $2, $3, $4, $5, $6) returning *`,
+    [id, params.docId, params.userId, params.authorName, params.authorAvatar, params.body],
+  );
+  return mapComment(result.rows[0]);
+}
+
+async function deleteComment(id: string, actor: { id: string; role: UserRole }): Promise<'deleted' | 'forbidden' | 'not_found'> {
+  if (!databasePool) {
+    const idx = memoryComments.findIndex((c) => c.id === id);
+    if (idx === -1) return 'not_found';
+    if (memoryComments[idx].userId !== actor.id && actor.role !== 'ADMIN') return 'forbidden';
+    memoryComments.splice(idx, 1);
+    return 'deleted';
+  }
+  const existing = await databasePool.query('select user_id from public.comments where id = $1', [id]);
+  if (!existing.rows[0]) return 'not_found';
+  if (existing.rows[0].user_id !== actor.id && actor.role !== 'ADMIN') return 'forbidden';
+  await databasePool.query('delete from public.comments where id = $1', [id]);
+  return 'deleted';
+}
+
 export async function buildApp() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
@@ -107,6 +189,7 @@ export async function buildApp() {
   app.use('/api/v1/auth/', rateLimit({ windowMs: 60_000, max: 60 }));
   app.use('/api/v1/ai/', rateLimit({ windowMs: 60_000, max: 60 }));
   app.use('/api/v1/bot/', rateLimit({ windowMs: 60_000, max: 120 }));
+  app.use('/api/v1/comments/', rateLimit({ windowMs: 60_000, max: 30 }));
 
   // Real login sessions: resolve Bearer token → authenticated actor.
   // getActorUser() then reads (req as any).actor synchronously in routes.
@@ -212,7 +295,7 @@ export async function buildApp() {
       ready: database !== 'unreachable',
       database,
       auth: 'ready',
-      ai: process.env.AI_PROVIDER === 'ollama' ? 'ollama_configured' : process.env.GEMINI_API_KEY ? 'gemini_enabled' : 'fallback_ready',
+      ai: process.env.AI_PROVIDER === 'ollama' ? 'ollama_configured' : process.env.GEMINI_API_KEY ? 'gemini_enabled' : 'pollinations_free',
       mode: process.env.DEMO_MODE === 'true' && process.env.NODE_ENV !== 'production' ? 'demo' : 'authenticated',
     });
   });
@@ -234,13 +317,42 @@ export async function buildApp() {
     return actor.role === 'ADMIN' ? ALL_SCOPES.map((s) => s.scope) : ['api.read', 'keys.read', 'keys.create', 'bot.execute'];
   }
 
-  // Auth Current User
+  // Auth Current User — REAL sessions only. No token → 401 (never a fake persona).
   app.get('/api/v1/auth/me', (req, res) => {
     const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
     res.json({
       user: actor,
       permissions: permissionsFor(actor),
     });
+  });
+
+  // Profile update — persists name/avatar to the real account (PostgreSQL).
+  // Avatar accepts an https URL (<=500 chars) or an uploaded image data URL (<=300KB).
+  app.patch('/api/v1/auth/profile', async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
+
+    const name = typeof req.body?.name === 'string' ? sanitizeText(req.body.name, 80) : '';
+    const avatarUrl = typeof req.body?.avatarUrl === 'string' ? req.body.avatarUrl : '';
+    if (!name || name.length < 2) {
+      return res.status(400).json({ error: 'Display name must be between 2 and 80 characters' });
+    }
+    const isHttpsUrl = avatarUrl === '' || /^https:\/\/[^\s]{5,500}$/.test(avatarUrl);
+    const isUploadedImage =
+      avatarUrl.length <= 300_000 && /^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$/.test(avatarUrl);
+    if (!isHttpsUrl && !isUploadedImage) {
+      return res.status(400).json({ error: 'Avatar must be an https URL or an uploaded image up to 300KB' });
+    }
+
+    try {
+      const updated = await updateProfile(actor.id, { name, avatarUrl });
+      if (!updated) return res.status(404).json({ error: 'Account not found' });
+      res.json({ user: updated, permissions: permissionsFor(updated) });
+    } catch (err) {
+      console.error('[auth/profile]', (err as Error).message);
+      res.status(500).json({ error: 'Profile update failed' });
+    }
   });
 
   // ----------------------------------------------------
@@ -338,6 +450,66 @@ export async function buildApp() {
   });
 
   // ----------------------------------------------------
+  // DOC COMMENTS — real, DB-backed, written by registered users only.
+  // Reading is public; posting requires a real session; only the author
+  // (or an ADMIN) can delete. NO fake/seeded comments exist anywhere.
+  // ----------------------------------------------------
+  const DOC_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+  app.get('/api/v1/comments/:docId', async (req, res) => {
+    const docId = sanitizeText(req.params.docId, 64).toLowerCase();
+    if (!DOC_ID_RE.test(docId)) return res.status(400).json({ error: 'Invalid doc id' });
+    try {
+      const comments = await listComments(docId);
+      res.json({ comments, total: comments.length });
+    } catch (err) {
+      console.error('[comments/list]', (err as Error).message);
+      res.status(500).json({ error: 'Failed to load comments' });
+    }
+  });
+
+  app.post('/api/v1/comments/:docId', async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Sign in to post a comment' });
+    const docId = sanitizeText(req.params.docId, 64).toLowerCase();
+    if (!DOC_ID_RE.test(docId)) return res.status(400).json({ error: 'Invalid doc id' });
+    const body = sanitizeText(typeof req.body?.body === 'string' ? req.body.body : '', 2000).trim();
+    if (body.length < 2) return res.status(400).json({ error: 'Comment must be between 2 and 2000 characters' });
+    try {
+      // Never bloat the comments table with a 300KB avatar data-URL — the UI
+      // falls back to a letter avatar when authorAvatar is empty.
+      const avatar = (actor.avatarUrl || '').slice(0, 2000);
+      const comment = await createComment({
+        docId,
+        userId: actor.id,
+        authorName: actor.name,
+        authorAvatar: avatar.startsWith('data:') ? '' : avatar,
+        body,
+      });
+      res.status(201).json({ comment });
+    } catch (err) {
+      console.error('[comments/create]', (err as Error).message);
+      res.status(500).json({ error: 'Failed to post comment' });
+    }
+  });
+
+  app.delete('/api/v1/comments/:id', async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
+    const id = sanitizeText(req.params.id, 64);
+    if (!id) return res.status(400).json({ error: 'Comment id is required' });
+    try {
+      const outcome = await deleteComment(id, actor);
+      if (outcome === 'deleted') return res.json({ success: true });
+      if (outcome === 'forbidden') return res.status(403).json({ error: 'You can only delete your own comments' });
+      res.status(404).json({ error: 'Comment not found' });
+    } catch (err) {
+      console.error('[comments/delete]', (err as Error).message);
+      res.status(500).json({ error: 'Failed to delete comment' });
+    }
+  });
+
+  // ----------------------------------------------------
   // REAL SOCIAL LOGIN: Discord / Google / GitHub (OAuth 2.0)
   // Activated by adding <PROVIDER>_CLIENT_ID + <PROVIDER>_CLIENT_SECRET env.
   // ----------------------------------------------------
@@ -411,51 +583,17 @@ export async function buildApp() {
     }
   });
 
-  // Auth OAuth Simulation (validated + secure token, no Math.random)
-  app.post('/api/v1/auth/oauth', async (req, res) => {
-    const provider = sanitizeText(req.body?.provider, 32).toUpperCase() || 'GENERIC';
-    if (!/^[A-Z0-9_-]{1,32}$/.test(provider)) {
-      return res.status(400).json({ error: 'Invalid provider' });
-    }
+  // Auth Sessions (demo device list — real sessions live in auth_sessions)
+  app.get('/api/v1/auth/sessions', (req, res) => {
     const actor = getActorUser(req);
-    const source = detectSource(req);
-
-    db.recordAuditLog({
-      actorId: actor.id,
-      actorName: actor.name,
-      actorEmail: actor.email,
-      action: `OAUTH_LOGIN_${provider}`,
-      category: 'AUTH',
-      target: `User Account: ${actor.id}`,
-      source,
-      status: 'SUCCESS',
-      ipAddress: req.ip || 'unknown',
-      metadata: { provider },
-    });
-
-    let token: string;
-    try {
-      token = await createSession(actor, { ip: req.ip, userAgent: String(req.headers['user-agent'] || '') });
-    } catch (err) {
-      console.error('[auth] oauth session failed:', err);
-      token = secureToken('vnt_jwt_');
-    }
-
-    res.json({
-      success: true,
-      token,
-      user: actor,
-    });
-  });
-
-  // Auth Sessions
-  app.get('/api/v1/auth/sessions', (_req, res) => {
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
     res.json({ sessions: db.sessions });
   });
 
   app.delete('/api/v1/auth/sessions/:id', (req, res) => {
     const id = sanitizeText(req.params.id, 64);
     const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
     const idx = db.sessions.findIndex((s) => s.id === id);
     if (idx !== -1) {
       const removed = db.sessions.splice(idx, 1)[0];
@@ -479,6 +617,7 @@ export async function buildApp() {
   // API Keys List
   app.get('/api/v1/api-keys', (req, res) => {
     const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
     // If admin, can see all or own, else own
     if (actor.role === 'ADMIN') {
       return res.json({ keys: db.apiKeys, allScopes: ALL_SCOPES });
@@ -498,6 +637,7 @@ export async function buildApp() {
   app.post('/api/v1/api-keys', (req, res) => {
     try {
       const actor = getActorUser(req);
+      if (!actor) return res.status(401).json({ error: 'Authentication required' });
       const name = sanitizeText(req.body?.name, 80);
       const scopes = req.body?.scopes;
       const environment = req.body?.environment === 'test' ? 'test' : 'live';
@@ -535,6 +675,7 @@ export async function buildApp() {
   app.post('/api/v1/api-keys/:id/rotate', (req, res) => {
     try {
       const actor = getActorUser(req);
+      if (!actor) return res.status(401).json({ error: 'Authentication required' });
       const id = sanitizeText(req.params.id, 128);
       const result = db.rotateApiKey(id, actor);
       res.json({
@@ -551,6 +692,7 @@ export async function buildApp() {
   app.delete('/api/v1/api-keys/:id', (req, res) => {
     try {
       const actor = getActorUser(req);
+      if (!actor) return res.status(401).json({ error: 'Authentication required' });
       const id = sanitizeText(req.params.id, 128);
       const reason = sanitizeText(req.body?.reason, 200);
       const key = db.revokeApiKey(id, actor, reason || undefined);
@@ -564,6 +706,7 @@ export async function buildApp() {
   app.patch('/api/v1/api-keys/:id/scopes', (req, res) => {
     try {
       const actor = getActorUser(req);
+      if (!actor) return res.status(401).json({ error: 'Authentication required' });
       const id = sanitizeText(req.params.id, 128);
       const { scopes } = req.body;
       if (!scopes || !Array.isArray(scopes) || scopes.length > 30 || !scopes.every(isValidScope)) {
@@ -580,6 +723,7 @@ export async function buildApp() {
   app.patch('/api/v1/api-keys/:id/rate-limit', (req, res) => {
     try {
       const actor = getActorUser(req);
+      if (!actor) return res.status(401).json({ error: 'Authentication required' });
       const id = sanitizeText(req.params.id, 128);
       const { rateLimitPerMin, burstLimit, rateLimitAlgorithm, actionOnExceed, monthlyQuota } = req.body;
       const rpm = Number(rateLimitPerMin);
@@ -717,6 +861,16 @@ export async function buildApp() {
     }
 
     const stats = db.systemStats;
+    // Count active keys LIVE — in PG mode the in-memory list is always empty.
+    let activeApiKeys = db.apiKeys.filter((k) => k.status === 'active').length;
+    if (databasePool && database === 'connected') {
+      try {
+        const keys = await databasePool.query("select count(*)::int as n from public.api_keys where status = 'active'");
+        activeApiKeys = keys.rows[0].n;
+      } catch {
+        // keep in-memory fallback value
+      }
+    }
     res.json({
       status: database === 'unreachable' ? 'degraded' : 'operational',
       database,
@@ -725,7 +879,7 @@ export async function buildApp() {
         apiRequestsToday: stats.apiRequestsToday,
         p95LatencyMs: stats.p95LatencyMs,
         errorRate: stats.errorRate,
-        activeApiKeys: stats.activeApiKeys,
+        activeApiKeys,
       },
       uptimeSeconds: Math.round(process.uptime()),
       serverTime: new Date().toISOString(),
@@ -874,10 +1028,31 @@ export async function buildApp() {
     res.send(csvContent);
   });
 
-  // Admin System Statistics
-  app.get('/api/v1/admin/statistics', (req, res) => {
+  // Admin System Statistics — account numbers are counted LIVE from the DB
+  // (never fabricated).
+  app.get('/api/v1/admin/statistics', async (req, res) => {
     if (!requireAdmin(req, res)) return;
-    res.json({ stats: db.systemStats, threats: db.securityThreats });
+    const stats: typeof db.systemStats = { ...db.systemStats };
+    if (databasePool) {
+      try {
+        const result = await databasePool.query(`select
+          (select count(*) from public.users) as total_users,
+          (select count(distinct user_id) from public.auth_sessions
+             where created_at > now() - interval '7 days') as active_users,
+          (select count(*) from public.api_keys where status = 'active') as active_keys`);
+        const row = result.rows[0];
+        stats.totalUsers = Number(row.total_users);
+        stats.activeUsers = Number(row.active_users);
+        stats.activeApiKeys = Number(row.active_keys);
+      } catch (err) {
+        console.error('[admin/statistics]', (err as Error).message);
+      }
+    } else {
+      stats.totalUsers = db.users.length;
+      stats.activeUsers = db.users.length;
+      stats.activeApiKeys = db.apiKeys.filter((k) => k.status === 'active').length;
+    }
+    res.json({ stats, threats: db.securityThreats });
   });
 
   // Admin Emergency Controls (explicit allowlist)
@@ -956,6 +1131,7 @@ export async function buildApp() {
 
   app.post('/api/v1/webhooks', (req, res) => {
     const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
     const name = sanitizeText(req.body?.name, 80);
     const rawUrl = req.body?.url;
     const events = req.body?.events;
@@ -1020,6 +1196,7 @@ export async function buildApp() {
 
   app.post('/api/v1/bot/execute', (req, res) => {
     const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
     const platform = sanitizeText(req.body?.platform, 32) || 'discord';
     const command = sanitizeText(req.body?.command, 200);
     const payload = req.body?.payload;
@@ -1118,6 +1295,7 @@ export async function buildApp() {
   // while an administrator retains control over the review and any proposed code repair.
   app.post('/api/v1/suggestions', async (req, res) => {
     const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Sign in to submit a suggestion' });
     const title = sanitizeText(req.body?.title, 140);
     const details = sanitizeText(req.body?.details, 5000);
     const category = sanitizeText(req.body?.category, 16) || 'feature';
@@ -1331,6 +1509,7 @@ export async function buildApp() {
   app.get('/api/v1/download/:type', (req, res) => {
     try {
       const actor = getActorUser(req);
+      if (!actor) return res.status(401).json({ error: 'Authentication required' });
       const source = detectSource(req);
       const type = sanitizeText(req.params.type, 16) as 'apk' | 'exe' | 'dmg' | 'appimage';
 

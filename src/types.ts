@@ -266,6 +266,17 @@ export interface ProductSuggestion {
   adminNote?: string;
 }
 
+/** A real comment under a documentation page, written by a registered user. */
+export interface DocComment {
+  id: string;
+  docId: string;
+  userId: string;
+  authorName: string;
+  authorAvatar: string;
+  body: string;
+  createdAt: string;
+}
+
 export interface CodeDiagnosisRequest {
   code: string;
   language: 'typescript' | 'javascript' | 'python' | 'curl' | 'json' | 'sql';

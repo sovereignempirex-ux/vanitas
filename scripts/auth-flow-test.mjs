@@ -90,19 +90,34 @@ check('me with register token → own user', r.json?.user?.id === userId, r.json
 r = await call('GET', '/auth/me', { token: loginToken });
 check('me with login token → own user', r.json?.user?.id === userId, r.json?.user);
 r = await call('GET', '/auth/me');
-check('me without token → fallback demo user', r.json?.user?.id !== userId, r.json?.user);
+check('me without token → 401 (never a fake persona)', r.status === 401, r);
 r = await call('GET', '/auth/me', { token: 'vnt_sess_totally_invalid_token' });
-check('me with forged token → fallback (not own user)', r.json?.user?.id !== userId, r.json?.user);
+check('me with forged token → 401', r.status === 401, r);
 
 console.log('— logout —');
 r = await call('POST', '/auth/logout', { token: regToken });
 check('logout → success', r.status === 200 && r.json?.success === true, r);
 r = await call('GET', '/auth/me', { token: regToken });
-check('revoked token no longer authenticates', r.json?.user?.id !== userId, r.json?.user);
+check('revoked token no longer authenticates → 401', r.status === 401, r);
 
 console.log('— session still valid —');
 r = await call('GET', '/auth/me', { token: loginToken });
 check('session still valid for login token', r.json?.user?.id === userId, r.json?.user);
+
+console.log('— profile (real server-side save) —');
+r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'Renamed Tester', avatarUrl: 'https://example.com/avatar.png' } });
+check('PATCH profile → 200 + updated user', r.status === 200 && r.json?.user?.name === 'Renamed Tester', r.json);
+r = await call('GET', '/auth/me', { token: loginToken });
+check('profile change persists server-side', r.json?.user?.name === 'Renamed Tester', r.json?.user);
+r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'X', avatarUrl: '' } });
+check('short display name → 400', r.status === 400, r);
+r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'Bad Avatar', avatarUrl: 'javascript:alert(1)' } });
+check('non-https avatar URL → 400', r.status === 400, r);
+const tinyPng = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'Upload Tester', avatarUrl: tinyPng } });
+check('uploaded image data-URL avatar → 200', r.status === 200 && String(r.json?.user?.avatarUrl || '').startsWith('data:image/png'), r.json?.user);
+r = await call('PATCH', '/auth/profile', { body: { name: 'Anonymous', avatarUrl: '' } });
+check('PATCH profile without token → 401', r.status === 401, r);
 
 console.log('— social login providers —');
 r = await call('GET', '/auth/providers');

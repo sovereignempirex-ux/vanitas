@@ -133,6 +133,15 @@ export const AuthPage: React.FC<AuthPageProps> = ({ mode }) => {
 
   return (
     <div className="min-h-screen vnt-app-bg text-slate-100 flex flex-col relative overflow-hidden">
+      {/* Real photographic backdrop (bundled in /public/images) */}
+      <img
+        src="/images/auth-bg.jpg"
+        alt=""
+        aria-hidden="true"
+        className="absolute inset-0 h-full w-full object-cover opacity-25 pointer-events-none"
+      />
+      <div className="absolute inset-0 bg-gradient-to-b from-slate-950/80 via-slate-950/90 to-slate-950/95 pointer-events-none" />
+
       {/* Background crystal glow */}
       <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
         <div className="w-[560px] h-[560px] bg-gradient-to-tr from-cyan-600/15 via-blue-600/15 to-purple-600/15 rounded-full blur-3xl animate-crystal-pulse" />

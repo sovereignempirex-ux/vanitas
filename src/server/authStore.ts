@@ -14,7 +14,7 @@ import type { User, UserRole } from '../types.ts';
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const RESOLVE_CACHE_TTL_MS = 60_000; // DB-mode lookup cache
-const DEFAULT_AVATAR = 'https://i.postimg.cc/SNN169kT/orders.png';
+const DEFAULT_AVATAR = '/images/avatar-default.svg';
 
 export type AuthOutcome = { ok: true; user: User } | { ok: false; status: number; error: string };
 
@@ -170,6 +170,26 @@ export async function createAccount(params: { email: string; password: string; n
   db.users.push(user);
   memoryPasswords.set(email, { userId: user.id, hash: passwordHash });
   return { ok: true, user };
+}
+
+// Persist real profile edits (display name + avatar) to the account record.
+export async function updateProfile(
+  userId: string,
+  updates: { name: string; avatarUrl: string },
+): Promise<User | null> {
+  if (databasePool) {
+    const result = await databasePool.query(
+      'update public.users set name = $2, avatar_url = $3 where id = $1 returning *',
+      [userId, updates.name, updates.avatarUrl],
+    );
+    return result.rows[0] ? rowToUser(result.rows[0]) : null;
+  }
+
+  const user = db.users.find((u) => u.id === userId);
+  if (!user) return null;
+  user.name = updates.name;
+  user.avatarUrl = updates.avatarUrl || DEFAULT_AVATAR;
+  return user;
 }
 
 export async function verifyAccount(email: string, password: string): Promise<AuthOutcome> {

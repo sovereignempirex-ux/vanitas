@@ -59,6 +59,37 @@ async function queryOllama(systemInstruction: string, prompt: string): Promise<s
   }
 }
 
+// ---------------------------------------------------------------------------
+// Free, keyless model: Pollinations.ai (OpenAI-compatible, no API key).
+// This is the DEFAULT provider on Vercel — a real LLM answer with zero setup.
+// ---------------------------------------------------------------------------
+async function queryPollinations(systemInstruction: string, prompt: string): Promise<string | null> {
+  try {
+    const response = await fetch('https://text.pollinations.ai/openai', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(25_000),
+      body: JSON.stringify({
+        model: 'openai',
+        messages: [
+          { role: 'system', content: systemInstruction },
+          { role: 'user', content: prompt },
+        ],
+      }),
+    });
+    if (!response.ok) {
+      console.warn(`Pollinations HTTP ${response.status}; using fallback.`);
+      return null;
+    }
+    const data = await response.json() as { choices?: { message?: { content?: string } }[] };
+    const text = data.choices?.[0]?.message?.content?.trim();
+    return text || null;
+  } catch (error) {
+    console.warn('Pollinations unavailable; using the local deterministic fallback.', error instanceof Error ? error.message : error);
+    return null;
+  }
+}
+
 export async function processAiQuery(options: GenerateAiOptions): Promise<{
   text: string;
   groundingSources?: { title: string; url: string }[];
@@ -186,6 +217,13 @@ export async function processAiQuery(options: GenerateAiOptions): Promise<{
     }
   }
 
+  // Free keyless model (Pollinations) — real answers whenever no paid
+  // provider is configured (or they all failed). Last resort: canned local.
+  const freeText = await queryPollinations(selectedInstruction, prompt);
+  if (freeText) {
+    return { text: freeText, videos: retrievedVideos, videoQuery: videoQueryStr };
+  }
+
   // Fallback intelligent responder with rich domain reasoning
   const fallback = generateFallbackResponse(persona, toneStyle, prompt, context);
   return {
@@ -289,10 +327,12 @@ function generateFallbackResponse(
 export async function diagnoseAndFixCode(req: CodeDiagnosisRequest): Promise<CodeDiagnosisResult> {
   const { code, language, context, analysisMode = 'full' } = req;
   const ai = getAiClient();
+  const hasCode = code.trim().length > 0;
+  let diagnosisPrompt = '';
 
-  if (ai && code.trim().length > 0) {
+  if (hasCode) {
     try {
-      const prompt = `You are the Vanitas Autonomous Code Analysis & Refactoring Engine powered by Gemini.
+      diagnosisPrompt = `You are the Vanitas Autonomous Code Analysis & Refactoring Engine powered by Gemini.
 You analyze developer code snippets for:
 1. Syntax errors, invalid grammar, missing brackets, broken imports, type violations, and compilation issues.
 2. Security vulnerabilities, exposed raw secrets, missing Bearer authentication, missing HMAC verification, and injection flaws.
@@ -342,11 +382,11 @@ Code to analyze:
 ${code}
 \`\`\``;
 
-      for (const modelName of CANDIDATE_MODELS) {
+      if (ai) for (const modelName of CANDIDATE_MODELS) {
         try {
           const response = await ai.models.generateContent({
             model: modelName,
-            contents: prompt,
+            contents: diagnosisPrompt,
             config: {
               responseMimeType: 'application/json',
               temperature: 0.15,
@@ -381,6 +421,38 @@ ${code}
       }
     } catch (err) {
       console.warn('AI Code Diagnosis fallback triggered:', err);
+    }
+  }
+
+  // Free keyless model (Pollinations): real LLM diagnosis, zero setup.
+  if (diagnosisPrompt) {
+    try {
+      const freeText = await queryPollinations(
+        'You are a strict code-analysis engine. Respond ONLY with the valid JSON object requested — no markdown fences, no prose.',
+        diagnosisPrompt,
+      );
+      if (freeText) {
+        const parsed = JSON.parse(freeText.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, ''));
+        const issues = Array.isArray(parsed.issues) ? parsed.issues : [];
+        const syntaxErrorsCount = parsed.syntaxErrorsCount ?? issues.filter((i: any) => i.category === 'syntax' || i.severity === 'error').length;
+        const securityFlawsCount = parsed.securityFlawsCount ?? issues.filter((i: any) => i.category === 'security' || i.severity === 'security').length;
+        const refactoringCount = parsed.refactoringCount ?? issues.filter((i: any) => i.category === 'refactor' || i.category === 'performance').length;
+        return {
+          hasErrors: parsed.hasErrors ?? (syntaxErrorsCount > 0 || securityFlawsCount > 0),
+          score: Math.min(100, Math.max(0, parsed.score ?? 85)),
+          maintainabilityIndex: Math.min(100, Math.max(0, parsed.maintainabilityIndex ?? 88)),
+          syntaxErrorsCount,
+          securityFlawsCount,
+          refactoringCount,
+          issues,
+          fixedCode: parsed.fixedCode || code,
+          explanation: parsed.explanation || 'Analyzed code structure and applied production refactorings.',
+          refactoringHighlights: Array.isArray(parsed.refactoringHighlights) ? parsed.refactoringHighlights : [],
+          securityChecks: Array.isArray(parsed.securityChecks) ? parsed.securityChecks : [],
+        };
+      }
+    } catch (err) {
+      console.warn('Pollinations diagnosis unavailable; using local analyzer.', (err as Error).message);
     }
   }
 

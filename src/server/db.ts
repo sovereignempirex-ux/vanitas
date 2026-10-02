@@ -69,302 +69,27 @@ export function attachSecretHash(key: ApiKey, hash: string): void {
 }
 
 export class VanitasDatabase {
-  productSuggestions: ProductSuggestion[] = [
-    {
-      id: 'sug_welcome_001',
-      title: 'Improve empty-state guidance',
-      details: 'Show a clearer first action for new developers.',
-      category: 'ux',
-      status: 'open',
-      createdAt: new Date().toISOString(),
-      authorName: 'Vanitas Team',
-    },
-  ];
+  // DELIBERATELY EMPTY: no seeded/fake suggestions or comments — ever.
+  productSuggestions: ProductSuggestion[] = [];
 
-  users: User[] = [
-    {
-      id: 'usr_owner_001',
-      email: 'sovereign.empirex@gmail.com',
-      name: 'Vanitas Prime',
-      username: 'vanitas_sovereign',
-      avatarUrl: 'https://i.postimg.cc/SNN169kT/orders.png',
-      bio: 'Master Architect of the Vanitas Unified Ecosystem & Celestial API Gateway.',
-      role: 'ADMIN',
-      twoFactorEnabled: true,
-      createdAt: '2026-01-15T08:00:00.000Z',
-      lastLoginAt: new Date().toISOString(),
-      connectedAccounts: {
-        google: true,
-        github: true,
-        discord: true,
-      },
-    },
-    {
-      id: 'usr_dev_002',
-      email: 'noé.archiviste@altus.org',
-      name: 'Noé Archiviste',
-      username: 'noe_vampire',
-      avatarUrl: 'https://images.unsplash.com/photo-1534447677768-be436bb09401?q=80&w=400&auto=format&fit=crop',
-      bio: 'Vampire liaison & API integration engineer.',
-      role: 'USER',
-      twoFactorEnabled: false,
-      createdAt: '2026-02-10T14:30:00.000Z',
-      lastLoginAt: '2026-08-24T19:20:00.000Z',
-      connectedAccounts: {
-        google: true,
-        github: false,
-        discord: true,
-      },
-    },
-    {
-      id: 'usr_bot_003',
-      email: 'bot.gateway@vanitas.internal',
-      name: 'Vanitas Autonomous Bot',
-      username: 'vanitas_bot_svc',
-      avatarUrl: 'https://i.postimg.cc/pXXcfjRk/Test.png',
-      bio: 'System Service Account for Discord & WhatsApp automated dispatch.',
-      role: 'USER',
-      twoFactorEnabled: true,
-      createdAt: '2026-03-01T00:00:00.000Z',
-      lastLoginAt: new Date().toISOString(),
-      connectedAccounts: {
-        google: false,
-        github: true,
-        discord: true,
-      },
-    },
-  ];
+  // DELIBERATELY EMPTY: real accounts only. The first registration bootstraps
+  // as ADMIN (pickInitialRole) — no demo personas exist anywhere.
+  users: User[] = [];
 
-  apiKeys: ApiKey[] = [
-    {
-      id: 'key_live_celestial_01',
-      name: 'Central Production Gateway',
-      keyPrefix: 'sk_live_celest',
-      maskedSecret: 'sk_live_••••••••••••8819',
-      ownerId: 'usr_owner_001',
-      ownerName: 'Vanitas Prime',
-      scopes: ['api.read', 'api.write', 'users.read', 'logs.read', 'bot.execute', 'system.read'],
-      status: 'active',
-      rateLimitPerMin: 1200,
-      burstLimit: 60,
-      rateLimitAlgorithm: 'sliding_window',
-      actionOnExceed: 'reject_429',
-      monthlyQuota: 500000,
-      currentUsageThisMonth: 124800,
-      currentRpmUsage: 480,
-      usageCount: 8420,
-      createdAt: '2026-04-10T12:00:00.000Z',
-      lastUsedAt: new Date().toISOString(),
-      expiresAt: null,
-      environment: 'live',
-    },
-    {
-      id: 'key_bot_discord_02',
-      name: 'Discord & WhatsApp Dispatcher',
-      keyPrefix: 'sk_live_discord',
-      maskedSecret: 'sk_live_••••••••••••4402',
-      ownerId: 'usr_bot_003',
-      ownerName: 'Vanitas Autonomous Bot',
-      scopes: ['api.read', 'bot.execute', 'analytics.read'],
-      status: 'active',
-      rateLimitPerMin: 600,
-      burstLimit: 30,
-      rateLimitAlgorithm: 'token_bucket',
-      actionOnExceed: 'throttle_delay',
-      monthlyQuota: 200000,
-      currentUsageThisMonth: 89400,
-      currentRpmUsage: 310,
-      usageCount: 14205,
-      createdAt: '2026-05-18T10:15:00.000Z',
-      lastUsedAt: new Date(Date.now() - 1000 * 60 * 3).toISOString(),
-      expiresAt: null,
-      environment: 'live',
-    },
-    {
-      id: 'key_test_sandbox_03',
-      name: 'Mobile SDK Sandbox Key',
-      keyPrefix: 'sk_test_mobile',
-      maskedSecret: 'sk_test_••••••••••••9100',
-      ownerId: 'usr_dev_002',
-      ownerName: 'Noé Archiviste',
-      scopes: ['api.read', 'users.read', 'analytics.read'],
-      status: 'active',
-      rateLimitPerMin: 200,
-      burstLimit: 15,
-      rateLimitAlgorithm: 'fixed_window',
-      actionOnExceed: 'alert_only',
-      monthlyQuota: 50000,
-      currentUsageThisMonth: 8200,
-      currentRpmUsage: 42,
-      usageCount: 1240,
-      createdAt: '2026-07-02T16:45:00.000Z',
-      lastUsedAt: new Date(Date.now() - 1000 * 60 * 60 * 2).toISOString(),
-      expiresAt: '2026-12-31T23:59:59.000Z',
-      environment: 'test',
-    },
-  ];
+  // DELIBERATELY EMPTY: keys are created by real accounts only.
+  apiKeys: ApiKey[] = [];
 
-  auditLogs: AuditLog[] = [
-    {
-      id: 'log_99182',
-      timestamp: new Date(Date.now() - 1000 * 60 * 2).toISOString(),
-      actorId: 'usr_owner_001',
-      actorName: 'Vanitas Prime',
-      actorEmail: 'sovereign.empirex@gmail.com',
-      action: 'API_KEY_ROTATED',
-      category: 'KEYS',
-      target: 'key_live_celestial_01 (Central Production Gateway)',
-      source: 'WEB',
-      status: 'SUCCESS',
-      requestId: 'req_rot_88921a',
-      ipAddress: '194.230.14.88',
-      metadata: { reason: 'Scheduled security rotation cycle', previousPrefix: 'sk_live_oldc' },
-    },
-    {
-      id: 'log_99181',
-      timestamp: new Date(Date.now() - 1000 * 60 * 18).toISOString(),
-      actorId: 'usr_bot_003',
-      actorName: 'Vanitas Autonomous Bot',
-      actorEmail: 'bot.gateway@vanitas.internal',
-      action: 'BOT_COMMAND_EXECUTED',
-      category: 'BOT',
-      target: 'discord_guild_44901 (#system-status)',
-      source: 'BOT',
-      status: 'SUCCESS',
-      requestId: 'req_bot_77192b',
-      ipAddress: '10.0.4.12',
-      metadata: { command: '/vanitas status --all', latencyMs: 14 },
-    },
-    {
-      id: 'log_99180',
-      timestamp: new Date(Date.now() - 1000 * 60 * 45).toISOString(),
-      actorId: 'usr_owner_001',
-      actorName: 'Vanitas Prime',
-      actorEmail: 'sovereign.empirex@gmail.com',
-      action: 'USER_ROLE_PROMOTED',
-      category: 'ADMIN',
-      target: 'usr_owner_001 -> ADMIN (Bootstrap verification)',
-      source: 'WEB',
-      status: 'SUCCESS',
-      requestId: 'req_adm_11029c',
-      ipAddress: '194.230.14.88',
-      metadata: { priorRole: 'USER', newRole: 'ADMIN', systemTrigger: 'Console Confirmation' },
-    },
-    {
-      id: 'log_99179',
-      timestamp: new Date(Date.now() - 1000 * 60 * 120).toISOString(),
-      actorId: 'anonymous_attacker',
-      actorName: 'Unauthenticated Request',
-      actorEmail: 'unknown',
-      action: 'RATE_LIMIT_EXCEEDED',
-      category: 'SECURITY',
-      target: '/api/v1/admin/users',
-      source: 'OTHER',
-      status: 'WARNING',
-      requestId: 'req_sec_44910d',
-      ipAddress: '45.155.205.233',
-      metadata: { attemptedRequests: 42, allowedThreshold: 10, actionTaken: 'IP Throttled for 15m' },
-    },
-    {
-      id: 'log_99178',
-      timestamp: new Date(Date.now() - 1000 * 60 * 360).toISOString(),
-      actorId: 'usr_dev_002',
-      actorName: 'Noé Archiviste',
-      actorEmail: 'noé.archiviste@altus.org',
-      action: 'SESSION_REVOKED',
-      category: 'AUTH',
-      target: 'Session device: Safari on macOS (178.62.204.1)',
-      source: 'WEB',
-      status: 'SUCCESS',
-      requestId: 'req_ses_00291e',
-      ipAddress: '82.165.197.1',
-      metadata: { deviceId: 'dev_old_mac_safari' },
-    },
-  ];
+  // DELIBERATELY EMPTY: only real audit events are recorded at runtime.
+  auditLogs: AuditLog[] = [];
 
-  sessions: SessionDevice[] = [
-    {
-      id: 'dev_curr_browser',
-      browser: 'Chrome 133.0',
-      os: 'macOS Sequoia 15.2',
-      device: 'Desktop / Workstation',
-      ip: '194.230.14.88',
-      source: 'WEB',
-      isCurrent: true,
-      createdAt: '2026-08-25T11:00:00.000Z',
-      lastActiveAt: new Date().toISOString(),
-    },
-    {
-      id: 'dev_mobile_iphone',
-      browser: 'Vanitas Native Client v1.4',
-      os: 'iOS 19.1',
-      device: 'Apple iPhone 16 Pro',
-      ip: '82.165.197.10',
-      source: 'MOBILE',
-      isCurrent: false,
-      createdAt: '2026-08-23T09:30:00.000Z',
-      lastActiveAt: new Date(Date.now() - 1000 * 60 * 120).toISOString(),
-    },
-    {
-      id: 'dev_discord_bot_runner',
-      browser: 'Node.js / Axios v1.7',
-      os: 'Linux Ubuntu 24.04 LTS',
-      device: 'Cloud Run Worker Cluster',
-      ip: '10.0.4.12',
-      source: 'BOT',
-      isCurrent: false,
-      createdAt: '2026-08-01T00:00:00.000Z',
-      lastActiveAt: new Date().toISOString(),
-    },
-  ];
+  // DELIBERATELY EMPTY: no fake devices — real sessions live in auth_sessions.
+  sessions: SessionDevice[] = [];
 
-  webhooks: WebhookEndpoint[] = [
-    {
-      id: 'wh_prod_alerts',
-      name: 'Security & Key Alert Dispatcher',
-      url: 'https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX',
-      events: ['api_key.rotated', 'api_key.revoked', 'security.alert', 'role.changed'],
-      secret: 'whsec_99a8b7c6d5e4f3a2b1c0',
-      status: 'active',
-      createdAt: '2026-04-01T10:00:00.000Z',
-      lastTriggeredAt: new Date(Date.now() - 1000 * 60 * 2).toISOString(),
-      failureCount: 0,
-    },
-    {
-      id: 'wh_crm_sync',
-      name: 'User Lifecycle Sync Service',
-      url: 'https://api.internal-sync.org/vanitas/events',
-      events: ['user.created', 'user.updated'],
-      secret: 'whsec_11223344556677889900',
-      status: 'active',
-      createdAt: '2026-05-10T15:30:00.000Z',
-      lastTriggeredAt: new Date(Date.now() - 1000 * 60 * 60 * 5).toISOString(),
-      failureCount: 0,
-    },
-  ];
+  // DELIBERATELY EMPTY: only real webhook endpoints configured by users.
+  webhooks: WebhookEndpoint[] = [];
 
-  webhookLogs: WebhookDeliveryLog[] = [
-    {
-      id: 'wh_log_01',
-      webhookId: 'wh_prod_alerts',
-      event: 'api_key.rotated',
-      status: 'delivered',
-      statusCode: 200,
-      latencyMs: 142,
-      timestamp: new Date(Date.now() - 1000 * 60 * 2).toISOString(),
-      payload: { event: 'api_key.rotated', keyId: 'key_live_celestial_01', actor: 'Vanitas Prime' },
-    },
-    {
-      id: 'wh_log_02',
-      webhookId: 'wh_crm_sync',
-      event: 'user.created',
-      status: 'delivered',
-      statusCode: 200,
-      latencyMs: 210,
-      timestamp: new Date(Date.now() - 1000 * 60 * 60 * 5).toISOString(),
-      payload: { event: 'user.created', userId: 'usr_dev_002', email: 'noé.archiviste@altus.org' },
-    },
-  ];
+  // DELIBERATELY EMPTY: only real delivery logs at runtime.
+  webhookLogs: WebhookDeliveryLog[] = [];
 
   bots: BotIntegration[] = [
     {
@@ -436,38 +161,21 @@ export class VanitasDatabase {
     },
   ];
 
-  securityThreats: SecurityThreat[] = [
-    {
-      id: 'thr_001',
-      level: 'HIGH',
-      title: 'Excessive Failed Authentication Attempts',
-      description: '27 repeated invalid token handshakes detected within 3 minutes from single IP range.',
-      source: 'OTHER',
-      ip: '45.155.205.233',
-      timestamp: new Date(Date.now() - 1000 * 60 * 35).toISOString(),
-      resolved: false,
-    },
-    {
-      id: 'thr_002',
-      level: 'MEDIUM',
-      title: 'New Geographical Ingress Detected',
-      description: 'Account access requested from new autonomous system in Frankfurt data center.',
-      source: 'APPLICATION',
-      ip: '194.230.14.88',
-      timestamp: new Date(Date.now() - 1000 * 60 * 120).toISOString(),
-      resolved: true,
-    },
-  ];
+  // DELIBERATELY EMPTY: threats are detected/reported at runtime, never faked.
+  securityThreats: SecurityThreat[] = [];
 
   systemStats: SystemStats = {
-    totalUsers: 1420,
-    activeUsers: 388,
-    apiRequestsToday: 8420,
-    apiRequestsThisMonth: 194300,
+    // Counters start at ZERO and are counted for real at runtime
+    // (incrementRequestCount + live DB counts in /admin/statistics).
+    // No fabricated telemetry.
+    totalUsers: 0,
+    activeUsers: 0,
+    apiRequestsToday: 0,
+    apiRequestsThisMonth: 0,
     apiQuotaLimit: 250000,
-    p95LatencyMs: 24,
-    errorRate: 0.04,
-    activeApiKeys: 18,
+    p95LatencyMs: 0,
+    errorRate: 0,
+    activeApiKeys: 0,
     services: {
       api: 'operational',
       auth: 'operational',
@@ -476,22 +184,8 @@ export class VanitasDatabase {
       bot: 'operational',
       webhooks: 'operational',
     },
-    requestBreakdown: [
-      { endpoint: '/api/v1/auth/me', count: 3200, avgLatencyMs: 12, errorCount: 1 },
-      { endpoint: '/api/v1/bot/execute', count: 2840, avgLatencyMs: 18, errorCount: 0 },
-      { endpoint: '/api/v1/api-keys', count: 1100, avgLatencyMs: 22, errorCount: 2 },
-      { endpoint: '/api/v1/ai/chat', count: 780, avgLatencyMs: 340, errorCount: 0 },
-      { endpoint: '/api/v1/admin/logs', count: 500, avgLatencyMs: 35, errorCount: 0 },
-    ],
-    hourlyTraffic: [
-      { hour: '00:00', requests: 210, errors: 0 },
-      { hour: '04:00', requests: 140, errors: 0 },
-      { hour: '08:00', requests: 620, errors: 1 },
-      { hour: '12:00', requests: 1450, errors: 2 },
-      { hour: '16:00', requests: 2100, errors: 3 },
-      { hour: '20:00', requests: 1800, errors: 1 },
-      { hour: 'Now', requests: 2100, errors: 0 },
-    ],
+    requestBreakdown: [],
+    hourlyTraffic: [],
   };
 
   // --- Methods ---
@@ -1056,11 +750,17 @@ export class VanitasDatabase {
 
   incrementRequestCount(endpoint: string, status: number, latencyMs: number) {
     this.systemStats.apiRequestsToday += 1;
-    const ep = this.systemStats.requestBreakdown.find((b) => b.endpoint === endpoint);
-    if (ep) {
-      ep.count += 1;
-      if (status >= 400) ep.errorCount += 1;
+    this.systemStats.apiRequestsThisMonth += 1;
+    let ep = this.systemStats.requestBreakdown.find((b) => b.endpoint === endpoint);
+    if (!ep) {
+      // Real traffic builds this list over time (bounded to keep it readable).
+      if (this.systemStats.requestBreakdown.length >= 12) return;
+      ep = { endpoint, count: 0, avgLatencyMs: latencyMs, errorCount: 0 };
+      this.systemStats.requestBreakdown.push(ep);
     }
+    ep.count += 1;
+    if (status >= 400) ep.errorCount += 1;
+    ep.avgLatencyMs = Math.round(ep.avgLatencyMs * 0.85 + latencyMs * 0.15);
   }
 
   getKeyUsageAnalytics(period: '24h' | '7d' | '30d' = '24h'): ApiKeyUsageResponse {

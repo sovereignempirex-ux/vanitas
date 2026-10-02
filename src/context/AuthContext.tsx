@@ -1,61 +1,13 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { User, UserRole, ClientSource, PermissionScope, WeeklyAgentQuota } from '../types.ts';
 import { api } from '../lib/apiClient.ts';
-import { BRAND_ASSETS } from '../data/assets.ts';
 
 const ONE_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
-export interface DemoAccount {
-  id: string;
-  name: string;
-  email: string;
-  role: UserRole;
-  avatarUrl: string;
-  badge: string;
-  description: string;
-}
-
-export const DEMO_ACCOUNTS: DemoAccount[] = [
-  {
-    id: 'user_sovereign_admin',
-    name: 'Sovereign Administrator',
-    email: 'admin@vanitas-cloud.net',
-    role: 'ADMIN',
-    avatarUrl: 'https://images.unsplash.com/photo-1534447677768-be436bb09401?q=80&w=800&auto=format&fit=crop',
-    badge: 'Root Sovereign',
-    description: 'Full administrative access across all API clusters, keys, rate limits, and audit logs.',
-  },
-  {
-    id: 'user_lead_architect',
-    name: 'Caelum Vance',
-    email: 'caelum.vance@vanitas.dev',
-    role: 'ADMIN',
-    avatarUrl: 'https://images.unsplash.com/photo-1509198397868-475647b2a1e5?q=80&w=800&auto=format&fit=crop',
-    badge: 'Lead Architect',
-    description: 'Platform engineer with system management, security inspection, and key creation privileges.',
-  },
-  {
-    id: 'user_security_auditor',
-    name: 'Seraphina Lynn',
-    email: 'seraphina.sec@vanitas.org',
-    role: 'USER',
-    avatarUrl: 'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?q=80&w=800&auto=format&fit=crop',
-    badge: 'Security Auditor',
-    description: 'Read-only security inspector monitoring API usage anomalies and webhook delivery logs.',
-  },
-  {
-    id: 'user_guest_developer',
-    name: 'Guest Developer',
-    email: 'guest.dev@external.io',
-    role: 'USER',
-    avatarUrl: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?q=80&w=800&auto=format&fit=crop',
-    badge: 'Guest Developer',
-    description: 'Standard sandbox developer exploring the Vanitas API playground and client downloads.',
-  },
-];
-
 interface AuthContextType {
   user: User | null;
+  /** True while the first server-side /auth/me verification is still running. */
+  authLoading: boolean;
   role: UserRole;
   permissions: PermissionScope[];
   activeView: string;
@@ -69,18 +21,16 @@ interface AuthContextType {
     mode: 'login' | 'register',
     name?: string,
   ) => Promise<{ success: boolean; error?: string }>;
-  /** Offline/demo-only session (ingress key tab) — never hits the server. */
-  loginLocalSynthetic: (email: string, name?: string) => { success: boolean };
   /** Adopt the session token delivered by the OAuth callback (#vnt_oauth=…). */
   completeOAuthLogin: (token: string) => Promise<void>;
-  loginAsDemoAccount: (account: DemoAccount) => void;
   logout: () => void;
   clientSource: ClientSource;
   setClientSource: (source: ClientSource) => void;
   isAuthModalOpen: boolean;
   setIsAuthModalOpen: (open: boolean) => void;
   refreshUser: () => Promise<void>;
-  updateUserProfile: (updates: Partial<User>) => void;
+  /** Persist profile edits (name + avatar) to the real account server-side. */
+  updateUserProfile: (updates: { name: string; avatarUrl: string }) => Promise<{ success: boolean; error?: string }>;
   // Weekly Agent Quota System (1 run / week per account)
   weeklyAgentQuota: WeeklyAgentQuota;
   executeAgentRun: (agentType?: string) => { success: boolean; message: string };
@@ -109,6 +59,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [activeView, setActiveView] = useState<string>('welcome');
   const [clientSource, setClientSourceState] = useState<ClientSource>('WEB');
   const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
+  // Gate the dashboard until the server confirms (or rejects) the session.
+  const [authLoading, setAuthLoading] = useState<boolean>(true);
 
   // Weekly Agent Quota state
   const [agentQuotaState, setAgentQuotaState] = useState<{
@@ -207,15 +159,30 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (data.user) {
         setUser(data.user);
         setRoleState(data.user.role);
+        setPermissions(data.permissions || []);
         try {
           localStorage.setItem('vanitas_active_user', JSON.stringify(data.user));
         } catch {
           // ignore
         }
       }
-      setPermissions(data.permissions);
-    } catch (err) {
-      console.warn('Failed fetching me:', err);
+    } catch (err: any) {
+      if (err?.status === 401) {
+        // No valid session → signed out. Clear any cached persona.
+        setUser(null);
+        setRoleState('USER');
+        setPermissions([]);
+        api.setAuthToken(null);
+        try {
+          localStorage.removeItem('vanitas_active_user');
+        } catch {
+          // ignore
+        }
+      } else {
+        console.warn('Failed fetching me:', err);
+      }
+    } finally {
+      setAuthLoading(false);
     }
   };
 
@@ -249,17 +216,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const loginOAuth = async (provider: string) => {
-    const res = await api.oauthLogin(provider);
-    if (res.user) {
-      // Server decides role. Never self-promote here.
-      const serverRole = res.user.role === 'ADMIN' ? 'ADMIN' : 'USER';
-      const safeUser = { ...res.user, role: serverRole as UserRole };
-      setUser(safeUser);
-      setRoleState(serverRole);
-      api.setAuthToken(res.token);
-      localStorage.setItem('vanitas_active_user', JSON.stringify(safeUser));
-    }
-    setIsAuthModalOpen(false);
+    // REAL social login: same redirect flow as the /login page — the provider
+    // callback returns with a session token (#vnt_oauth=…) we then adopt.
+    window.location.href = `/api/v1/social/${provider}`;
   };
 
   /** Complete a real social login: the OAuth callback redirected to the SPA
@@ -267,32 +226,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const completeOAuthLogin = async (token: string) => {
     api.setAuthToken(token);
     await refreshUser();
-  };
-
-  const loginLocalSynthetic = (email: string, name?: string) => {
-    const cleanEmail = email.trim().toLowerCase().slice(0, 120);
-    const generatedUser: User = {
-      id: `usr_${Date.now().toString(36)}`,
-      email: cleanEmail,
-      name: (name || cleanEmail.split('@')[0] || 'Developer').slice(0, 80),
-      username: (cleanEmail.split('@')[0] || 'dev').toLowerCase().replace(/[^a-z0-9_]/g, '_').slice(0, 40),
-      avatarUrl: 'https://images.unsplash.com/photo-1534447677768-be436bb09041?q=80&w=800&auto=format&fit=crop',
-      // SECURITY: local sessions can never grant ADMIN.
-      role: 'USER',
-      twoFactorEnabled: false,
-      createdAt: new Date().toISOString(),
-      lastLoginAt: new Date().toISOString(),
-      connectedAccounts: {
-        google: cleanEmail.includes('gmail'),
-        github: false,
-        discord: false,
-      },
-    };
-    setUser(generatedUser);
-    setRoleState('USER');
-    localStorage.setItem('vanitas_active_user', JSON.stringify(generatedUser));
-    setIsAuthModalOpen(false);
-    return { success: true };
   };
 
   const loginWithEmail = async (email: string, password: string, mode: 'login' | 'register', name?: string) => {
@@ -325,33 +258,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (err?.status) {
         return { success: false, error: err.message || 'Authentication failed' };
       }
-      // Network/server unreachable → keep the offline demo session working.
-      console.warn('[auth] server unreachable, using local session fallback:', err);
-      return loginLocalSynthetic(cleanEmail, name);
+      // Network/server unreachable → real accounts only: report it, never
+      // fabricate a local session.
+      console.warn('[auth] server unreachable:', err);
+      return { success: false, error: 'Cannot reach the server. Check your connection and try again.' };
     }
-  };
-
-  const loginAsDemoAccount = (demo: DemoAccount) => {
-    const demoUser: User = {
-      id: demo.id,
-      email: demo.email,
-      name: demo.name,
-      username: demo.email.split('@')[0],
-      avatarUrl: demo.avatarUrl,
-      role: demo.role,
-      twoFactorEnabled: demo.role === 'ADMIN',
-      createdAt: '2026-01-01T00:00:00Z',
-      lastLoginAt: new Date().toISOString(),
-      connectedAccounts: {
-        google: true,
-        github: true,
-        discord: true,
-      },
-    };
-    setUser(demoUser);
-    setRoleState(demo.role);
-    localStorage.setItem('vanitas_active_user', JSON.stringify(demoUser));
-    setIsAuthModalOpen(false);
   };
 
   const logout = () => {
@@ -362,11 +273,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     localStorage.removeItem('vanitas_active_user');
   };
 
-  const updateUserProfile = (updates: Partial<User>) => {
-    if (user) {
-      const updated = { ...user, ...updates };
-      setUser(updated);
-      localStorage.setItem('vanitas_active_user', JSON.stringify(updated));
+  const updateUserProfile = async (updates: { name: string; avatarUrl: string }) => {
+    // Real accounts: edits are validated and persisted by the server.
+    try {
+      const data = await api.updateProfile(updates);
+      setUser(data.user);
+      setRoleState(data.user.role);
+      setPermissions(data.permissions || []);
+      try {
+        localStorage.setItem('vanitas_active_user', JSON.stringify(data.user));
+      } catch {
+        // ignore
+      }
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Profile update failed' };
     }
   };
 
@@ -412,6 +333,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     <AuthContext.Provider
       value={{
         user,
+        authLoading,
         role,
         permissions,
         activeView,
@@ -421,8 +343,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         loginOAuth,
         completeOAuthLogin,
         loginWithEmail,
-        loginLocalSynthetic,
-        loginAsDemoAccount,
         logout,
         clientSource,
         setClientSource,

@@ -109,6 +109,23 @@ create index if not exists product_suggestions_status_created_at_idx
   on public.product_suggestions (status, created_at desc);
 
 -- ---------------------------------------------------------------------------
+-- Doc comments — REAL comments written by registered users under docs pages.
+-- The table starts EMPTY by design: no seeded / fake comments, ever.
+-- ---------------------------------------------------------------------------
+create table if not exists public.comments (
+  id text primary key,
+  doc_id text not null check (char_length(doc_id) between 1 and 64),
+  user_id text not null check (char_length(user_id) between 1 and 64),
+  author_name text not null check (char_length(author_name) between 1 and 80),
+  author_avatar text not null default '',
+  body text not null check (char_length(body) between 1 and 2000),
+  created_at timestamptz not null default now()
+);
+create index if not exists comments_doc_created_idx on public.comments (doc_id, created_at desc);
+create index if not exists comments_user_idx on public.comments (user_id);
+alter table public.comments enable row level security;
+
+-- ---------------------------------------------------------------------------
 -- Users (real accounts). Passwords are scrypt hashes — NEVER plaintext.
 -- Accessed only through the server (service role / DATABASE_URL).
 -- ---------------------------------------------------------------------------

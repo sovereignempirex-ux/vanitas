@@ -142,6 +142,15 @@ export const OverviewView: React.FC = () => {
     <div className="space-y-8 vnt-fade-up">
       {/* Hero Glass Banner */}
       <div className="vnt-surface relative overflow-hidden rounded-3xl p-6 sm:p-10 shadow-[0_24px_64px_-32px_rgba(59,130,246,0.45)]">
+        {/* Real workspace photograph (bundled in /public/images) */}
+        <img
+          src="/images/overview-hero.jpg"
+          alt=""
+          aria-hidden="true"
+          className="absolute inset-0 h-full w-full object-cover opacity-25 pointer-events-none"
+        />
+        <div className="absolute inset-0 bg-gradient-to-r from-slate-950/90 via-slate-950/75 to-slate-950/40 pointer-events-none" />
+
         {/* Glow Effects */}
         <div className="absolute top-0 right-0 -mr-20 -mt-20 h-80 w-80 rounded-full bg-blue-500/15 blur-3xl pointer-events-none" />
         <div className="absolute bottom-0 left-1/3 -mb-20 h-60 w-60 rounded-full bg-cyan-500/15 blur-3xl pointer-events-none" />
@@ -208,7 +217,7 @@ export const OverviewView: React.FC = () => {
             <div className="rounded-2xl border border-white/10 bg-black/40 p-4 backdrop-blur-xl">
               <p className="text-[11px] font-mono text-slate-400">Requests Today</p>
               <p className="text-2xl font-bold font-mono text-white mt-1">
-                {stats?.apiRequestsToday?.toLocaleString() || '8,420'}
+                {stats?.apiRequestsToday?.toLocaleString() ?? '0'}
               </p>
               <div className="flex items-center gap-1 mt-1 text-[10px] text-emerald-400">
                 <ArrowUpRight className="h-3 w-3" />

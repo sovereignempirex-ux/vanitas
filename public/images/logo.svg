@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="gem" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7dd3fc"/>
+      <stop offset="0.5" stop-color="#2563eb"/>
+      <stop offset="1" stop-color="#1e3a8a"/>
+    </linearGradient>
+    <linearGradient id="facet" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e0f2fe"/>
+      <stop offset="1" stop-color="#38bdf8"/>
+    </linearGradient>
+  </defs>
+  <path d="M32 3 59 18.5v27L32 61 5 45.5v-27z" fill="url(#gem)" stroke="#38bdf8" stroke-width="2" stroke-linejoin="round"/>
+  <path d="M32 13 47 21.5v17L32 47l-15-8.5v-17z" fill="url(#facet)" opacity="0.22"/>
+  <path d="M32 13 47 21.5 32 30 17 21.5z" fill="#e0f2fe" opacity="0.55"/>
+  <path d="M32 30v17M17 21.5 32 30l15-8.5" fill="none" stroke="#e0f2fe" stroke-width="1.6" opacity="0.65" stroke-linecap="round"/>
+</svg>

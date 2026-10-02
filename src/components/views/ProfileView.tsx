@@ -13,19 +13,67 @@ import {
 
 export const ProfileView: React.FC = () => {
   const { user, role, updateUserProfile } = useAuth();
-  const [name, setName] = useState(user?.name || 'Sovereign Administrator');
+  const [name, setName] = useState(user?.name || '');
   const [selectedAvatar, setSelectedAvatar] = useState(user?.avatarUrl || CHARACTER_AVATARS[0].url);
   const [customAvatarUrl, setCustomAvatarUrl] = useState('');
   const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
-  const handleSave = (e: React.FormEvent) => {
+  // REAL avatar upload: the image is cropped + resized in the browser and
+  // stored with the account on the server (no external links required).
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      setSaveError('Please choose an image file (PNG, JPEG, WebP…).');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const size = 256;
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        const min = Math.min(img.width, img.height);
+        ctx.drawImage(img, (img.width - min) / 2, (img.height - min) / 2, min, min, 0, 0, size, size);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+        if (dataUrl.length > 300_000) {
+          setSaveError('That image is still too large after resizing.');
+          return;
+        }
+        setSelectedAvatar(dataUrl);
+        setCustomAvatarUrl('');
+        setSaveError(null);
+      };
+      img.onerror = () => setSaveError('Could not read that image file.');
+      img.src = String(reader.result);
+    };
+    reader.onerror = () => setSaveError('Could not read that image file.');
+    reader.readAsDataURL(file);
+  };
+
+  const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    updateUserProfile({
+    setSaving(true);
+    setSaveError(null);
+    // Persisted server-side on the real account record (PostgreSQL).
+    const result = await updateUserProfile({
       name,
       avatarUrl: customAvatarUrl.trim() || selectedAvatar,
     });
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2500);
+    setSaving(false);
+    if (result.success) {
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    } else {
+      setSaveError(result.error || 'Failed to save profile.');
+    }
   };
 
   return (
@@ -54,7 +102,7 @@ export const ProfileView: React.FC = () => {
             </div>
 
             <h2 className="mt-4 text-base font-bold text-white">{name}</h2>
-            <p className="font-mono text-xs text-slate-400">{user?.email || 'sovereign.empirex@gmail.com'}</p>
+            <p className="font-mono text-xs text-slate-400">{user?.email}</p>
 
             <div className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-blue-500/10 border border-blue-500/30 px-3 py-1 text-xs font-mono font-bold text-blue-300">
               <Shield className="h-3.5 w-3.5" />
@@ -84,12 +132,28 @@ export const ProfileView: React.FC = () => {
                 />
               </div>
 
+              <div>
+                <label className="block text-xs font-medium text-slate-300">Upload Real Photo</label>
+                <label className="mt-1 flex cursor-pointer items-center justify-center gap-2 rounded-xl border border-dashed border-blue-500/40 bg-blue-500/5 py-2.5 text-xs text-blue-300 hover:bg-blue-500/10 transition-colors">
+                  <Camera className="h-4 w-4" />
+                  <span>Choose your photo (auto-resized to 256×256)</span>
+                  <input type="file" accept="image/*" className="hidden" onChange={handleFileUpload} />
+                </label>
+              </div>
+
+              {saveError && (
+                <div className="rounded-xl border border-red-500/30 bg-red-950/40 p-2.5 text-[11px] text-red-300">
+                  {saveError}
+                </div>
+              )}
+
               <button
                 type="submit"
-                className="flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 py-2.5 text-xs font-semibold text-white shadow-lg shadow-blue-600/30 hover:bg-blue-500 transition-all cursor-pointer"
+                disabled={saving}
+                className="flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 py-2.5 text-xs font-semibold text-white shadow-lg shadow-blue-600/30 hover:bg-blue-500 transition-all cursor-pointer disabled:opacity-60"
               >
                 {saved ? <Check className="h-4 w-4 text-emerald-300" /> : <Save className="h-4 w-4" />}
-                <span>{saved ? 'Changes Saved!' : 'Save Identity Profile'}</span>
+                <span>{saving ? 'Saving…' : saved ? 'Changes Saved!' : 'Save Identity Profile'}</span>
               </button>
             </form>
           </div>

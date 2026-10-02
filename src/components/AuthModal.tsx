@@ -1,33 +1,14 @@
 import React, { useState } from 'react';
-import { useAuth, DEMO_ACCOUNTS, DemoAccount } from '../context/AuthContext.tsx';
+import { useAuth } from '../context/AuthContext.tsx';
 import { BRAND_ASSETS } from '../data/assets.ts';
-import {
-  Shield,
-  X,
-  Mail,
-  Lock,
-  Key,
-  ArrowRight,
-  CheckCircle2,
-  Sparkles,
-  UserCheck,
-  UserPlus,
-  KeyRound,
-  Fingerprint,
-  Zap,
-  Globe,
-  Radio,
-} from 'lucide-react';
+import { X, Mail, Lock, ArrowRight, UserPlus, Shield } from 'lucide-react';
 
 export const AuthModal: React.FC = () => {
-  const { isAuthModalOpen, setIsAuthModalOpen, loginOAuth, loginWithEmail, loginLocalSynthetic, loginAsDemoAccount } = useAuth();
-  const [tab, setTab] = useState<'login' | 'register' | 'demo' | 'token'>('login');
+  const { isAuthModalOpen, setIsAuthModalOpen, loginOAuth, loginWithEmail } = useAuth();
+  const [tab, setTab] = useState<'login' | 'register'>('login');
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [rawToken, setRawToken] = useState('');
-  const [totpCode, setTotpCode] = useState('');
-  const [is2FaStep, setIs2FaStep] = useState(false);
   const [loading, setLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
 
@@ -49,12 +30,6 @@ export const AuthModal: React.FC = () => {
     e.preventDefault();
     setAuthError(null);
 
-    if (tab === 'login' && !is2FaStep && email.toLowerCase().includes('admin')) {
-      // Prompt 2FA simulation for admin
-      setIs2FaStep(true);
-      return;
-    }
-
     setLoading(true);
     try {
       const result = await loginWithEmail(email, password, tab === 'register' ? 'register' : 'login', name);
@@ -62,21 +37,11 @@ export const AuthModal: React.FC = () => {
         setAuthError(result.error || 'Failed to authenticate');
         return;
       }
-      setIs2FaStep(false);
     } catch (err: any) {
       setAuthError(err?.message || 'Failed to authenticate');
     } finally {
       setLoading(false);
     }
-  };
-
-  const handleTokenLogin = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!rawToken.trim()) return;
-    setLoading(true);
-    // Ingress key tab is a local/demo session — it never contacts the server.
-    loginLocalSynthetic(`token_dev_${Date.now().toString(36)}@vanitas-ingress.io`, 'Token Developer Ingress');
-    setLoading(false);
   };
 
   return (
@@ -91,7 +56,6 @@ export const AuthModal: React.FC = () => {
         <button
           onClick={() => {
             setIsAuthModalOpen(false);
-            setIs2FaStep(false);
             setAuthError(null);
           }}
           className="absolute top-5 right-5 rounded-full p-2 text-slate-400 hover:bg-white/10 hover:text-white transition-colors"
@@ -122,8 +86,7 @@ export const AuthModal: React.FC = () => {
         )}
 
         {/* Tab Switcher */}
-        {!is2FaStep && (
-          <div className="mt-5 grid grid-cols-4 rounded-xl border border-white/10 bg-slate-900/70 p-1 text-center">
+        <div className="mt-5 grid grid-cols-2 rounded-xl border border-white/10 bg-slate-900/70 p-1 text-center">
             <button
               onClick={() => {
                 setTab('login');
@@ -146,104 +109,13 @@ export const AuthModal: React.FC = () => {
             >
               Register
             </button>
-            <button
-              onClick={() => {
-                setTab('demo');
-                setAuthError(null);
-              }}
-              className={`rounded-lg py-1.5 text-xs font-semibold transition-all flex items-center justify-center gap-1 ${
-                tab === 'demo' ? 'bg-gradient-to-r from-cyan-600 to-emerald-600 text-white shadow-md' : 'text-cyan-300 hover:text-white'
-              }`}
-            >
-              <Sparkles className="h-3 w-3" />
-              <span>Demo</span>
-            </button>
-            <button
-              onClick={() => {
-                setTab('token');
-                setAuthError(null);
-              }}
-              className={`rounded-lg py-1.5 text-xs font-semibold transition-all flex items-center justify-center gap-1 ${
-                tab === 'token' ? 'bg-gradient-to-r from-purple-600 to-blue-600 text-white shadow-md' : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <KeyRound className="h-3 w-3" />
-              <span>API Key</span>
-            </button>
           </div>
-        )}
-
-        {/* DEMO ACCOUNTS TAB */}
-        {tab === 'demo' && !is2FaStep && (
-          <div className="mt-5 space-y-2.5">
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-mono uppercase text-cyan-400 font-bold">1-Click Instant Demo Profiles</span>
-              <span className="text-[10px] text-slate-400">حسابات تجريبية سريعة</span>
-            </div>
-            {DEMO_ACCOUNTS.map((account) => (
-              <button
-                key={account.id}
-                onClick={() => loginAsDemoAccount(account)}
-                className="group w-full flex items-center justify-between p-3 rounded-2xl border border-white/10 bg-slate-900/60 hover:border-cyan-400/50 hover:bg-slate-800/80 transition-all text-left"
-              >
-                <div className="flex items-center gap-3">
-                  <img src={account.avatarUrl} alt={account.name} className="h-9 w-9 rounded-xl object-cover border border-white/20" />
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-bold text-white group-hover:text-cyan-300 transition-colors">{account.name}</span>
-                      <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold ${
-                        account.role === 'ADMIN' ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30' : 'bg-slate-700/50 text-slate-300'
-                      }`}>
-                        {account.badge}
-                      </span>
-                    </div>
-                    <p className="text-[10px] text-slate-400 line-clamp-1">{account.description}</p>
-                  </div>
-                </div>
-                <ArrowRight className="h-4 w-4 text-slate-500 group-hover:text-cyan-400 group-hover:translate-x-0.5 transition-all" />
-              </button>
-            ))}
-          </div>
-        )}
-
-        {/* DIRECT API KEY TAB */}
-        {tab === 'token' && !is2FaStep && (
-          <form onSubmit={handleTokenLogin} className="mt-5 space-y-3.5">
-            <div>
-              <label className="block text-xs font-medium text-slate-300">Direct Ingress API Secret / JWT Token</label>
-              <div className="relative mt-1">
-                <KeyRound className="absolute left-3.5 top-3 h-4 w-4 text-purple-400" />
-                <input
-                  type="password"
-                  required
-                  placeholder="vnt_live_sec_••••••••••••••••"
-                  value={rawToken}
-                  onChange={(e) => setRawToken(e.target.value)}
-                  className="w-full rounded-xl border border-purple-500/30 bg-slate-900/80 py-2.5 pl-10 pr-4 text-xs text-purple-200 font-mono placeholder:text-slate-600 focus:border-purple-400 focus:outline-none"
-                />
-              </div>
-              <p className="mt-1.5 text-[10px] text-slate-400">
-                Authenticate using a Vanitas Provisioned Bearer Key for headless programmatic session.
-              </p>
-            </div>
-
-            <button
-              type="submit"
-              disabled={loading || !rawToken}
-              className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-purple-600 to-blue-600 py-2.5 text-xs font-semibold text-white shadow-lg shadow-purple-600/30 hover:from-purple-500 hover:to-blue-500 transition-all disabled:opacity-50"
-            >
-              <span>Authenticate with Ingress Key</span>
-              <ArrowRight className="h-3.5 w-3.5" />
-            </button>
-          </form>
-        )}
 
         {/* STANDARD SIGN IN / REGISTER FORM */}
         {(tab === 'login' || tab === 'register') && (
           <>
             {/* OAuth Quick Options */}
-            {!is2FaStep && (
-              <div className="mt-5 space-y-2">
+            <div className="mt-5 space-y-2">
                 <div className="grid grid-cols-3 gap-2">
                   <button
                     onClick={() => handleOAuth('google')}
@@ -288,12 +160,10 @@ export const AuthModal: React.FC = () => {
                   <div className="flex-1 border-t border-white/10"></div>
                 </div>
               </div>
-            )}
 
-            {/* Email / 2FA Form */}
+            {/* Email Form */}
             <form onSubmit={handleEmailSubmit} className="space-y-3">
-              {!is2FaStep ? (
-                <>
+              <>
                   {tab === 'register' && (
                     <div>
                       <label className="block text-xs font-medium text-slate-300">Display Name / الاسم</label>
@@ -343,40 +213,14 @@ export const AuthModal: React.FC = () => {
                       />
                     </div>
                   </div>
-                </>
-              ) : (
-                <div className="rounded-2xl border border-cyan-500/30 crystal-card p-4 text-center">
-                  <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-cyan-500/20 text-cyan-400 border border-cyan-500/30">
-                    <Shield className="h-6 w-6" />
-                  </div>
-                  <h3 className="mt-2 text-sm font-semibold text-white">Two-Factor Authentication (2FA)</h3>
-                  <p className="mt-1 text-xs text-slate-300">Enter the 6-digit TOTP code from your authenticator app</p>
-                  
-                  <input
-                    type="text"
-                    maxLength={6}
-                    autoFocus
-                    placeholder="123456"
-                    value={totpCode}
-                    onChange={(e) => setTotpCode(e.target.value)}
-                    className="mt-3 w-full rounded-xl border border-cyan-500/40 bg-slate-900 py-2.5 text-center text-lg font-mono tracking-widest text-cyan-300 focus:border-cyan-300 focus:outline-none"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setTotpCode('123456')}
-                    className="mt-2 text-[10px] text-cyan-400 hover:underline"
-                  >
-                    Quick Autofill Mock TOTP: 123456
-                  </button>
-                </div>
-              )}
+              </>
 
               <button
                 type="submit"
                 disabled={loading}
                 className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 via-cyan-600 to-blue-500 py-2.5 text-xs font-semibold text-white shadow-lg shadow-cyan-600/25 hover:opacity-95 transition-all"
               >
-                <span>{is2FaStep ? 'Verify TOTP & Enter' : tab === 'login' ? 'Continue to Console' : 'Create & Access Console'}</span>
+                <span>{tab === 'login' ? 'Continue to Console' : 'Create & Access Console'}</span>
                 <ArrowRight className="h-3.5 w-3.5" />
               </button>
             </form>
