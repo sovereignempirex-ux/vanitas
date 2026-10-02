@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext.tsx';
 import { Header } from './components/Header.tsx';
 import { Sidebar } from './components/Sidebar.tsx';
 import { CommandPalette } from './components/CommandPalette.tsx';
 import { AuthPage } from './pages/AuthPage.tsx';
 import { AuthModal } from './components/AuthModal.tsx';
+import { VIEW_SEO, seoForAuthPage, setPageSeo } from './lib/seo.ts';
 
 // Views
 import { OverviewView } from './components/views/OverviewView.tsx';
@@ -29,6 +30,21 @@ const AppContent: React.FC = () => {
   // Standalone shareable auth pages: /register and /login (no modal, no shell).
   const path = window.location.pathname.replace(/\/+$/, '') || '/';
   const authPage: 'login' | 'register' | null = path === '/login' ? 'login' : path === '/register' ? 'register' : null;
+
+  // Per-view SEO: keep title/description/canonical/OG in sync with what is on
+  // screen (auth pages first, then the signed-in dashboard view).
+  useEffect(() => {
+    if (authPage) {
+      setPageSeo(seoForAuthPage(authPage));
+      return;
+    }
+    if (authLoading) return;
+    if (!user) {
+      setPageSeo(seoForAuthPage(path === '/register' ? 'register' : 'login'));
+      return;
+    }
+    setPageSeo(VIEW_SEO[activeView] || VIEW_SEO.overview);
+  }, [authPage, authLoading, user, activeView, path]);
 
   const renderActiveView = () => {
     switch (activeView) {

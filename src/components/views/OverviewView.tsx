@@ -299,7 +299,16 @@ export const OverviewView: React.FC = () => {
 
         {/* Video Cards Grid */}
         <div className="mt-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          {tutorials.map((vid) => (
+          {tutorials.length === 0 ? (
+            <div className="col-span-full rounded-2xl border border-dashed border-white/10 bg-white/[0.02] p-6 text-center">
+              <Youtube className="mx-auto h-6 w-6 text-slate-500" />
+              <p className="mt-2 text-xs font-semibold text-slate-300">No live tutorials to show right now</p>
+              <p className="mt-1 text-[11px] text-slate-500">
+                This section only lists real YouTube results — nothing is ever fabricated. Search a topic in the live
+                YouTube search below, or try again shortly.
+              </p>
+            </div>
+          ) : tutorials.map((vid) => (
             <div
               key={vid.id}
               className="group relative flex flex-col justify-between rounded-2xl border border-white/10 bg-white/[0.02] hover:bg-white/[0.05] hover:border-blue-500/40 p-4 transition-all backdrop-blur-xl shadow-lg"
@@ -484,7 +493,8 @@ export const OverviewView: React.FC = () => {
               </span>
             </div>
             <p className="text-xs text-slate-400 mt-1">
-              Search any developer topic, tutorial, or architecture pattern on YouTube using Gemini's search grounding.
+              Search any developer topic, tutorial, or architecture pattern with live YouTube results in real time (no
+              API key required).
             </p>
           </div>
         </div>

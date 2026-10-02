@@ -35,6 +35,16 @@ create table if not exists public.comments (
 create index if not exists comments_doc_created_idx on public.comments (doc_id, created_at desc);
 create index if not exists comments_user_idx on public.comments (user_id);
 alter table public.comments enable row level security;
+create table if not exists public.ai_chat_messages (
+  id text primary key,
+  user_id text not null references public.users(id) on delete cascade,
+  role text not null check (role in ('user', 'ai')),
+  content text not null check (char_length(content) between 1 and 20000),
+  persona text not null default '',
+  created_at timestamptz not null default now()
+);
+create index if not exists ai_chat_user_created_idx on public.ai_chat_messages (user_id, created_at desc);
+alter table public.ai_chat_messages enable row level security;
 alter table if exists public.users add column if not exists two_factor_secret text not null default '';
 `;
 

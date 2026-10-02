@@ -90,6 +90,43 @@ for (const img of ['auth-bg.jpg', 'overview-hero.jpg', 'docs-banner.jpg', 'logo.
   check(`image /images/${img} → 200`, s === 200, { status: s });
 }
 
+console.log('— SEO (meta, structured data, crawlers) —');
+let homeHtml = '';
+try {
+  homeHtml = await (await fetch(`${SITE}/`)).text();
+} catch {
+  /* checked below */
+}
+check('home HTML has description meta', /<meta name="description" content="[^"]{40,}"/.test(homeHtml), homeHtml.slice(0, 120));
+check('home HTML has og:image', homeHtml.includes('property="og:image"') && homeHtml.includes('overview-hero.jpg'));
+check('home HTML has twitter:card', homeHtml.includes('name="twitter:card"'));
+check('home HTML has canonical link', homeHtml.includes('rel="canonical"'));
+check('home HTML ships JSON-LD structured data', homeHtml.includes('application/ld+json'));
+const robots = await (await fetch(`${SITE}/robots.txt`)).text().catch(() => '');
+check('robots.txt → allows crawling + sitemap pointer', robots.includes('User-agent:') && robots.includes('Sitemap:'), robots.slice(0, 120));
+const sitemap = await (await fetch(`${SITE}/sitemap.xml`)).text().catch(() => '');
+check('sitemap.xml → valid urlset with home page', sitemap.includes('<urlset') && sitemap.includes(`<loc>${SITE}/</loc>`), sitemap.slice(0, 120));
+const loginPage = await (await fetch(`${SITE}/login`)).text().catch(() => '');
+check('/login → 200 HTML shell', loginPage.includes('<div id="root">'), loginPage.slice(0, 80));
+const registerPage = await (await fetch(`${SITE}/register`)).text().catch(() => '');
+check('/register → 200 HTML shell', registerPage.includes('<div id="root">'), registerPage.slice(0, 80));
+
+console.log('— live YouTube search (never fabricated) —');
+r = await call('GET', '/youtube/search?q=node.js%20tutorial&limit=4');
+const ytVideos = r.json?.videos || [];
+check('GET /youtube/search → live results', r.status === 200 && ytVideos.length > 0, { status: r.status, count: ytVideos.length });
+check(
+  'every result is a real 11-char YouTube id',
+  ytVideos.length > 0 && ytVideos.every((v) => /^[A-Za-z0-9_-]{11}$/.test(v.id)),
+  ytVideos.map((v) => v.id),
+);
+r = await call('GET', '/videos/tutorials');
+check(
+  'tutorial showcase serves live videos only',
+  r.status === 200 && Array.isArray(r.json?.tutorials) && r.json.tutorials.every((t) => !t.youtubeId || /^[A-Za-z0-9_-]{11}$/.test(t.youtubeId)),
+  { count: r.json?.tutorials?.length },
+);
+
 console.log('— zero comments on every real docs page —');
 for (const doc of ['getting-started', 'authentication', 'scopes', 'endpoints', 'bots', 'errors']) {
   r = await call('GET', `/comments/${doc}`);
@@ -144,6 +181,67 @@ r = await call('POST', '/ai/chat', {
 });
 const aiText = r.json?.text || '';
 check('POST /ai/chat → 200 with a real reply', r.status === 200 && typeof aiText === 'string' && aiText.length >= 30, { status: r.status, text: aiText.slice(0, 220) });
+
+// Site-awareness: every system prompt carries verified facts about THIS
+// deployment (real routes, scopes, limits), so the model must name real paths.
+let siteAwareText = '';
+for (let attempt = 0; attempt < 2; attempt++) {
+  const sr = await call('POST', '/ai/chat', {
+    token,
+    body: { prompt: 'What is the exact account registration endpoint of this platform? Reply with only the path.', persona: 'api', toneStyle: 'developer' },
+  });
+  siteAwareText = sr.json?.text || '';
+  if (siteAwareText.includes('/auth/register')) break;
+  await new Promise((res) => setTimeout(res, 1500));
+}
+check('AI is site-aware → names the real /auth/register endpoint', siteAwareText.includes('/auth/register'), siteAwareText.slice(0, 180));
+
+console.log('— AI chat streaming (SSE) —');
+try {
+  const sse = await fetch(`${BASE}/ai/chat`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ prompt: 'In exactly one short sentence: what is Vanitas?', persona: 'docs', toneStyle: 'developer', stream: true }),
+  });
+  check('stream request → text/event-stream', sse.ok && String(sse.headers.get('content-type') || '').includes('text/event-stream'), sse.headers.get('content-type'));
+  const reader = sse.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let deltas = 0;
+  let done = null;
+  for (;;) {
+    const { done: finished, value } = await reader.read();
+    if (finished) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) continue;
+      try {
+        const ev = JSON.parse(trimmed.slice(5).trim());
+        if (ev.type === 'delta') deltas++;
+        if (ev.type === 'done') done = ev;
+      } catch {
+        /* partial frame */
+      }
+    }
+  }
+  check('stream emits progressive deltas', deltas >= 1, { deltas });
+  check('stream done event carries full text', !!done && typeof done.text === 'string' && done.text.length >= 30, { text: String(done?.text || '').slice(0, 120) });
+} catch (err) {
+  check('stream request reachable', false, err.message);
+}
+
+console.log('— persisted chat history —');
+r = await call('GET', '/ai/history', { token });
+check('signed-in chat exchange is persisted', r.status === 200 && (r.json?.messages || []).some((m) => String(m.content).includes('what is Vanitas')), { status: r.status, count: r.json?.messages?.length });
+r = await call('GET', '/ai/history');
+check('history is never public (401 anon)', r.status === 401, r.status);
+r = await call('DELETE', '/ai/history', { token });
+check('clear chat → wipes my history', r.status === 200 && r.json?.success === true, r);
+r = await call('GET', '/ai/history', { token });
+check('history empty after clear', r.status === 200 && (r.json?.messages || []).length === 0, r.json);
 
 console.log('— real 2FA (TOTP) —');
 r = await call('POST', '/auth/2fa/setup', { token });

@@ -24,6 +24,7 @@ import {
   VideoTutorialItem,
   ProductSuggestion,
   DocComment,
+  AiChatHistoryMessage,
 } from '../types.ts';
 
 class ApiClient {
@@ -388,6 +389,119 @@ class ApiClient {
       method: 'POST',
       body: JSON.stringify(params),
     });
+  }
+
+  /**
+   * Streamed AI chat (SSE): `onDelta` receives every token as it arrives so
+   * the UI can reveal the reply progressively. Resolves with the final
+   * authoritative result (the server's `done` event). Throws when the stream
+   * never produced anything — callers should then fall back to `queryAi`.
+   */
+  async queryAiStream(
+    params: {
+      persona: string;
+      toneStyle?: AiToneStyle;
+      prompt: string;
+      enableWebSearch?: boolean;
+      enableVideoSearch?: boolean;
+      context?: Record<string, unknown>;
+    },
+    onDelta: (delta: string) => void,
+  ): Promise<{
+    text: string;
+    groundingSources?: { title: string; url: string }[];
+    videos?: YouTubeVideoItem[];
+    videoQuery?: string;
+    requiresConfirmation?: {
+      action: string;
+      target: string;
+      permission: any;
+      status: 'pending';
+    };
+  }> {
+    const headers = new Headers({ 'Content-Type': 'application/json' });
+    headers.set('x-client-source', this.clientSource);
+    const token = this.getAuthToken();
+    if (token) headers.set('Authorization', `Bearer ${token}`);
+
+    const res = await fetch(`${this.baseUrl}/ai/chat`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ ...params, stream: true }),
+    });
+
+    // A proxy or an older server may answer plain JSON — accept it as-is.
+    const contentType = res.headers.get('content-type') || '';
+    if (res.ok && contentType.includes('application/json')) {
+      const json = (await res.json()) as { text?: string };
+      if (json.text) onDelta(json.text);
+      return json as any;
+    }
+
+    if (!res.ok || !res.body) {
+      const err: Error & { status?: number } = new Error(`AI stream failed: ${res.status}`);
+      err.status = res.status;
+      throw err;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let accumulated = '';
+    let final: any = null;
+    let serverError: string | null = null;
+
+    const handleLine = (line: string) => {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) return;
+      const payload = trimmed.slice(5).trim();
+      if (!payload) return;
+      try {
+        const event = JSON.parse(payload);
+        if (event.type === 'delta' && typeof event.t === 'string') {
+          accumulated += event.t;
+          onDelta(event.t);
+        } else if (event.type === 'done') {
+          final = event;
+        } else if (event.type === 'error') {
+          serverError = event.message || 'AI engine error';
+        }
+      } catch {
+        /* partial frame — next chunk completes it */
+      }
+    };
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) handleLine(line);
+    }
+
+    if (serverError) throw new Error(serverError);
+    if (final) {
+      return {
+        text: typeof final.text === 'string' ? final.text : accumulated,
+        groundingSources: final.groundingSources,
+        videos: final.videos,
+        videoQuery: final.videoQuery,
+        requiresConfirmation: final.requiresConfirmation,
+      };
+    }
+    if (accumulated) return { text: accumulated };
+    throw new Error('AI stream produced no output');
+  }
+
+  /** The signed-in account's persisted chat history (newest page, ascending). */
+  async getAiHistory() {
+    return this.request<{ messages: AiChatHistoryMessage[] }>('/ai/history');
+  }
+
+  /** Wipe the signed-in account's chat history. */
+  async clearAiHistory() {
+    return this.request<{ success: boolean; removed: number }>('/ai/history', { method: 'DELETE' });
   }
 
   // YouTube Semantic Video Search

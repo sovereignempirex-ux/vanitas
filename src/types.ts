@@ -396,8 +396,18 @@ export interface YouTubeSearchResponse {
   query: string;
   videos: YouTubeVideoItem[];
   totalResults: number;
-  searchEngine: 'gemini_grounded' | 'youtube_direct';
+  searchEngine: 'youtube_api' | 'youtube_keyless' | 'none';
   aiSummary?: string;
+}
+
+/** One persisted chat exchange for the signed-in account. */
+export interface AiChatHistoryMessage {
+  id: string;
+  userId?: string;
+  role: 'user' | 'ai';
+  content: string;
+  persona?: string;
+  createdAt: string;
 }
 
 export interface ExternalDatabaseConfig {

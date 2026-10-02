@@ -1,0 +1,9 @@
+# Vanitas — https://vanitas-bot.vercel.app/
+User-agent: *
+Allow: /
+Disallow: /api/
+
+# Polite crawl pacing (rate limits are enforced server-side as well).
+Crawl-delay: 1
+
+Sitemap: https://vanitas-bot.vercel.app/sitemap.xml

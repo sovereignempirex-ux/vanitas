@@ -17,7 +17,7 @@ import {
   exchangeCode,
   fetchProfile,
 } from './src/server/oauth.ts';
-import { processAiQuery, diagnoseAndFixCode, performSemanticSearch, searchYouTubeVideos } from './src/server/aiService.ts';
+import { processAiQuery, processAiQueryStream, diagnoseAndFixCode, performSemanticSearch, searchYouTubeVideos } from './src/server/aiService.ts';
 import { authenticateApiKey, requireScope, rateWindowStatus, nextQuotaReset } from './src/server/apiKeyAuth.ts';
 import { ClientSource, UserRole, PermissionScope, ProductSuggestion, ApiKey } from './src/types.ts';
 import { getActorUser, requireAdmin, rateLimit, sanitizeText, sanitizeUrl, csvCell, parsePagination, secureToken, secureId, isValidScope } from './src/server/security.ts';
@@ -150,6 +150,106 @@ async function deleteComment(id: string, actor: { id: string; role: UserRole }):
   if (existing.rows[0].user_id !== actor.id && actor.role !== 'ADMIN') return 'forbidden';
   await databasePool.query('delete from public.comments where id = $1', [id]);
   return 'deleted';
+}
+
+// ---------------------------------------------------------------------------
+// AI chat history — the signed-in account's own conversation, persisted per
+// user (PostgreSQL when DATABASE_URL is set, in-memory otherwise). Only ever
+// contains messages that account actually exchanged; never seeded, and it is
+// wiped when the account is deleted.
+// ---------------------------------------------------------------------------
+export interface AiChatHistoryMessage {
+  id: string;
+  userId: string;
+  role: 'user' | 'ai';
+  content: string;
+  persona: string;
+  createdAt: string;
+}
+
+const memoryAiChat: AiChatHistoryMessage[] = [];
+const AI_HISTORY_PAGE = 100; // messages returned per fetch
+const AI_HISTORY_RETAIN = 400; // max stored messages per user (memory mode)
+
+function mapAiChatRow(row: Record<string, any>): AiChatHistoryMessage {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    role: row.role,
+    content: row.content,
+    persona: row.persona || '',
+    createdAt: row.created_at,
+  };
+}
+
+async function listAiChatHistory(userId: string): Promise<AiChatHistoryMessage[]> {
+  if (!databasePool) {
+    return memoryAiChat.filter((m) => m.userId === userId).slice(-AI_HISTORY_PAGE);
+  }
+  await ensureSchema();
+  const result = await databasePool.query(
+    `select * from (
+       select * from public.ai_chat_messages where user_id = $1
+       order by created_at desc limit $2
+     ) page order by created_at asc`,
+    [userId, AI_HISTORY_PAGE],
+  );
+  return result.rows.map(mapAiChatRow);
+}
+
+async function appendAiChatMessage(params: {
+  userId: string;
+  role: 'user' | 'ai';
+  content: string;
+  persona?: string;
+}): Promise<AiChatHistoryMessage | null> {
+  const content = params.content.slice(0, 20000).trim();
+  if (!content) return null;
+  const id = secureId('aim');
+
+  if (!databasePool) {
+    const message: AiChatHistoryMessage = {
+      id,
+      userId: params.userId,
+      role: params.role,
+      content,
+      persona: params.persona || '',
+      createdAt: new Date().toISOString(),
+    };
+    memoryAiChat.push(message);
+    const mine = memoryAiChat.filter((m) => m.userId === params.userId);
+    if (mine.length > AI_HISTORY_RETAIN) {
+      const excessIds = new Set(mine.slice(0, mine.length - AI_HISTORY_RETAIN).map((m) => m.id));
+      for (let i = memoryAiChat.length - 1; i >= 0; i--) {
+        if (excessIds.has(memoryAiChat[i].id)) memoryAiChat.splice(i, 1);
+      }
+    }
+    return message;
+  }
+
+  await ensureSchema();
+  const result = await databasePool.query(
+    `insert into public.ai_chat_messages (id, user_id, role, content, persona)
+     values ($1, $2, $3, $4, $5) returning *`,
+    [id, params.userId, params.role, content, params.persona || ''],
+  );
+  return mapAiChatRow(result.rows[0]);
+}
+
+async function clearAiChatHistory(userId: string): Promise<number> {
+  if (!databasePool) {
+    let removed = 0;
+    for (let i = memoryAiChat.length - 1; i >= 0; i--) {
+      if (memoryAiChat[i].userId === userId) {
+        memoryAiChat.splice(i, 1);
+        removed++;
+      }
+    }
+    return removed;
+  }
+  await ensureSchema();
+  const result = await databasePool.query('delete from public.ai_chat_messages where user_id = $1', [userId]);
+  return Number(result.rowCount || 0);
 }
 
 export async function buildApp() {
@@ -498,6 +598,9 @@ export async function buildApp() {
       if (!databasePool) {
         for (let i = memoryComments.length - 1; i >= 0; i--) {
           if (memoryComments[i].userId === actor.id) memoryComments.splice(i, 1);
+        }
+        for (let i = memoryAiChat.length - 1; i >= 0; i--) {
+          if (memoryAiChat[i].userId === actor.id) memoryAiChat.splice(i, 1);
         }
       }
       res.json({ success: true });
@@ -1447,7 +1550,34 @@ export async function buildApp() {
     });
   });
 
-  // Vanitas AI Chat endpoint (prompt size cap + persona allowlist)
+  // Signed-in users' own chat history (never seeded, wiped with the account).
+  app.get('/api/v1/ai/history', async (req, res) => {
+    try {
+      const actor = getActorUser(req);
+      if (!actor) return res.status(401).json({ error: 'Authentication required' });
+      const messages = await listAiChatHistory(actor.id);
+      res.json({ messages });
+    } catch (err) {
+      console.error('[ai/history]', (err as Error)?.message);
+      res.status(500).json({ error: 'Failed loading chat history' });
+    }
+  });
+
+  app.delete('/api/v1/ai/history', async (req, res) => {
+    try {
+      const actor = getActorUser(req);
+      if (!actor) return res.status(401).json({ error: 'Authentication required' });
+      const removed = await clearAiChatHistory(actor.id);
+      res.json({ success: true, removed });
+    } catch (err) {
+      console.error('[ai/history]', (err as Error)?.message);
+      res.status(500).json({ error: 'Failed clearing chat history' });
+    }
+  });
+
+  // Vanitas AI Chat endpoint (prompt size cap + persona allowlist).
+  // With { stream: true } the reply is delivered as Server-Sent Events
+  // (delta → delta → done) so the UI can reveal it progressively.
   app.post('/api/v1/ai/chat', async (req, res) => {
     try {
       const persona = sanitizeText(req.body?.persona, 32) || 'code';
@@ -1458,14 +1588,74 @@ export async function buildApp() {
         return res.status(400).json({ error: 'Invalid persona' });
       }
 
-      const response = await processAiQuery({
+      const actor = getActorUser(req);
+      const queryOptions = {
         persona: persona as any,
         toneStyle: (['architect', 'security', 'developer', 'bot', 'arabic'].includes(toneStyle) ? toneStyle : 'developer') as any,
         prompt,
         enableWebSearch: !!req.body?.enableWebSearch,
         enableVideoSearch: !!req.body?.enableVideoSearch,
         context: typeof req.body?.context === 'object' ? req.body.context : undefined,
-      });
+      };
+
+      // Persist the user's message for signed-in accounts (both modes).
+      if (actor) {
+        try {
+          await appendAiChatMessage({ userId: actor.id, role: 'user', content: prompt, persona });
+        } catch (histErr) {
+          console.warn('[ai/chat] history save (user) failed:', (histErr as Error)?.message);
+        }
+      }
+
+      if (req.body?.stream === true) {
+        res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-cache, no-transform');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+
+        const send = (payload: unknown) => res.write(`data: ${JSON.stringify(payload)}\n\n`);
+        let streamedText = '';
+
+        try {
+          const response = await processAiQueryStream(queryOptions, (delta) => {
+            if (!delta) return;
+            streamedText += delta;
+            send({ type: 'delta', t: delta });
+          });
+
+          // `text` is authoritative — the client syncs its bubble to it.
+          const finalText = (response.text || streamedText).trim();
+          if (actor && finalText) {
+            try {
+              await appendAiChatMessage({ userId: actor.id, role: 'ai', content: finalText, persona });
+            } catch (histErr) {
+              console.warn('[ai/chat] history save (ai) failed:', (histErr as Error)?.message);
+            }
+          }
+
+          send({
+            type: 'done',
+            text: finalText,
+            groundingSources: response.groundingSources,
+            videos: response.videos,
+            videoQuery: response.videoQuery,
+            requiresConfirmation: response.requiresConfirmation,
+          });
+        } catch (streamErr) {
+          console.error('[ai/chat] stream]', (streamErr as Error)?.message);
+          send({ type: 'error', message: 'The AI engine failed to respond. Please try again.' });
+        }
+        return res.end();
+      }
+
+      const response = await processAiQuery(queryOptions);
+      if (actor && response.text) {
+        try {
+          await appendAiChatMessage({ userId: actor.id, role: 'ai', content: response.text, persona });
+        } catch (histErr) {
+          console.warn('[ai/chat] history save (ai) failed:', (histErr as Error)?.message);
+        }
+      }
 
       res.json(response);
     } catch (err: any) {
@@ -1697,11 +1887,37 @@ export async function buildApp() {
   // ----------------------------------------------------
   // VIDEO WALKTHROUGHS & SHOWCASE
   // ----------------------------------------------------
-  app.get('/api/v1/videos/tutorials', (_req, res) => {
-    res.json({
-      success: true,
-      tutorials: db.videoTutorials,
-    });
+  // Live tutorials — REAL YouTube results (5-minute cache). If the live
+  // search is unreachable the client simply gets an empty list; nothing fake
+  // is ever substituted.
+  let tutorialsCache: { at: number; payload: unknown } | null = null;
+  app.get('/api/v1/videos/tutorials', async (_req, res) => {
+    try {
+      if (tutorialsCache && Date.now() - tutorialsCache.at < 5 * 60_000) {
+        return res.json(tutorialsCache.payload);
+      }
+      const result = await searchYouTubeVideos('build REST API authentication tutorial', 8);
+      const tutorials = result.videos.map((v: any) => ({
+        id: `yt_${v.id}`,
+        title: v.title,
+        description: v.description || 'Live YouTube tutorial result.',
+        category: 'getting_started',
+        duration: v.duration || '',
+        thumbnailUrl: v.thumbnailUrl,
+        videoEmbedUrl: v.embedUrl,
+        youtubeId: v.id,
+        badge: 'Live on YouTube',
+        author: v.channelTitle,
+        tags: ['YouTube', 'Tutorial'],
+        highlights: [],
+      }));
+      const payload = { success: true, tutorials, source: result.searchEngine, summary: result.aiSummary };
+      tutorialsCache = { at: Date.now(), payload };
+      res.json(payload);
+    } catch (err) {
+      console.error('[videos/tutorials]', (err as Error)?.message);
+      res.json({ success: true, tutorials: [] });
+    }
   });
 
   // ----------------------------------------------------

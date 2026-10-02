@@ -560,84 +560,6 @@ var VanitasDatabase = class {
       lastTestedAt: new Date(Date.now() - 1e3 * 60 * 45).toISOString()
     }
   ];
-  videoTutorials = [
-    {
-      id: "vid_01_welcome",
-      title: "Vanitas Central API Gateway: Full Setup, Auth & Scopes",
-      titleArabic: "\u0634\u0631\u062D \u0645\u0646\u0635\u0629 \u0641\u0627\u0646\u064A\u062A\u0627\u0633 \u0627\u0644\u0645\u0631\u0643\u0632\u064A\u0629: \u0627\u0644\u062A\u062B\u0628\u064A\u062A\u060C \u0627\u0644\u062A\u0648\u062B\u064A\u0642 \u0648\u0635\u0644\u0627\u062D\u064A\u0627\u062A \u0627\u0644\u0645\u0641\u0627\u062A\u064A\u062D",
-      description: "Master the core architecture of Vanitas API Gateway, generating scoped keys, setting burst limits, and monitoring telemetry.",
-      category: "getting_started",
-      duration: "14:20",
-      thumbnailUrl: "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=640&auto=format&fit=crop",
-      videoEmbedUrl: "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
-      youtubeId: "dQw4w9WgXcQ",
-      badge: "Essential Guide",
-      author: "Vanitas Core Architecture Team",
-      tags: ["API Gateway", "Authentication", "Scopes", "Quickstart"],
-      highlights: [
-        "Issuing cryptographically signed API keys",
-        "Configuring sliding window rate limits",
-        "Testing endpoints in the live playground"
-      ]
-    },
-    {
-      id: "vid_02_database",
-      title: "Connecting Free Cloud Databases (Supabase & Neon) to Vanitas",
-      titleArabic: "\u0631\u0628\u0637 \u0642\u0648\u0627\u0639\u062F \u0627\u0644\u0628\u064A\u0627\u0646\u0627\u062A \u0627\u0644\u0633\u062D\u0627\u0628\u064A\u0629 \u0627\u0644\u0645\u062C\u0627\u0646\u064A\u0629 (Supabase & Neon) \u0645\u0639 \u0627\u0644\u0633\u064A\u0631\u0641\u0631",
-      description: "How to provision zero-cost, high-speed PostgreSQL clusters using Supabase and Neon with automatic scale-to-zero.",
-      category: "cloud_database",
-      duration: "18:45",
-      thumbnailUrl: "https://images.unsplash.com/photo-1558494949-ef010cbdcc31?q=80&w=640&auto=format&fit=crop",
-      videoEmbedUrl: "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
-      youtubeId: "dQw4w9WgXcQ",
-      badge: "Free Tier Database",
-      author: "Database Engineering Group",
-      tags: ["PostgreSQL", "Supabase", "Neon", "Free Cloud", "SQL"],
-      highlights: [
-        "Creating free PostgreSQL instances in 30 seconds",
-        "Setting up SSL encrypted connection strings",
-        "Live schema synchronization and testing"
-      ]
-    },
-    {
-      id: "vid_03_clients",
-      title: "Modern Client Installation & Capabilities: Android APK & Windows EXE",
-      titleArabic: "\u062A\u062B\u0628\u064A\u062A \u0648\u062A\u0634\u063A\u064A\u0644 \u062A\u0637\u0628\u064A\u0642\u0627\u062A \u0627\u0644\u0623\u062C\u0647\u0632\u0629 \u0627\u0644\u062D\u062F\u064A\u062B\u0629: \u0623\u0646\u062F\u0631\u0648\u064A\u062F APK \u0648\u0648\u064A\u0646\u062F\u0648\u0632 EXE",
-      description: "Explore the modern native builds for Android 14/15 ARM64 and Windows 11 Mica Glass UI with hardware acceleration.",
-      category: "desktop_mobile",
-      duration: "12:30",
-      thumbnailUrl: "https://images.unsplash.com/photo-1517694712202-14dd9538aa97?q=80&w=640&auto=format&fit=crop",
-      videoEmbedUrl: "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
-      youtubeId: "dQw4w9WgXcQ",
-      badge: "Modern Devices",
-      author: "Native Systems Team",
-      tags: ["Android APK", "Windows EXE", "ARM64", "Mica UI"],
-      highlights: [
-        "Universal ARM64 & x86_64 installation",
-        "Biometric authentication setup on mobile",
-        "DirectX hardware acceleration on Windows 11"
-      ]
-    },
-    {
-      id: "vid_04_bots",
-      title: "Deploying Discord & WhatsApp Bot Integrations via Webhooks",
-      titleArabic: "\u0631\u0628\u0637 \u0648\u062A\u0634\u063A\u064A\u0644 \u0628\u0648\u062A\u0627\u062A \u062F\u064A\u0633\u0643\u0648\u0631\u062F \u0648\u0648\u0627\u062A\u0633\u0627\u0628 \u0639\u0628\u0631 \u0627\u0644\u0648\u064A\u0628 \u0647\u0648\u0643",
-      description: "Configure real-time message routing, slash command dispatch, and encrypted HMAC webhook listeners.",
-      category: "bots_webhooks",
-      duration: "16:10",
-      thumbnailUrl: "https://images.unsplash.com/photo-1526374965328-7f61d4dc18c5?q=80&w=640&auto=format&fit=crop",
-      videoEmbedUrl: "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
-      youtubeId: "dQw4w9WgXcQ",
-      badge: "Automation",
-      author: "Bot Ingress Engineering",
-      tags: ["Discord Bot", "WhatsApp API", "Webhooks", "HMAC"],
-      highlights: [
-        "Zero-downtime webhook dispatching",
-        "Signing webhook payloads with secret keys",
-        "Automated failover & retry mechanism"
-      ]
-    }
-  ];
   testDatabaseConnection(dbId) {
     const dbItem = this.externalDatabases.find((d) => d.id === dbId);
     if (!dbItem) {
@@ -810,6 +732,16 @@ create table if not exists public.comments (
 create index if not exists comments_doc_created_idx on public.comments (doc_id, created_at desc);
 create index if not exists comments_user_idx on public.comments (user_id);
 alter table public.comments enable row level security;
+create table if not exists public.ai_chat_messages (
+  id text primary key,
+  user_id text not null references public.users(id) on delete cascade,
+  role text not null check (role in ('user', 'ai')),
+  content text not null check (char_length(content) between 1 and 20000),
+  persona text not null default '',
+  created_at timestamptz not null default now()
+);
+create index if not exists ai_chat_user_created_idx on public.ai_chat_messages (user_id, created_at desc);
+alter table public.ai_chat_messages enable row level security;
 alter table if exists public.users add column if not exists two_factor_secret text not null default '';
 `;
 var schemaReady = null;
@@ -1675,33 +1607,214 @@ async function queryOllama(systemInstruction, prompt) {
   }
 }
 async function queryPollinations(systemInstruction, prompt) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const response = await fetch("https://text.pollinations.ai/openai", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: AbortSignal.timeout(2e4),
+        body: JSON.stringify({
+          model: "openai",
+          messages: [
+            { role: "system", content: systemInstruction },
+            { role: "user", content: prompt }
+          ]
+        })
+      });
+      if (!response.ok) {
+        console.warn(`Pollinations HTTP ${response.status} (attempt ${attempt + 1});`);
+        if (attempt === 0) {
+          await new Promise((r) => setTimeout(r, 600));
+          continue;
+        }
+        return null;
+      }
+      const data = await response.json();
+      const text = data.choices?.[0]?.message?.content?.trim();
+      if (text) return text;
+      if (attempt === 0) {
+        await new Promise((r) => setTimeout(r, 600));
+        continue;
+      }
+      return null;
+    } catch (error) {
+      console.warn("Pollinations unavailable; using the local deterministic fallback.", error instanceof Error ? error.message : error);
+      return null;
+    }
+  }
+  return null;
+}
+async function queryPollinationsStream(systemInstruction, prompt, onDelta) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let response;
+    try {
+      response = await fetch("https://text.pollinations.ai/openai", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+        signal: AbortSignal.timeout(24e3),
+        body: JSON.stringify({
+          model: "openai",
+          stream: true,
+          messages: [
+            { role: "system", content: systemInstruction },
+            { role: "user", content: prompt }
+          ]
+        })
+      });
+    } catch (error) {
+      console.warn("Pollinations stream unavailable; using a full response instead.", error instanceof Error ? error.message : error);
+      return null;
+    }
+    if (!response.ok || !response.body) {
+      console.warn(`Pollinations stream HTTP ${response.status} (attempt ${attempt + 1});`);
+      if (attempt === 0) {
+        await new Promise((r) => setTimeout(r, 600));
+        continue;
+      }
+      return null;
+    }
+    const contentType = response.headers.get("content-type") || "";
+    if (!contentType.includes("event-stream")) {
+      const raw = (await response.text()).trim();
+      if (!raw) return null;
+      let text = raw;
+      try {
+        const json = JSON.parse(raw);
+        const content = json.choices?.[0]?.message?.content;
+        if (content) text = content;
+      } catch {
+      }
+      onDelta(text);
+      return text;
+    }
+    try {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let full = "";
+      for (; ; ) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("data:")) continue;
+          const payload = trimmed.slice(5).trim();
+          if (!payload || payload === "[DONE]") continue;
+          try {
+            const json = JSON.parse(payload);
+            const delta = json.choices?.[0]?.delta?.content;
+            if (delta) {
+              full += delta;
+              onDelta(delta);
+            }
+          } catch {
+          }
+        }
+      }
+      return full.trim() || null;
+    } catch (error) {
+      console.warn("Pollinations stream aborted; using a full response instead.", error instanceof Error ? error.message : error);
+      return null;
+    }
+  }
+  return null;
+}
+async function queryOllamaStream(systemInstruction, prompt, onDelta) {
+  const baseUrl = process.env.OLLAMA_BASE_URL;
+  if (process.env.AI_PROVIDER !== "ollama" || !baseUrl) return null;
   try {
-    const response = await fetch("https://text.pollinations.ai/openai", {
+    const response = await fetch(`${baseUrl.replace(/\/$/, "")}/api/chat`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      signal: AbortSignal.timeout(25e3),
+      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      signal: AbortSignal.timeout(6e4),
       body: JSON.stringify({
-        model: "openai",
+        model: process.env.OLLAMA_MODEL || "llama3.2",
+        stream: true,
         messages: [
           { role: "system", content: systemInstruction },
           { role: "user", content: prompt }
         ]
       })
     });
-    if (!response.ok) {
-      console.warn(`Pollinations HTTP ${response.status}; using fallback.`);
-      return null;
+    if (!response.ok || !response.body) return null;
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let full = "";
+    for (; ; ) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const json = JSON.parse(trimmed);
+          const delta = json.message?.content;
+          if (delta) {
+            full += delta;
+            onDelta(delta);
+          }
+        } catch {
+        }
+      }
     }
-    const data = await response.json();
-    const text = data.choices?.[0]?.message?.content?.trim();
-    return text || null;
+    return full.trim() || null;
   } catch (error) {
-    console.warn("Pollinations unavailable; using the local deterministic fallback.", error instanceof Error ? error.message : error);
+    console.warn("Ollama stream unavailable; using a full response instead.", error instanceof Error ? error.message : error);
     return null;
   }
 }
-async function processAiQuery(options) {
-  const { persona, toneStyle = "developer", prompt, context, enableWebSearch, enableVideoSearch } = options;
+var SITE_FACTS = `=== VANITAS PLATFORM \u2014 REAL REFERENCE (this deployment) ===
+Base URL: https://vanitas-bot.vercel.app/api/v1 \u2014 you are embedded in this
+platform; answer about it using ONLY these verified facts:
+
+AUTH & ACCOUNTS
+- POST /auth/register {name, email, password} \u2192 creates the account and returns a session token. Password 8-128 chars; email must be valid; name required.
+- POST /auth/login {email, password} \u2192 session token (then Bearer token on every request). When 2FA is on, finish via POST /auth/2fa/complete {code}.
+- POST /auth/logout, GET /auth/me, PATCH /auth/profile {name?, avatarUrl?} (avatarUrl: https URL \u2264500 chars or a base64 data:image URL \u2264300KB), DELETE /auth/account (cascades all of that user's data).
+- 2FA (TOTP): POST /auth/2fa/setup \u2192 otpauth URL + QR, POST /auth/2fa/enable {code}, POST /auth/2fa/disable {code}.
+- Sessions: GET /auth/sessions, DELETE /auth/sessions/:id.
+- Social login: GET /auth/providers \u2192 {google, discord, github}; start via GET /social/:provider \u2192 OAuth consent \u2192 GET /social/:provider/callback.
+- Error codes: 400 validation, 401 missing/invalid credentials, 403 forbidden or insufficient scope, 404 not found, 409 conflict, 429 rate limited, 500 server error.
+
+API KEYS (Authorization: Bearer sk_\u2026, or a session token)
+- GET /api-keys (list + allScopes), POST /api-keys {name, scopes[], rateLimit?, burstLimit?} \u2192 rawSecret is shown ONCE at creation.
+- POST /api-keys/:id/rotate (new secret, old invalidated), DELETE /api-keys/:id (revoke), PATCH /api-keys/:id/scopes, PATCH /api-keys/:id/rate-limit, GET /api-keys/usage-analytics.
+- Real scopes: api.read api.write users.read users.write users.delete roles.read roles.manage keys.read keys.create keys.rotate keys.revoke keys.scopes.update logs.read logs.export database.read database.write system.read system.manage security.read security.manage bot.execute analytics.read webhooks.manage settings.read settings.write admin.all.
+- Scopes are enforced server-side (assertGrantableScopes): a USER account can never hold admin-only scopes (users.write, users.delete, roles.*, logs.*, database.*, system.manage, security.*, keys.scopes.update, settings.write, admin.all).
+- Key-authenticated public endpoints: GET /public/ping, /public/me, /public/status (needs api.read), /public/quota.
+
+BOT GATEWAY
+- POST /bot/execute {platform: 'whatsapp'|'discord'|'telegram', command, payload} requires scope bot.execute; GET /bot/status.
+
+WEBHOOKS: GET/POST /webhooks, POST /webhooks/:id/test.
+
+COMMENTS (under docs pages)
+- GET /comments/:docId, POST /comments/:docId {body} (registered users only, 2-2000 chars), DELETE /comments/:id (author or admin).
+
+AI, SEARCH & CHAT
+- POST /ai/chat {prompt, persona, toneStyle, stream?} \u2014 personas: code|api|security|analyst|docs|video|admin; tones: architect|security|developer|bot|arabic; stream:true returns an SSE stream of deltas.
+- POST /ai/diagnose-fix {code, language, analysisMode} \u2014 static local analysis (brackets, secrets, auth, rate-limit, type-safety) plus an AI refactor proposal.
+- GET /search/semantic (alias /semantic-search) {q} \u2014 semantic documentation search.
+- GET /youtube/search?q=&limit= \u2014 live YouTube results.
+- GET /ai/history and DELETE /ai/history \u2014 the signed-in user's own chat history.
+
+ADMIN (role ADMIN only): /admin/users, /admin/users/:id/role, /admin/logs, /admin/logs/export, /admin/statistics, /admin/emergency, /admin/feature-flags, /admin/suggestions.
+
+RATE LIMITS (requests per minute per IP): default 300; /public 1200; /auth 60; /ai 60; /bot 120; /comments 30. Each API key additionally has its own rateLimit/burstLimit.
+
+SYSTEM: GET /health, GET /ready (readiness: database, auth, AI provider), GET /status.
+
+DOCS UI SECTIONS: overview, authentication, scopes, endpoints, webhooks, bots, errors, sdks, comments.
+=== END REFERENCE ===`;
+async function prepareAiQuery(options) {
+  const { persona, toneStyle = "developer", prompt, enableVideoSearch } = options;
   const isVideoQuery = enableVideoSearch || persona === "video" || /\b(video|videos|tutorial|tutorials|youtube|watch|walkthrough|screencast|guide|setup|course|learn)\b/i.test(prompt) || /[\u0600-\u06FF]/.test(prompt) && /(فيديو|فيديوهات|شرح|مرئي|يوتيوب|دروس|دورة|تطبيق|مشاهدة)/i.test(prompt);
   let retrievedVideos = void 0;
   let videoQueryStr = void 0;
@@ -1734,11 +1847,20 @@ async function processAiQuery(options) {
     arabic: `Tone & Language: \u0645\u0647\u0646\u062F\u0633 \u0628\u0631\u0645\u062C\u064A\u0627\u062A \u0648\u0646\u0638\u0645 \u062E\u0628\u064A\u0631 \u064A\u062A\u062D\u062F\u062B \u0628\u0627\u0644\u0644\u063A\u0629 \u0627\u0644\u0639\u0631\u0628\u064A\u0629 \u0627\u0644\u0641\u0635\u062D\u0649 \u0645\u0639 \u0627\u0644\u0645\u0635\u0637\u0644\u062D\u0627\u062A \u0627\u0644\u062A\u0642\u0646\u064A\u0629 \u0627\u0644\u062F\u0642\u064A\u0642\u0629. \u0627\u0634\u0631\u062D \u0627\u0644\u0643\u0648\u062F \u0648\u0637\u0631\u0642 \u0627\u0644\u0631\u0628\u0637 \u0645\u0639 \u0645\u0646\u0635\u0629 \u0641\u0627\u0646\u064A\u062A\u0627\u0633 (Vanitas Central API) \u0628\u0623\u0633\u0644\u0648\u0628 \u0627\u062D\u062A\u0631\u0627\u0641\u064A \u0645\u0639 \u0625\u0639\u0637\u0627\u0621 \u0623\u0645\u062B\u0644\u0629 \u0628\u0631\u0645\u062C\u064A\u0629 \u0643\u0627\u0645\u0644\u0629 \u0648\u062D\u0644\u0648\u0644 \u0644\u0644\u0623\u062E\u0637\u0627\u0621.`
   };
   let selectedInstruction = `${baseInstructions[persona] || baseInstructions.code}
-${toneModifiers[toneStyle] || ""}`;
+${toneModifiers[toneStyle] || ""}
+
+${SITE_FACTS}`;
   if (retrievedVideos && retrievedVideos.length > 0) {
     selectedInstruction += `
 Note: ${retrievedVideos.length} educational YouTube video tutorials have been retrieved and will be displayed in interactive cards directly within the user interface. Reference the educational topics and offer practical implementation steps.`;
   }
+  return { instruction: selectedInstruction, videos: retrievedVideos, videoQuery: videoQueryStr };
+}
+async function runFullQuery(options, prep) {
+  const { persona, toneStyle = "developer", prompt, context, enableWebSearch } = options;
+  const selectedInstruction = prep.instruction;
+  const retrievedVideos = prep.videos;
+  const videoQueryStr = prep.videoQuery;
   const ollamaText = await queryOllama(selectedInstruction, prompt);
   if (ollamaText) {
     return { text: ollamaText, videos: retrievedVideos, videoQuery: videoQueryStr };
@@ -1792,11 +1914,38 @@ Note: ${retrievedVideos.length} educational YouTube video tutorials have been re
     return { text: freeText, videos: retrievedVideos, videoQuery: videoQueryStr };
   }
   const fallback = generateFallbackResponse(persona, toneStyle, prompt, context);
+  const notice = /[\u0600-\u06FF]/.test(prompt) ? "> \u26A0\uFE0F \u0627\u0644\u0645\u062D\u0631\u0643 \u0627\u0644\u0633\u062D\u0627\u0628\u064A \u0645\u0624\u0642\u062A\u0627\u064B \u063A\u064A\u0631 \u0645\u062A\u0627\u062D \u0627\u0644\u0622\u0646 \u2014 \u0647\u0630\u0647 \u0627\u0644\u0625\u062C\u0627\u0628\u0629 \u0645\u0646 \u0642\u0627\u0639\u062F\u0629 \u0627\u0644\u0645\u0639\u0631\u0641\u0629 \u0627\u0644\u0645\u062D\u0644\u064A\u0629 \u0627\u0644\u0645\u062F\u0645\u062C\u0629 \u0641\u064A \u0627\u0644\u0645\u0646\u0635\u0629.\n\n" : "> \u26A0\uFE0F The live AI engine is temporarily unreachable \u2014 this reply comes from the platform's built-in local knowledge base.\n\n";
   return {
     ...fallback,
+    text: `${notice}${fallback.text}`,
     videos: retrievedVideos,
     videoQuery: videoQueryStr
   };
+}
+async function processAiQuery(options) {
+  const prep = await prepareAiQuery(options);
+  return runFullQuery(options, prep);
+}
+async function processAiQueryStream(options, onDelta) {
+  const prep = await prepareAiQuery(options);
+  let emitted = false;
+  const emit = (chunk) => {
+    emitted = true;
+    onDelta(chunk);
+  };
+  const needsGeminiGrounding = !!options.enableWebSearch && process.env.AI_PROVIDER !== "ollama" && !!getAiClient();
+  if (!needsGeminiGrounding) {
+    let streamed = await queryOllamaStream(prep.instruction, options.prompt, emit);
+    if (streamed === null && !emitted) {
+      streamed = await queryPollinationsStream(prep.instruction, options.prompt, emit);
+    }
+    if (streamed !== null) {
+      return { text: streamed, videos: prep.videos, videoQuery: prep.videoQuery };
+    }
+  }
+  const full = await runFullQuery(options, prep);
+  if (full.text && !emitted) onDelta(full.text);
+  return full;
 }
 function generateFallbackResponse(persona, toneStyle, prompt, _context) {
   const p = prompt.toLowerCase().trim();
@@ -2423,195 +2572,159 @@ Respond in valid JSON only with this structure:
   };
 }
 async function searchYouTubeVideos(query, maxResults = 6) {
+  const trimmedQuery = query.trim();
+  if (!trimmedQuery) {
+    return {
+      query,
+      videos: [],
+      totalResults: 0,
+      searchEngine: "none",
+      aiSummary: "Enter a topic to search live YouTube results."
+    };
+  }
   const youtubeApiKey = process.env.YOUTUBE_API_KEY;
-  const ai = getAiClient();
-  const defaultVideos = [
-    {
-      id: "vid_quickstart_01",
-      title: "Vanitas Central API Gateway: Full Setup, JWT Auth & Scope Governance",
-      description: "Comprehensive walkthrough on issuing scoped API keys, configuring sliding window rate limiting, and building resilient clients.",
-      channelTitle: "Vanitas Developer Network",
-      publishedAt: "2026-05-10T14:00:00Z",
-      thumbnailUrl: "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=640&auto=format&fit=crop",
-      videoUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-      embedUrl: "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
-      duration: "14:25",
-      views: "42.8K",
-      tags: ["API Gateway", "JWT Auth", "Security", "TypeScript"],
-      aiTakeaway: "Learn how to generate scoped credentials, configure burst limits, and monitor traffic in real-time."
-    },
-    {
-      id: "vid_bot_02",
-      title: "Building Discord & WhatsApp Autonomous Bots with Vanitas Gateway",
-      description: "How to route multi-tenant slash commands, process encrypted webhooks, and trigger background agent tasks.",
-      channelTitle: "Cloud Architect Guild",
-      publishedAt: "2026-06-22T09:30:00Z",
-      thumbnailUrl: "https://images.unsplash.com/photo-1526374965328-7f61d4dc18c5?q=80&w=640&auto=format&fit=crop",
-      videoUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-      embedUrl: "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
-      duration: "18:50",
-      views: "29.1K",
-      tags: ["Discord Bot", "WhatsApp API", "Webhooks", "Automation"],
-      aiTakeaway: "Step-by-step webhook dispatch architecture and message signing with HMAC-SHA256."
-    },
-    {
-      id: "vid_database_03",
-      title: "Connecting Free Cloud Databases (Supabase & Neon PostgreSQL) to APIs",
-      description: "Provisioning zero-cost serverless PostgreSQL clusters, handling connection pooling, and live schema migrations.",
-      channelTitle: "Database Sovereignty",
-      publishedAt: "2026-07-04T16:15:00Z",
-      thumbnailUrl: "https://images.unsplash.com/photo-1558494949-ef010cbdcc31?q=80&w=640&auto=format&fit=crop",
-      videoUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-      embedUrl: "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
-      duration: "22:10",
-      views: "65.3K",
-      tags: ["Supabase", "Neon Postgres", "Free Tier", "SQL"],
-      aiTakeaway: "Deploy high-throughput serverless Postgres databases with zero upfront infrastructure cost."
-    },
-    {
-      id: "vid_ratelimit_04",
-      title: "High-Throughput Rate Limiting with Upstash Redis and Sliding Window",
-      description: "Defend public API gateways against DDoS attacks and brute-force traffic spikes using distributed Redis atomics.",
-      channelTitle: "Edge Security Masters",
-      publishedAt: "2026-07-18T12:00:00Z",
-      thumbnailUrl: "https://images.unsplash.com/photo-1544197150-b99a580bb7a8?q=80&w=640&auto=format&fit=crop",
-      videoUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-      embedUrl: "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
-      duration: "19:45",
-      views: "51.2K",
-      tags: ["Rate Limiting", "Upstash Redis", "DDoS Protection", "Node.js"],
-      aiTakeaway: "Implement sub-millisecond sliding window algorithms to throttle abusive callers gracefully."
-    },
-    {
-      id: "vid_clients_05",
-      title: "Modern Mobile & Desktop Client Deployment (Android APK & Windows EXE)",
-      description: "Deep dive into Android 14/15 ARM64 optimizations, Windows 11 Mica glass acrylic effects, and cryptographic binary signing.",
-      channelTitle: "Native Systems Engineering",
-      publishedAt: "2026-08-01T11:00:00Z",
-      thumbnailUrl: "https://images.unsplash.com/photo-1517694712202-14dd9538aa97?q=80&w=640&auto=format&fit=crop",
-      videoUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-      embedUrl: "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
-      duration: "16:40",
-      views: "38.7K",
-      tags: ["Android APK", "Windows EXE", "Modern UI", "DirectX"],
-      aiTakeaway: "Configuring ARM64 native binaries and Windows DirectComposition for high-FPS desktop UI."
-    },
-    {
-      id: "vid_arabic_06",
-      title: "\u0634\u0631\u062D \u0634\u0627\u0645\u0644: \u0628\u0646\u0627\u0621 \u0648\u0631\u0628\u0637 \u0628\u0648\u0627\u0628\u0627\u062A \u0627\u0644\u0640 API \u0648\u0627\u0644\u0645\u0641\u0627\u062A\u064A\u062D \u0627\u0644\u0645\u0634\u0641\u0631\u0629 \u0648\u062D\u0645\u0627\u064A\u062A\u0647\u0627 \u0645\u0646 \u0627\u0644\u0627\u062E\u062A\u0631\u0627\u0642",
-      description: "\u062F\u0644\u064A\u0644 \u0639\u0645\u0644\u064A \u0628\u0627\u0644\u0644\u063A\u0629 \u0627\u0644\u0639\u0631\u0628\u064A\u0629 \u0644\u0634\u0631\u062D \u0643\u064A\u0641\u064A\u0629 \u062A\u062F\u0648\u064A\u0631 \u0627\u0644\u0645\u0641\u0627\u062A\u064A\u062D \u0627\u0644\u0633\u0631\u064A\u0629 \u0648\u0627\u0633\u062A\u062E\u062F\u0627\u0645 Scopes \u0648\u062A\u0623\u0645\u064A\u0646 \u0627\u0644\u0640 Webhooks.",
-      channelTitle: "\u0623\u0643\u0627\u062F\u064A\u0645\u064A\u0629 \u0627\u0644\u0633\u062D\u0627\u0628 \u0648\u0627\u0644\u0628\u0631\u0645\u062C\u0629",
-      publishedAt: "2026-08-12T15:20:00Z",
-      thumbnailUrl: "https://images.unsplash.com/photo-1550751827-4bd374c3f58b?q=80&w=640&auto=format&fit=crop",
-      videoUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-      embedUrl: "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
-      duration: "28:15",
-      views: "74.9K",
-      tags: ["\u062A\u0639\u0644\u064A\u0645 \u0628\u0631\u0645\u062C\u0629", "\u0634\u0631\u062D \u0639\u0631\u0628\u064A", "\u0623\u0645\u0627\u0646 API", "\u0628\u0648\u062A\u0627\u062A"],
-      aiTakeaway: "\u062E\u0637\u0648\u0627\u062A \u0639\u0645\u0644\u064A\u0629 \u0644\u0631\u0628\u0637 \u062E\u0648\u0627\u062F\u0645 \u0627\u0644\u0640 Backend \u0645\u0639 \u0642\u0648\u0627\u0639\u062F \u0627\u0644\u0628\u064A\u0627\u0646\u0627\u062A \u0627\u0644\u0645\u0634\u0641\u0631\u0629 \u0648\u0627\u0644\u062A\u062D\u0643\u0645 \u0628\u0627\u0644\u0635\u0644\u0627\u062D\u064A\u0627\u062A."
-    }
-  ];
-  if (youtubeApiKey && query.trim()) {
+  if (youtubeApiKey) {
     try {
       const url = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&maxResults=${maxResults}&q=${encodeURIComponent(
-        query + " tutorial development"
+        trimmedQuery + " tutorial"
       )}&key=${youtubeApiKey}`;
-      const resp = await fetch(url);
+      const resp = await fetch(url, { signal: AbortSignal.timeout(1e4) });
       if (resp.ok) {
         const data = await resp.json();
-        if (data.items && Array.isArray(data.items) && data.items.length > 0) {
-          const mappedVideos = data.items.map((item) => {
+        const items = Array.isArray(data.items) ? data.items : [];
+        if (items.length > 0) {
+          const mapped = items.map((item) => {
             const videoId = item.id?.videoId || item.id;
             return {
               id: videoId,
-              title: item.snippet?.title || "YouTube Tutorial",
-              description: item.snippet?.description || "Educational developer video walkthrough.",
-              channelTitle: item.snippet?.channelTitle || "YouTube Creator",
-              publishedAt: item.snippet?.publishedAt || (/* @__PURE__ */ new Date()).toISOString(),
-              thumbnailUrl: item.snippet?.thumbnails?.high?.url || item.snippet?.thumbnails?.medium?.url || "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=640&auto=format&fit=crop",
+              title: decodeHtmlEntities(item.snippet?.title || "YouTube video"),
+              description: decodeHtmlEntities(item.snippet?.description || ""),
+              channelTitle: item.snippet?.channelTitle || "YouTube",
+              publishedAt: item.snippet?.publishedAt || "",
+              thumbnailUrl: item.snippet?.thumbnails?.high?.url || item.snippet?.thumbnails?.medium?.url || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
               videoUrl: `https://www.youtube.com/watch?v=${videoId}`,
               embedUrl: `https://www.youtube-nocookie.com/embed/${videoId}`,
-              duration: "15:00",
-              views: "25K+",
-              tags: ["YouTube Data API", "Tutorial", "Dev"],
-              aiTakeaway: `Step-by-step guidance on ${query} directly from ${item.snippet?.channelTitle || "verified channel"}.`
+              tags: []
             };
           });
           return {
             query,
-            videos: mappedVideos,
-            totalResults: mappedVideos.length,
-            searchEngine: "youtube_direct",
-            aiSummary: `Retrieved ${mappedVideos.length} live tutorials from YouTube Data API v3 matching "${query}".`
+            videos: mapped,
+            totalResults: mapped.length,
+            searchEngine: "youtube_api",
+            aiSummary: `Retrieved ${mapped.length} live results from the YouTube Data API for "${query}".`
           };
         }
       }
     } catch (ytApiErr) {
-      console.warn("YouTube Data API direct call error, falling back to Gemini semantic search:", ytApiErr);
+      console.warn("YouTube Data API call failed; trying the keyless live search:", ytApiErr);
     }
   }
-  if (ai && query.trim()) {
-    try {
-      const prompt = `You are a YouTube semantic video search engine and developer education specialist.
-The user is searching for educational video tutorials related to: "${query}"
-
-Generate 4 to 6 highly relevant, accurate, and realistic technical YouTube video tutorial cards that directly address this learning need.
-Include practical technical titles, channel names (or prominent tech creators/institutions), realistic durations, tags, and a crisp 1-sentence actionable AI educational takeaway ("aiTakeaway").
-
-Respond with a valid JSON object matching this schema:
-{
-  "aiSummary": "1-2 sentence overview of what these video tutorials cover and recommended sequence",
-  "videos": [
-    {
-      "id": "vid_semantic_id",
-      "title": "Clear technical video title",
-      "description": "2-3 sentence overview of what is covered in the video tutorial",
-      "channelTitle": "Channel Name or Technology Organization",
-      "publishedAt": "2026-06-01T00:00:00Z",
-      "thumbnailUrl": "https://images.unsplash.com/photo-1526374965328-7f61d4dc18c5?q=80&w=640&auto=format&fit=crop",
-      "videoUrl": "https://www.youtube.com/results?search_query=...",
-      "embedUrl": "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
-      "duration": "16:20",
-      "views": "34.5K",
-      "tags": ["Topic1", "Topic2", "Topic3"],
-      "aiTakeaway": "Actionable takeaway: Key concept, security practice, or pattern taught in this video"
+  try {
+    const videos = await searchYouTubeKeyless(trimmedQuery, maxResults);
+    if (videos.length > 0) {
+      return {
+        query,
+        videos,
+        totalResults: videos.length,
+        searchEngine: "youtube_keyless",
+        aiSummary: `Found ${videos.length} live YouTube results for "${query}" (real-time search, no API key).`
+      };
     }
-  ]
-}`;
-      const response = await ai.models.generateContent({
-        model: "gemini-3.7-flash",
-        contents: prompt,
-        config: {
-          temperature: 0.3,
-          responseMimeType: "application/json"
-        }
-      });
-      const parsed = JSON.parse(response.text || "{}");
-      if (parsed.videos && Array.isArray(parsed.videos) && parsed.videos.length > 0) {
-        return {
-          query,
-          videos: parsed.videos.slice(0, maxResults),
-          totalResults: parsed.videos.length,
-          searchEngine: "gemini_grounded",
-          aiSummary: parsed.aiSummary || `Found ${parsed.videos.length} video guides for "${query}".`
-        };
-      }
-    } catch (e) {
-      console.warn("Gemini YouTube video search fallback:", e);
-    }
+  } catch (keylessErr) {
+    console.warn("Keyless YouTube search failed:", keylessErr);
   }
-  const qLower = query.toLowerCase();
-  const filtered = defaultVideos.filter(
-    (v) => v.title.toLowerCase().includes(qLower) || v.description.toLowerCase().includes(qLower) || v.tags.some((t) => t.toLowerCase().includes(qLower)) || qLower.includes("bot") && v.id.includes("bot") || qLower.includes("database") && v.id.includes("database") || qLower.includes("supabase") && v.id.includes("database") || qLower.includes("postgres") && v.id.includes("database") || qLower.includes("key") && v.id.includes("quickstart") || qLower.includes("rate") && v.id.includes("ratelimit") || qLower.includes("client") && v.id.includes("clients") || qLower.includes("android") && v.id.includes("clients") || qLower.includes("windows") && v.id.includes("clients") || qLower.includes("\u0634\u0631\u062D") && v.id.includes("arabic")
-  );
-  const finalVideos = filtered.length > 0 ? filtered : defaultVideos;
   return {
     query,
-    videos: finalVideos.slice(0, maxResults),
-    totalResults: finalVideos.length,
-    searchEngine: "youtube_direct",
-    aiSummary: `Showing educational tutorials matching "${query}".`
+    videos: [],
+    totalResults: 0,
+    searchEngine: "none",
+    aiSummary: `No live YouTube results could be retrieved for "${query}" right now. Please try again in a moment.`
   };
+}
+function decodeHtmlEntities(text) {
+  return String(text).replace(/&quot;/g, '"').replace(/&#0?39;|&#x27;/g, "'").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&nbsp;/g, " ");
+}
+async function searchYouTubeKeyless(query, maxResults) {
+  const response = await fetch(`https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+      "Accept-Language": "en-US,en;q=0.9",
+      Accept: "text/html,application/xhtml+xml"
+    },
+    signal: AbortSignal.timeout(12e3)
+  });
+  if (!response.ok) return [];
+  const html = await response.text();
+  const marker = "var ytInitialData = ";
+  const start = html.indexOf(marker);
+  if (start === -1) return [];
+  const jsonStart = start + marker.length;
+  let depth = 0;
+  let end = -1;
+  let inString = false;
+  let escaped = false;
+  for (let i = jsonStart; i < html.length; i++) {
+    const ch = html[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) {
+        end = i + 1;
+        break;
+      }
+    }
+  }
+  if (end === -1) return [];
+  const data = JSON.parse(html.slice(jsonStart, end));
+  const results = [];
+  const visit = (node) => {
+    if (!node || results.length >= maxResults * 3) return;
+    if (Array.isArray(node)) {
+      for (const item of node) visit(item);
+      return;
+    }
+    if (typeof node !== "object") return;
+    if (node.videoRenderer) {
+      const vr = node.videoRenderer;
+      const id = vr.videoId;
+      const title = vr.title?.runs?.[0]?.text || vr.title?.simpleText || "";
+      if (id && title) {
+        const description = vr.descriptionSnippet?.runs?.map((r) => r.text).join("") || vr.detailedMetadataSnippets?.[0]?.snippetText?.runs?.map((r) => r.text).join("") || "";
+        results.push({
+          id,
+          title: decodeHtmlEntities(title),
+          description: decodeHtmlEntities(description),
+          channelTitle: decodeHtmlEntities(
+            vr.ownerText?.runs?.[0]?.text || vr.longBylineText?.runs?.[0]?.text || "YouTube"
+          ),
+          publishedAt: vr.publishedTimeText?.simpleText || "",
+          thumbnailUrl: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
+          videoUrl: `https://www.youtube.com/watch?v=${id}`,
+          embedUrl: `https://www.youtube-nocookie.com/embed/${id}`,
+          duration: vr.lengthText?.simpleText || "",
+          views: vr.viewCountText?.simpleText || ""
+        });
+      }
+      return;
+    }
+    for (const key of Object.keys(node)) visit(node[key]);
+  };
+  visit(data);
+  const seen = /* @__PURE__ */ new Set();
+  const unique = results.filter((v) => {
+    if (seen.has(v.id)) return false;
+    seen.add(v.id);
+    return true;
+  });
+  return unique.slice(0, maxResults);
 }
 
 // src/server/apiKeyAuth.ts
@@ -2986,6 +3099,79 @@ async function deleteComment(id, actor) {
   await databasePool.query("delete from public.comments where id = $1", [id]);
   return "deleted";
 }
+var memoryAiChat = [];
+var AI_HISTORY_PAGE = 100;
+var AI_HISTORY_RETAIN = 400;
+function mapAiChatRow(row) {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    role: row.role,
+    content: row.content,
+    persona: row.persona || "",
+    createdAt: row.created_at
+  };
+}
+async function listAiChatHistory(userId) {
+  if (!databasePool) {
+    return memoryAiChat.filter((m) => m.userId === userId).slice(-AI_HISTORY_PAGE);
+  }
+  await ensureSchema();
+  const result = await databasePool.query(
+    `select * from (
+       select * from public.ai_chat_messages where user_id = $1
+       order by created_at desc limit $2
+     ) page order by created_at asc`,
+    [userId, AI_HISTORY_PAGE]
+  );
+  return result.rows.map(mapAiChatRow);
+}
+async function appendAiChatMessage(params) {
+  const content = params.content.slice(0, 2e4).trim();
+  if (!content) return null;
+  const id = secureId("aim");
+  if (!databasePool) {
+    const message = {
+      id,
+      userId: params.userId,
+      role: params.role,
+      content,
+      persona: params.persona || "",
+      createdAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    memoryAiChat.push(message);
+    const mine = memoryAiChat.filter((m) => m.userId === params.userId);
+    if (mine.length > AI_HISTORY_RETAIN) {
+      const excessIds = new Set(mine.slice(0, mine.length - AI_HISTORY_RETAIN).map((m) => m.id));
+      for (let i = memoryAiChat.length - 1; i >= 0; i--) {
+        if (excessIds.has(memoryAiChat[i].id)) memoryAiChat.splice(i, 1);
+      }
+    }
+    return message;
+  }
+  await ensureSchema();
+  const result = await databasePool.query(
+    `insert into public.ai_chat_messages (id, user_id, role, content, persona)
+     values ($1, $2, $3, $4, $5) returning *`,
+    [id, params.userId, params.role, content, params.persona || ""]
+  );
+  return mapAiChatRow(result.rows[0]);
+}
+async function clearAiChatHistory(userId) {
+  if (!databasePool) {
+    let removed = 0;
+    for (let i = memoryAiChat.length - 1; i >= 0; i--) {
+      if (memoryAiChat[i].userId === userId) {
+        memoryAiChat.splice(i, 1);
+        removed++;
+      }
+    }
+    return removed;
+  }
+  await ensureSchema();
+  const result = await databasePool.query("delete from public.ai_chat_messages where user_id = $1", [userId]);
+  return Number(result.rowCount || 0);
+}
 async function buildApp() {
   const app = (0, import_express.default)();
   const PORT = Number(process.env.PORT) || 3e3;
@@ -3262,6 +3448,9 @@ async function buildApp() {
       if (!databasePool) {
         for (let i = memoryComments.length - 1; i >= 0; i--) {
           if (memoryComments[i].userId === actor.id) memoryComments.splice(i, 1);
+        }
+        for (let i = memoryAiChat.length - 1; i >= 0; i--) {
+          if (memoryAiChat[i].userId === actor.id) memoryAiChat.splice(i, 1);
         }
       }
       res.json({ success: true });
@@ -4054,6 +4243,28 @@ async function buildApp() {
       timestamp: (/* @__PURE__ */ new Date()).toISOString()
     });
   });
+  app.get("/api/v1/ai/history", async (req, res) => {
+    try {
+      const actor = getActorUser(req);
+      if (!actor) return res.status(401).json({ error: "Authentication required" });
+      const messages = await listAiChatHistory(actor.id);
+      res.json({ messages });
+    } catch (err) {
+      console.error("[ai/history]", err?.message);
+      res.status(500).json({ error: "Failed loading chat history" });
+    }
+  });
+  app.delete("/api/v1/ai/history", async (req, res) => {
+    try {
+      const actor = getActorUser(req);
+      if (!actor) return res.status(401).json({ error: "Authentication required" });
+      const removed = await clearAiChatHistory(actor.id);
+      res.json({ success: true, removed });
+    } catch (err) {
+      console.error("[ai/history]", err?.message);
+      res.status(500).json({ error: "Failed clearing chat history" });
+    }
+  });
   app.post("/api/v1/ai/chat", async (req, res) => {
     try {
       const persona = sanitizeText(req.body?.persona, 32) || "code";
@@ -4063,14 +4274,67 @@ async function buildApp() {
       if (!["code", "api", "security", "analyst", "docs", "video", "admin"].includes(persona)) {
         return res.status(400).json({ error: "Invalid persona" });
       }
-      const response = await processAiQuery({
+      const actor = getActorUser(req);
+      const queryOptions = {
         persona,
         toneStyle: ["architect", "security", "developer", "bot", "arabic"].includes(toneStyle) ? toneStyle : "developer",
         prompt,
         enableWebSearch: !!req.body?.enableWebSearch,
         enableVideoSearch: !!req.body?.enableVideoSearch,
         context: typeof req.body?.context === "object" ? req.body.context : void 0
-      });
+      };
+      if (actor) {
+        try {
+          await appendAiChatMessage({ userId: actor.id, role: "user", content: prompt, persona });
+        } catch (histErr) {
+          console.warn("[ai/chat] history save (user) failed:", histErr?.message);
+        }
+      }
+      if (req.body?.stream === true) {
+        res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+        res.setHeader("Cache-Control", "no-cache, no-transform");
+        res.setHeader("Connection", "keep-alive");
+        res.setHeader("X-Accel-Buffering", "no");
+        const send = (payload) => res.write(`data: ${JSON.stringify(payload)}
+
+`);
+        let streamedText = "";
+        try {
+          const response2 = await processAiQueryStream(queryOptions, (delta) => {
+            if (!delta) return;
+            streamedText += delta;
+            send({ type: "delta", t: delta });
+          });
+          const finalText = (response2.text || streamedText).trim();
+          if (actor && finalText) {
+            try {
+              await appendAiChatMessage({ userId: actor.id, role: "ai", content: finalText, persona });
+            } catch (histErr) {
+              console.warn("[ai/chat] history save (ai) failed:", histErr?.message);
+            }
+          }
+          send({
+            type: "done",
+            text: finalText,
+            groundingSources: response2.groundingSources,
+            videos: response2.videos,
+            videoQuery: response2.videoQuery,
+            requiresConfirmation: response2.requiresConfirmation
+          });
+        } catch (streamErr) {
+          console.error("[ai/chat] stream]", streamErr?.message);
+          send({ type: "error", message: "The AI engine failed to respond. Please try again." });
+        }
+        return res.end();
+      }
+      const response = await processAiQuery(queryOptions);
+      if (actor && response.text) {
+        try {
+          await appendAiChatMessage({ userId: actor.id, role: "ai", content: response.text, persona });
+        } catch (histErr) {
+          console.warn("[ai/chat] history save (ai) failed:", histErr?.message);
+        }
+      }
       res.json(response);
     } catch (err) {
       console.error("[ai/chat]", err?.message);
@@ -4270,11 +4534,34 @@ async function buildApp() {
     });
     res.status(201).json({ success: true, database: created });
   });
-  app.get("/api/v1/videos/tutorials", (_req, res) => {
-    res.json({
-      success: true,
-      tutorials: db.videoTutorials
-    });
+  let tutorialsCache = null;
+  app.get("/api/v1/videos/tutorials", async (_req, res) => {
+    try {
+      if (tutorialsCache && Date.now() - tutorialsCache.at < 5 * 6e4) {
+        return res.json(tutorialsCache.payload);
+      }
+      const result = await searchYouTubeVideos("build REST API authentication tutorial", 8);
+      const tutorials = result.videos.map((v) => ({
+        id: `yt_${v.id}`,
+        title: v.title,
+        description: v.description || "Live YouTube tutorial result.",
+        category: "getting_started",
+        duration: v.duration || "",
+        thumbnailUrl: v.thumbnailUrl,
+        videoEmbedUrl: v.embedUrl,
+        youtubeId: v.id,
+        badge: "Live on YouTube",
+        author: v.channelTitle,
+        tags: ["YouTube", "Tutorial"],
+        highlights: []
+      }));
+      const payload = { success: true, tutorials, source: result.searchEngine, summary: result.aiSummary };
+      tutorialsCache = { at: Date.now(), payload };
+      res.json(payload);
+    } catch (err) {
+      console.error("[videos/tutorials]", err?.message);
+      res.json({ success: true, tutorials: [] });
+    }
   });
   app.get("/api/v1/download/releases", (_req, res) => {
     res.json({

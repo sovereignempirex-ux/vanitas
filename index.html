@@ -4,19 +4,91 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Vanitas — Centralized API & Developer Platform</title>
-    <meta name="description" content="Vanitas is a centralized platform connecting website, bot, mobile, and desktop applications through a unified secure API." />
+    <meta name="description" content="Vanitas is a centralized platform connecting website, bot, mobile, and desktop applications through a unified secure API — scoped keys, rate limits, webhooks, audit logs and a site-aware AI copilot." />
     <meta name="theme-color" content="#05070e" />
+    <meta name="robots" content="index, follow, max-image-preview:large" />
+    <meta name="keywords" content="Vanitas, API gateway, centralized API, developer platform, API keys, granular scopes, rate limiting, webhooks, bot gateway, audit logs, AI assistant" />
+    <meta name="author" content="Vanitas" />
+    <link rel="canonical" href="https://vanitas-bot.vercel.app/" />
+
+    <!-- Open Graph -->
     <meta property="og:title" content="Vanitas — Centralized API & Developer Platform" />
     <meta property="og:description" content="One unified gateway for web, bots, mobile and desktop — secure API, live audit and AI." />
     <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://vanitas-bot.vercel.app/" />
+    <meta property="og:site_name" content="Vanitas" />
+    <meta property="og:locale" content="en_US" />
+    <meta property="og:image" content="https://vanitas-bot.vercel.app/images/overview-hero.jpg" />
+    <meta property="og:image:alt" content="Vanitas platform dashboard overview" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+
+    <!-- Twitter -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Vanitas — Centralized API & Developer Platform" />
+    <meta name="twitter:description" content="One unified gateway for web, bots, mobile and desktop — secure API, live audit and AI." />
+    <meta name="twitter:image" content="https://vanitas-bot.vercel.app/images/overview-hero.jpg" />
+
     <link rel="icon" type="image/png" href="https://i.postimg.cc/SNN169kT/orders.png" />
+    <link rel="apple-touch-icon" href="https://i.postimg.cc/SNN169kT/orders.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700;900&family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@graph": [
+        {
+          "@type": "WebSite",
+          "name": "Vanitas",
+          "alternateName": "Vanitas Central",
+          "url": "https://vanitas-bot.vercel.app/",
+          "description": "Centralized platform connecting website, bot, mobile, and desktop applications through a unified secure API.",
+          "inLanguage": "en",
+          "publisher": {
+            "@type": "Organization",
+            "name": "Vanitas",
+            "url": "https://vanitas-bot.vercel.app/"
+          }
+        },
+        {
+          "@type": "SoftwareApplication",
+          "name": "Vanitas",
+          "applicationCategory": "DeveloperApplication",
+          "operatingSystem": "Web",
+          "url": "https://vanitas-bot.vercel.app/",
+          "description": "Unified API gateway with scoped keys, per-key rate limits, webhooks, bot gateway, audit logs and an integrated AI copilot.",
+          "featureList": "Scoped API keys, rate limiting, webhooks, bot gateway, audit logs, semantic documentation search, AI copilot with streaming replies, two-factor authentication, social login",
+          "offers": {
+            "@type": "Offer",
+            "price": "0",
+            "priceCurrency": "USD"
+          },
+          "publisher": {
+            "@type": "Organization",
+            "name": "Vanitas",
+            "url": "https://vanitas-bot.vercel.app/"
+          }
+        },
+        {
+          "@type": "WebApplication",
+          "name": "Vanitas AI Copilot",
+          "url": "https://vanitas-bot.vercel.app/",
+          "applicationCategory": "BusinessApplication",
+          "description": "Site-aware AI assistant with streaming replies, code diagnosis, Arabic support and grounded platform knowledge.",
+          "offers": {
+            "@type": "Offer",
+            "price": "0",
+            "priceCurrency": "USD"
+          }
+        }
+      ]
+    }
+    </script>
   </head>
   <body class="bg-[#060913] text-slate-100 selection:bg-blue-600/30 selection:text-blue-200 antialiased overflow-x-hidden">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-

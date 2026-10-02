@@ -19,7 +19,6 @@ import {
   ApiKeyUsageSummary,
   ProductSuggestion,
   ExternalDatabaseConfig,
-  VideoTutorialItem,
 } from '../types.ts';
 
 export const ALL_SCOPES: { scope: PermissionScope; label: string; group: string; adminOnly: boolean }[] = [
@@ -621,85 +620,6 @@ export class VanitasDatabase {
       storageMaxMb: 1000.0,
       sslEnabled: true,
       lastTestedAt: new Date(Date.now() - 1000 * 60 * 45).toISOString(),
-    },
-  ];
-
-  videoTutorials: VideoTutorialItem[] = [
-    {
-      id: 'vid_01_welcome',
-      title: 'Vanitas Central API Gateway: Full Setup, Auth & Scopes',
-      titleArabic: 'شرح منصة فانيتاس المركزية: التثبيت، التوثيق وصلاحيات المفاتيح',
-      description: 'Master the core architecture of Vanitas API Gateway, generating scoped keys, setting burst limits, and monitoring telemetry.',
-      category: 'getting_started',
-      duration: '14:20',
-      thumbnailUrl: 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=640&auto=format&fit=crop',
-      videoEmbedUrl: 'https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ',
-      youtubeId: 'dQw4w9WgXcQ',
-      badge: 'Essential Guide',
-      author: 'Vanitas Core Architecture Team',
-      tags: ['API Gateway', 'Authentication', 'Scopes', 'Quickstart'],
-      highlights: [
-        'Issuing cryptographically signed API keys',
-        'Configuring sliding window rate limits',
-        'Testing endpoints in the live playground',
-      ],
-    },
-    {
-      id: 'vid_02_database',
-      title: 'Connecting Free Cloud Databases (Supabase & Neon) to Vanitas',
-      titleArabic: 'ربط قواعد البيانات السحابية المجانية (Supabase & Neon) مع السيرفر',
-      description: 'How to provision zero-cost, high-speed PostgreSQL clusters using Supabase and Neon with automatic scale-to-zero.',
-      category: 'cloud_database',
-      duration: '18:45',
-      thumbnailUrl: 'https://images.unsplash.com/photo-1558494949-ef010cbdcc31?q=80&w=640&auto=format&fit=crop',
-      videoEmbedUrl: 'https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ',
-      youtubeId: 'dQw4w9WgXcQ',
-      badge: 'Free Tier Database',
-      author: 'Database Engineering Group',
-      tags: ['PostgreSQL', 'Supabase', 'Neon', 'Free Cloud', 'SQL'],
-      highlights: [
-        'Creating free PostgreSQL instances in 30 seconds',
-        'Setting up SSL encrypted connection strings',
-        'Live schema synchronization and testing',
-      ],
-    },
-    {
-      id: 'vid_03_clients',
-      title: 'Modern Client Installation & Capabilities: Android APK & Windows EXE',
-      titleArabic: 'تثبيت وتشغيل تطبيقات الأجهزة الحديثة: أندرويد APK وويندوز EXE',
-      description: 'Explore the modern native builds for Android 14/15 ARM64 and Windows 11 Mica Glass UI with hardware acceleration.',
-      category: 'desktop_mobile',
-      duration: '12:30',
-      thumbnailUrl: 'https://images.unsplash.com/photo-1517694712202-14dd9538aa97?q=80&w=640&auto=format&fit=crop',
-      videoEmbedUrl: 'https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ',
-      youtubeId: 'dQw4w9WgXcQ',
-      badge: 'Modern Devices',
-      author: 'Native Systems Team',
-      tags: ['Android APK', 'Windows EXE', 'ARM64', 'Mica UI'],
-      highlights: [
-        'Universal ARM64 & x86_64 installation',
-        'Biometric authentication setup on mobile',
-        'DirectX hardware acceleration on Windows 11',
-      ],
-    },
-    {
-      id: 'vid_04_bots',
-      title: 'Deploying Discord & WhatsApp Bot Integrations via Webhooks',
-      titleArabic: 'ربط وتشغيل بوتات ديسكورد وواتساب عبر الويب هوك',
-      description: 'Configure real-time message routing, slash command dispatch, and encrypted HMAC webhook listeners.',
-      category: 'bots_webhooks',
-      duration: '16:10',
-      thumbnailUrl: 'https://images.unsplash.com/photo-1526374965328-7f61d4dc18c5?q=80&w=640&auto=format&fit=crop',
-      videoEmbedUrl: 'https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ',
-      youtubeId: 'dQw4w9WgXcQ',
-      badge: 'Automation',
-      author: 'Bot Ingress Engineering',
-      tags: ['Discord Bot', 'WhatsApp API', 'Webhooks', 'HMAC'],
-      highlights: [
-        'Zero-downtime webhook dispatching',
-        'Signing webhook payloads with secret keys',
-        'Automated failover & retry mechanism',
-      ],
     },
   ];
 

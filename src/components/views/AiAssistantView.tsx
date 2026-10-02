@@ -1,6 +1,8 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { api } from '../../lib/apiClient.ts';
 import { AiToneStyle, CodeDiagnosisResult, ProductSuggestion } from '../../types.ts';
+import { useAuth } from '../../context/AuthContext.tsx';
+import { Markdown } from '../Markdown.tsx';
 import {
   Sparkles,
   Send,
@@ -41,6 +43,7 @@ import {
   FileText,
   Lightbulb,
   ClipboardCheck,
+  Trash2,
 } from 'lucide-react';
 
 interface Message {
@@ -134,6 +137,16 @@ function findUserByEmail(userEmail: string) {
   },
 ];
 
+// Shown when the signed-in account has no persisted conversation yet.
+function welcomeMessage(): Message {
+  return {
+    id: 'init-1',
+    sender: 'ai',
+    text: `### 🌌 مرحباً بك في نظام الذكاء الاصطناعي لمنصة Vanitas\n\nأنا وكيل الذكاء الاصطناعي المدمج والمطور لمنصة فانيتاس المركزية. تم تزويدي بنموذج ذكاء اصطناعي مجاني مدمج (**Pollinations · بدون مفتاح**) وأدوات ذكية متخصصة:\n\n1. **مصلح الكود الذكي ومحلل الأخطاء (Automated Code Doctor)**: تحليل الكود المصدري، اكتشاف الأخطاء البرمجية (Syntax Errors) والثغرات الأمنية (Security Flaws)، واقتراح حلول التحسين وإعادة الهيكلة (Refactoring Improvements).\n2. **توليد الكود وبناء الـ Payloads**: كتابة أكواد TypeScript و Python و cURL جاهزة للإنتاج.\n3. **فحص ومصفوفة الصلاحيات**: التحقق من \`assertGrantableScopes\` ومعدلات التدفق (Rate Limits).\n4. **دعم كامل للغة العربية والإنجليزية** مع إمكانية التبديل بين أساليب الحوار (مهندس نظم، مدقق أمني، مبرمج عملي، ديمون البوت).\n\nكيف يمكنني مساعدتك اليوم؟`,
+    timestamp: new Date().toLocaleTimeString(),
+  };
+}
+
 export const AiAssistantView: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'chat' | 'code_doctor' | 'toolbelt' | 'suggestions'>('chat');
   const [persona, setPersona] = useState<'code' | 'api' | 'security' | 'analyst' | 'docs' | 'admin'>('code');
@@ -162,14 +175,43 @@ export const AiAssistantView: React.FC = () => {
   const [activeResultView, setActiveResultView] = useState<'report' | 'comparison' | 'refactored_only'>('report');
   const [highlightedLine, setHighlightedLine] = useState<number | null>(null);
 
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: 'init-1',
-      sender: 'ai',
-      text: `### 🌌 مرحباً بك في نظام الذكاء الاصطناعي لمنصة Vanitas\n\nأنا وكيل الذكاء الاصطناعي المدمج والمطور لمنصة فانيتاس المركزية. تم تزويدي بنموذج ذكاء اصطناعي مجاني مدمج (**Pollinations · بدون مفتاح**) وأدوات ذكية متخصصة:\n\n1. **مصلح الكود الذكي ومحلل الأخطاء (Automated Code Doctor)**: تحليل الكود المصدري، اكتشاف الأخطاء البرمجية (Syntax Errors) والثغرات الأمنية (Security Flaws)، واقتراح حلول التحسين وإعادة الهيكلة (Refactoring Improvements).\n2. **توليد الكود وبناء الـ Payloads**: كتابة أكواد TypeScript و Python و cURL جاهزة للإنتاج.\n3. **فحص ومصفوفة الصلاحيات**: التحقق من \`assertGrantableScopes\` ومعدلات التدفق (Rate Limits).\n4. **دعم كامل للغة العربية والإنجليزية** مع إمكانية التبديل بين أساليب الحوار (مهندس نظم، مدقق أمني، مبرمج عملي، ديمون البوت).\n\nكيف يمكنني مساعدتك اليوم؟`,
-      timestamp: new Date().toLocaleTimeString(),
-    },
-  ]);
+  const { setActiveView } = useAuth();
+  const [streamingId, setStreamingId] = useState<string | null>(null);
+  const [dismissedConfirmations, setDismissedConfirmations] = useState<string[]>([]);
+  const messagesRef = useRef<HTMLDivElement>(null);
+
+  const [messages, setMessages] = useState<Message[]>([welcomeMessage()]);
+
+  // Load the signed-in account's persisted conversation. With no history (or
+  // when signed out) the local welcome message stays.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await api.getAiHistory();
+        if (cancelled || !res.messages?.length) return;
+        setMessages(
+          res.messages.map((m) => ({
+            id: m.id,
+            sender: m.role,
+            text: m.content,
+            timestamp: new Date(m.createdAt).toLocaleTimeString(),
+          })),
+        );
+      } catch {
+        // Not signed in or offline — keep the local welcome message.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Keep the newest token in view while the answer streams in.
+  useEffect(() => {
+    const el = messagesRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages, loading]);
 
   const quickPrompts = [
     { text: 'صلح الكود البرمجي واكتشف الأخطاء والثغرات', style: 'arabic' as AiToneStyle, persona: 'code' as const },
@@ -177,6 +219,73 @@ export const AiAssistantView: React.FC = () => {
     { text: 'Explain how assertGrantableScopes prevents privilege escalation', style: 'security' as AiToneStyle, persona: 'security' as const },
     { text: 'Generate a TypeScript client for rotating keys with retry backoff', style: 'developer' as AiToneStyle, persona: 'code' as const },
   ];
+
+  // Progressive reveal — even when the provider answers in one big chunk,
+  // the reply is "written out" gradually for a live-typing feel.
+  const revealRef = useRef<{ timer: number | null; target: string; shown: number; finished: boolean }>({
+    timer: null,
+    target: '',
+    shown: 0,
+    finished: false,
+  });
+
+  const revealStop = () => {
+    if (revealRef.current.timer !== null) {
+      window.clearInterval(revealRef.current.timer);
+      revealRef.current.timer = null;
+    }
+  };
+
+  const revealStart = (aiId: string) => {
+    revealStop();
+    revealRef.current = { timer: null, target: '', shown: 0, finished: false };
+    revealRef.current.timer = window.setInterval(() => {
+      const st = revealRef.current;
+      if (st.shown >= st.target.length) {
+        if (st.finished && st.timer !== null) {
+          window.clearInterval(st.timer);
+          st.timer = null;
+        }
+        return;
+      }
+      const remaining = st.target.length - st.shown;
+      const step = Math.max(4, Math.ceil(remaining / 12));
+      st.shown = Math.min(st.target.length, st.shown + step);
+      const text = st.target.slice(0, st.shown);
+      setMessages((prev) => prev.map((m) => (m.id === aiId ? { ...m, text } : m)));
+    }, 30);
+  };
+
+  const revealPush = (delta: string) => {
+    revealRef.current.target += delta;
+  };
+
+  /** Mark the answer complete; resolves once the reveal has caught up. */
+  const revealSettle = (finalText: string) =>
+    new Promise<void>((resolve) => {
+      const st = revealRef.current;
+      if (finalText) st.target = finalText;
+      st.finished = true;
+      if (st.timer === null) {
+        resolve();
+        return;
+      }
+      const watcher = window.setInterval(() => {
+        const cur = revealRef.current;
+        if (cur.timer === null || cur.shown >= cur.target.length) {
+          window.clearInterval(watcher);
+          revealStop();
+          resolve();
+        }
+      }, 30);
+    });
+
+  useEffect(
+    () => () => {
+      revealStop();
+    },
+    [],
+  );
 
   const handleSend = async (textToSend?: string, overrideStyle?: AiToneStyle, overridePersona?: any) => {
     const prompt = textToSend || input;
@@ -191,42 +300,69 @@ export const AiAssistantView: React.FC = () => {
       text: prompt,
       timestamp: new Date().toLocaleTimeString(),
     };
+    const aiId = `ai_${Date.now()}`;
 
-    setMessages((prev) => [...prev, userMsg]);
+    // The AI bubble appears immediately and fills in as tokens arrive —
+    // the reply is revealed progressively, like watching it get written.
+    setMessages((prev) => [
+      ...prev,
+      userMsg,
+      { id: aiId, sender: 'ai', text: '', timestamp: new Date().toLocaleTimeString() },
+    ]);
     if (!textToSend) setInput('');
     setLoading(true);
+    setStreamingId(aiId);
+    revealStart(aiId);
+
+    const patchAi = (patch: Partial<Message>) =>
+      setMessages((prev) => prev.map((m) => (m.id === aiId ? { ...m, ...patch } : m)));
+
+    const params = {
+      persona: personaToUse,
+      toneStyle: styleToUse,
+      prompt,
+      enableWebSearch,
+    };
 
     try {
-      const res = await api.queryAi({
-        persona: personaToUse,
-        toneStyle: styleToUse,
-        prompt,
-        enableWebSearch,
-      });
-
-      const aiMsg: Message = {
-        id: `ai_${Date.now()}`,
-        sender: 'ai',
+      const res = await api.queryAiStream(params, revealPush);
+      await revealSettle(res.text);
+      patchAi({
         text: res.text,
-        timestamp: new Date().toLocaleTimeString(),
         sources: res.groundingSources,
-        requiresConfirmation: res.requiresConfirmation,
-      };
-
-      setMessages((prev) => [...prev, aiMsg]);
-    } catch (err: any) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `err_${Date.now()}`,
-          sender: 'ai',
-          text: `⚠️ **خطأ في محرك الاستدلال الذكي**: ${err.message || 'تعذر الاتصال بمحرك Gemini، يرجى المحاولة مرة أخرى.'}`,
-          timestamp: new Date().toLocaleTimeString(),
-        },
-      ]);
+        requiresConfirmation: res.requiresConfirmation as Message['requiresConfirmation'],
+      });
+    } catch (streamErr) {
+      // Streaming unavailable → single-shot request (same engine, one round trip).
+      try {
+        const res = await api.queryAi(params);
+        await revealSettle(res.text);
+        patchAi({
+          text: res.text,
+          sources: res.groundingSources,
+          requiresConfirmation: res.requiresConfirmation as Message['requiresConfirmation'],
+        });
+      } catch (err: any) {
+        revealStop();
+        patchAi({
+          text: `⚠️ **تعذر الوصول إلى محرك الذكاء الاصطناعي**: ${err.message || 'يرجى المحاولة مرة أخرى لاحقاً.'}`,
+        });
+      }
     } finally {
       setLoading(false);
+      setStreamingId(null);
     }
+  };
+
+  const clearChat = async () => {
+    if (loading) return;
+    try {
+      await api.clearAiHistory();
+    } catch {
+      // Signed out / offline — clearing the local view still works.
+    }
+    setMessages([welcomeMessage()]);
+    setDismissedConfirmations([]);
   };
 
   const handleRunCodeDoctor = async (codeToRun?: string, langToRun?: any) => {
@@ -340,7 +476,7 @@ export const AiAssistantView: React.FC = () => {
             <div>
               <h1 className="text-xl sm:text-2xl font-bold text-white tracking-tight">Vanitas AI Intelligence Copilot</h1>
               <p className="text-xs text-slate-400 mt-0.5">
-                Automated code parsing, syntax error diagnosis, refactoring recommendations, and multi-tone AI orchestration powered by Gemini.
+                Automated code analysis, syntax error diagnosis, refactoring recommendations, and multi-tone AI orchestration on the free keyless Pollinations engine.
               </p>
             </div>
           </div>
@@ -380,7 +516,7 @@ export const AiAssistantView: React.FC = () => {
           >
             <Wrench className="h-4 w-4" />
             <span>Code Doctor & Refactor</span>
-            <span className="rounded-full bg-cyan-400/20 px-1.5 py-0.2 font-mono text-[9px] text-cyan-200">Gemini</span>
+            <span className="rounded-full bg-cyan-400/20 px-1.5 py-0.2 font-mono text-[9px] text-cyan-200">Free AI</span>
           </button>
 
           <button
@@ -469,7 +605,7 @@ export const AiAssistantView: React.FC = () => {
           {/* Main Chat Interface */}
           <div className="rounded-3xl border border-white/10 bg-slate-950/70 backdrop-blur-xl shadow-2xl overflow-hidden flex flex-col h-[580px]">
             {/* Messages Stream */}
-            <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6">
+            <div ref={messagesRef} className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6">
               {messages.map((msg) => {
                 const codeBlocks = extractCodeBlocksFromText(msg.text);
 
@@ -491,7 +627,16 @@ export const AiAssistantView: React.FC = () => {
                           : 'bg-slate-900/90 text-slate-200 border border-white/10 rounded-tl-sm'
                       }`}
                     >
-                      <div className="whitespace-pre-wrap font-sans">{msg.text}</div>
+                      {msg.sender === 'ai' ? (
+                        <div className="font-sans">
+                          <Markdown text={msg.text} />
+                          {streamingId === msg.id && (
+                            <span className="ml-1 inline-block h-3.5 w-2 translate-y-[2px] animate-pulse rounded-sm bg-cyan-400/80" />
+                          )}
+                        </div>
+                      ) : (
+                        <div className="whitespace-pre-wrap font-sans">{msg.text}</div>
+                      )}
 
                       {/* Automated Code Block Inspector Action Trigger */}
                       {codeBlocks.length > 0 && (
@@ -553,21 +698,28 @@ export const AiAssistantView: React.FC = () => {
                         </div>
                       )}
 
-                      {/* Security Action Confirmation Drawer */}
-                      {msg.requiresConfirmation && (
+                      {/* Security Action Suggestion — leads to the REAL key console */}
+                      {msg.requiresConfirmation && !dismissedConfirmations.includes(msg.id) && (
                         <div className="mt-4 rounded-xl border border-amber-500/30 bg-amber-950/30 p-3 text-xs text-amber-200">
                           <div className="flex items-center gap-2 font-bold">
                             <AlertTriangle className="h-4 w-4 text-amber-400" />
-                            <span>Authorization Action Required: {msg.requiresConfirmation.action}</span>
+                            <span>Security suggestion: {msg.requiresConfirmation.action}</span>
                           </div>
                           <p className="mt-1 text-[11px] text-slate-300">
-                            Target: {msg.requiresConfirmation.target} (Scope: {msg.requiresConfirmation.permission})
+                            Target: {msg.requiresConfirmation.target} (Scope: {msg.requiresConfirmation.permission}) —
+                            changes are applied from the real API Keys console, never directly from chat.
                           </p>
                           <div className="mt-3 flex gap-2">
-                            <button className="rounded-lg bg-amber-600 px-3 py-1 text-xs font-semibold text-white hover:bg-amber-500">
-                              Confirm Action
+                            <button
+                              onClick={() => setActiveView('keys')}
+                              className="rounded-lg bg-amber-600 px-3 py-1 text-xs font-semibold text-white hover:bg-amber-500"
+                            >
+                              Open Key Manager
                             </button>
-                            <button className="rounded-lg border border-white/10 px-3 py-1 text-xs text-slate-400 hover:text-white">
+                            <button
+                              onClick={() => setDismissedConfirmations((prev) => [...prev, msg.id])}
+                              className="rounded-lg border border-white/10 px-3 py-1 text-xs text-slate-400 hover:text-white"
+                            >
                               Dismiss
                             </button>
                           </div>
@@ -636,6 +788,15 @@ export const AiAssistantView: React.FC = () => {
                 <span className="hidden sm:inline">Web Search</span>
               </button>
 
+              <button
+                onClick={clearChat}
+                disabled={loading}
+                title="Clear conversation — deletes your saved chat history"
+                className="flex items-center justify-center rounded-xl border border-white/10 bg-slate-900 p-2.5 text-slate-400 hover:border-rose-400/40 hover:text-rose-300 disabled:opacity-40 transition-all"
+              >
+                <Trash2 className="h-4 w-4" />
+              </button>
+
               <input
                 type="text"
                 placeholder={`Ask ${persona.toUpperCase()} assistant (Style: ${toneStyle})...`}
@@ -668,7 +829,7 @@ export const AiAssistantView: React.FC = () => {
                   <Wrench className="h-5 w-5 text-cyan-400" />
                   <h2 className="text-lg font-bold text-white">Automated Code Doctor & Refactoring Tool</h2>
                   <span className="rounded-full bg-cyan-500/20 px-2.5 py-0.5 text-[10px] font-semibold text-cyan-300 border border-cyan-500/30">
-                    AST & Gemini Powered
+                    Static Analysis & Free AI
                   </span>
                 </div>
                 <p className="text-xs text-slate-300 max-w-2xl">
@@ -831,7 +992,7 @@ export const AiAssistantView: React.FC = () => {
                   {doctorLoading ? (
                     <>
                       <RotateCw className="h-3.5 w-3.5 animate-spin" />
-                      <span>Parsing AST & Running Gemini...</span>
+                      <span>Analyzing code & running free AI engine...</span>
                     </>
                   ) : (
                     <>
@@ -904,7 +1065,7 @@ export const AiAssistantView: React.FC = () => {
               {doctorLoading ? (
                 <div className="flex-1 min-h-[340px] flex flex-col items-center justify-center text-center p-6 space-y-3">
                   <Sparkles className="h-8 w-8 text-cyan-400 animate-spin" />
-                  <p className="text-xs font-medium text-slate-300">Parsing syntax tree, security boundaries & refactoring patterns...</p>
+                  <p className="text-xs font-medium text-slate-300">Checking brackets, exposed secrets, auth headers, rate-limit handling &amp; type-safety patterns...</p>
                   <p className="text-[11px] text-slate-500 font-mono">Free AI autonomous analysis in progress</p>
                 </div>
               ) : doctorResult ? (

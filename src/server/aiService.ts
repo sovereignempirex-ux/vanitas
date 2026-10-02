@@ -62,35 +62,245 @@ async function queryOllama(systemInstruction: string, prompt: string): Promise<s
 // ---------------------------------------------------------------------------
 // Free, keyless model: Pollinations.ai (OpenAI-compatible, no API key).
 // This is the DEFAULT provider on Vercel — a real LLM answer with zero setup.
+// One quick retry: the free tier intermittently answers 402/500 under load.
 // ---------------------------------------------------------------------------
 async function queryPollinations(systemInstruction: string, prompt: string): Promise<string | null> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const response = await fetch('https://text.pollinations.ai/openai', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(20_000),
+        body: JSON.stringify({
+          model: 'openai',
+          messages: [
+            { role: 'system', content: systemInstruction },
+            { role: 'user', content: prompt },
+          ],
+        }),
+      });
+      if (!response.ok) {
+        console.warn(`Pollinations HTTP ${response.status} (attempt ${attempt + 1});`);
+        if (attempt === 0) {
+          await new Promise((r) => setTimeout(r, 600));
+          continue;
+        }
+        return null;
+      }
+      const data = await response.json() as { choices?: { message?: { content?: string } }[] };
+      const text = data.choices?.[0]?.message?.content?.trim();
+      if (text) return text;
+      if (attempt === 0) {
+        await new Promise((r) => setTimeout(r, 600));
+        continue;
+      }
+      return null;
+    } catch (error) {
+      console.warn('Pollinations unavailable; using the local deterministic fallback.', error instanceof Error ? error.message : error);
+      return null; // network/timeout — retrying immediately rarely helps
+    }
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Streaming variants — the reply is emitted token-by-token so the chat UI can
+// reveal the answer progressively (typewriter feel) instead of one big blob.
+// Both return the accumulated text, or null when streaming is unavailable so
+// the caller can fall back to a full (non-stream) query.
+// ---------------------------------------------------------------------------
+async function queryPollinationsStream(
+  systemInstruction: string,
+  prompt: string,
+  onDelta: (chunk: string) => void,
+): Promise<string | null> {
+  // Budget: the Vercel function is killed at 30s, so the stream must leave
+  // room for the full-response fallback below.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let response: Response;
+    try {
+      response = await fetch('https://text.pollinations.ai/openai', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+        signal: AbortSignal.timeout(24_000),
+        body: JSON.stringify({
+          model: 'openai',
+          stream: true,
+          messages: [
+            { role: 'system', content: systemInstruction },
+            { role: 'user', content: prompt },
+          ],
+        }),
+      });
+    } catch (error) {
+      console.warn('Pollinations stream unavailable; using a full response instead.', error instanceof Error ? error.message : error);
+      return null;
+    }
+
+    if (!response.ok || !response.body) {
+      console.warn(`Pollinations stream HTTP ${response.status} (attempt ${attempt + 1});`);
+      if (attempt === 0) {
+        await new Promise((r) => setTimeout(r, 600));
+        continue;
+      }
+      return null;
+    }
+
+    // Provider ignored the stream flag and answered in one shot — still fine,
+    // emit it as a single delta so the UI path stays identical.
+    const contentType = response.headers.get('content-type') || '';
+    if (!contentType.includes('event-stream')) {
+      const raw = (await response.text()).trim();
+      if (!raw) return null;
+      let text = raw;
+      try {
+        const json = JSON.parse(raw) as { choices?: { message?: { content?: string } }[] };
+        const content = json.choices?.[0]?.message?.content;
+        if (content) text = content;
+      } catch { /* plain-text body */ }
+      onDelta(text);
+      return text;
+    }
+
+    try {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let full = '';
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data:')) continue;
+          const payload = trimmed.slice(5).trim();
+          if (!payload || payload === '[DONE]') continue;
+          try {
+            const json = JSON.parse(payload) as { choices?: { delta?: { content?: string } }[] };
+            const delta = json.choices?.[0]?.delta?.content;
+            if (delta) {
+              full += delta;
+              onDelta(delta);
+            }
+          } catch { /* keep partial frames for the next line */ }
+        }
+      }
+      return full.trim() || null;
+    } catch (error) {
+      console.warn('Pollinations stream aborted; using a full response instead.', error instanceof Error ? error.message : error);
+      return null;
+    }
+  }
+  return null;
+}
+
+async function queryOllamaStream(
+  systemInstruction: string,
+  prompt: string,
+  onDelta: (chunk: string) => void,
+): Promise<string | null> {
+  const baseUrl = process.env.OLLAMA_BASE_URL;
+  if (process.env.AI_PROVIDER !== 'ollama' || !baseUrl) return null;
+
   try {
-    const response = await fetch('https://text.pollinations.ai/openai', {
+    const response = await fetch(`${baseUrl.replace(/\/$/, '')}/api/chat`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: AbortSignal.timeout(25_000),
+      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+      signal: AbortSignal.timeout(60_000),
       body: JSON.stringify({
-        model: 'openai',
+        model: process.env.OLLAMA_MODEL || 'llama3.2',
+        stream: true,
         messages: [
           { role: 'system', content: systemInstruction },
           { role: 'user', content: prompt },
         ],
       }),
     });
-    if (!response.ok) {
-      console.warn(`Pollinations HTTP ${response.status}; using fallback.`);
-      return null;
+    if (!response.ok || !response.body) return null;
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let full = '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const json = JSON.parse(trimmed) as { message?: { content?: string } };
+          const delta = json.message?.content;
+          if (delta) {
+            full += delta;
+            onDelta(delta);
+          }
+        } catch { /* incomplete NDJSON frame */ }
+      }
     }
-    const data = await response.json() as { choices?: { message?: { content?: string } }[] };
-    const text = data.choices?.[0]?.message?.content?.trim();
-    return text || null;
+    return full.trim() || null;
   } catch (error) {
-    console.warn('Pollinations unavailable; using the local deterministic fallback.', error instanceof Error ? error.message : error);
+    console.warn('Ollama stream unavailable; using a full response instead.', error instanceof Error ? error.message : error);
     return null;
   }
 }
 
-export async function processAiQuery(options: GenerateAiOptions): Promise<{
+// ---------------------------------------------------------------------------
+// Real reference data for THIS deployment — injected into every system
+// instruction so the assistant answers about the actual site (its endpoints,
+// scopes, limits, errors) instead of hallucinating APIs.
+// ---------------------------------------------------------------------------
+const SITE_FACTS = `=== VANITAS PLATFORM — REAL REFERENCE (this deployment) ===
+Base URL: https://vanitas-bot.vercel.app/api/v1 — you are embedded in this
+platform; answer about it using ONLY these verified facts:
+
+AUTH & ACCOUNTS
+- POST /auth/register {name, email, password} → creates the account and returns a session token. Password 8-128 chars; email must be valid; name required.
+- POST /auth/login {email, password} → session token (then Bearer token on every request). When 2FA is on, finish via POST /auth/2fa/complete {code}.
+- POST /auth/logout, GET /auth/me, PATCH /auth/profile {name?, avatarUrl?} (avatarUrl: https URL ≤500 chars or a base64 data:image URL ≤300KB), DELETE /auth/account (cascades all of that user's data).
+- 2FA (TOTP): POST /auth/2fa/setup → otpauth URL + QR, POST /auth/2fa/enable {code}, POST /auth/2fa/disable {code}.
+- Sessions: GET /auth/sessions, DELETE /auth/sessions/:id.
+- Social login: GET /auth/providers → {google, discord, github}; start via GET /social/:provider → OAuth consent → GET /social/:provider/callback.
+- Error codes: 400 validation, 401 missing/invalid credentials, 403 forbidden or insufficient scope, 404 not found, 409 conflict, 429 rate limited, 500 server error.
+
+API KEYS (Authorization: Bearer sk_…, or a session token)
+- GET /api-keys (list + allScopes), POST /api-keys {name, scopes[], rateLimit?, burstLimit?} → rawSecret is shown ONCE at creation.
+- POST /api-keys/:id/rotate (new secret, old invalidated), DELETE /api-keys/:id (revoke), PATCH /api-keys/:id/scopes, PATCH /api-keys/:id/rate-limit, GET /api-keys/usage-analytics.
+- Real scopes: api.read api.write users.read users.write users.delete roles.read roles.manage keys.read keys.create keys.rotate keys.revoke keys.scopes.update logs.read logs.export database.read database.write system.read system.manage security.read security.manage bot.execute analytics.read webhooks.manage settings.read settings.write admin.all.
+- Scopes are enforced server-side (assertGrantableScopes): a USER account can never hold admin-only scopes (users.write, users.delete, roles.*, logs.*, database.*, system.manage, security.*, keys.scopes.update, settings.write, admin.all).
+- Key-authenticated public endpoints: GET /public/ping, /public/me, /public/status (needs api.read), /public/quota.
+
+BOT GATEWAY
+- POST /bot/execute {platform: 'whatsapp'|'discord'|'telegram', command, payload} requires scope bot.execute; GET /bot/status.
+
+WEBHOOKS: GET/POST /webhooks, POST /webhooks/:id/test.
+
+COMMENTS (under docs pages)
+- GET /comments/:docId, POST /comments/:docId {body} (registered users only, 2-2000 chars), DELETE /comments/:id (author or admin).
+
+AI, SEARCH & CHAT
+- POST /ai/chat {prompt, persona, toneStyle, stream?} — personas: code|api|security|analyst|docs|video|admin; tones: architect|security|developer|bot|arabic; stream:true returns an SSE stream of deltas.
+- POST /ai/diagnose-fix {code, language, analysisMode} — static local analysis (brackets, secrets, auth, rate-limit, type-safety) plus an AI refactor proposal.
+- GET /search/semantic (alias /semantic-search) {q} — semantic documentation search.
+- GET /youtube/search?q=&limit= — live YouTube results.
+- GET /ai/history and DELETE /ai/history — the signed-in user's own chat history.
+
+ADMIN (role ADMIN only): /admin/users, /admin/users/:id/role, /admin/logs, /admin/logs/export, /admin/statistics, /admin/emergency, /admin/feature-flags, /admin/suggestions.
+
+RATE LIMITS (requests per minute per IP): default 300; /public 1200; /auth 60; /ai 60; /bot 120; /comments 30. Each API key additionally has its own rateLimit/burstLimit.
+
+SYSTEM: GET /health, GET /ready (readiness: database, auth, AI provider), GET /status.
+
+DOCS UI SECTIONS: overview, authentication, scopes, endpoints, webhooks, bots, errors, sdks, comments.
+=== END REFERENCE ===`;
+
+export interface AiQueryResult {
   text: string;
   groundingSources?: { title: string; url: string }[];
   videos?: any[];
@@ -101,8 +311,22 @@ export async function processAiQuery(options: GenerateAiOptions): Promise<{
     permission: any;
     status: 'pending';
   };
-}> {
-  const { persona, toneStyle = 'developer', prompt, context, enableWebSearch, enableVideoSearch } = options;
+}
+
+interface PreparedQuery {
+  instruction: string;
+  videos?: any[];
+  videoQuery?: string;
+}
+
+/**
+ * Shared preparation: detect video intent, retrieve REAL videos and build the
+ * system instruction (persona + tone + verified site facts). Both the
+ * streaming and non-streaming entry points call this so they answer
+ * identically.
+ */
+async function prepareAiQuery(options: GenerateAiOptions): Promise<PreparedQuery> {
+  const { persona, toneStyle = 'developer', prompt, enableVideoSearch } = options;
 
   // Detect semantic video search intent
   const isVideoQuery =
@@ -149,10 +373,20 @@ export async function processAiQuery(options: GenerateAiOptions): Promise<{
     arabic: `Tone & Language: مهندس برمجيات ونظم خبير يتحدث باللغة العربية الفصحى مع المصطلحات التقنية الدقيقة. اشرح الكود وطرق الربط مع منصة فانيتاس (Vanitas Central API) بأسلوب احترافي مع إعطاء أمثلة برمجية كاملة وحلول للأخطاء.`,
   };
 
-  let selectedInstruction = `${baseInstructions[persona] || baseInstructions.code}\n${toneModifiers[toneStyle] || ''}`;
+  let selectedInstruction = `${baseInstructions[persona] || baseInstructions.code}\n${toneModifiers[toneStyle] || ''}\n\n${SITE_FACTS}`;
   if (retrievedVideos && retrievedVideos.length > 0) {
     selectedInstruction += `\nNote: ${retrievedVideos.length} educational YouTube video tutorials have been retrieved and will be displayed in interactive cards directly within the user interface. Reference the educational topics and offer practical implementation steps.`;
   }
+
+  return { instruction: selectedInstruction, videos: retrievedVideos, videoQuery: videoQueryStr };
+}
+
+/** Full (non-streaming) provider chain: Ollama → Gemini → Pollinations → local. */
+async function runFullQuery(options: GenerateAiOptions, prep: PreparedQuery): Promise<AiQueryResult> {
+  const { persona, toneStyle = 'developer', prompt, context, enableWebSearch } = options;
+  const selectedInstruction = prep.instruction;
+  const retrievedVideos = prep.videos;
+  const videoQueryStr = prep.videoQuery;
 
   const ollamaText = await queryOllama(selectedInstruction, prompt);
   if (ollamaText) {
@@ -224,13 +458,62 @@ export async function processAiQuery(options: GenerateAiOptions): Promise<{
     return { text: freeText, videos: retrievedVideos, videoQuery: videoQueryStr };
   }
 
-  // Fallback intelligent responder with rich domain reasoning
+  // Last resort: deterministic local knowledge-base reply. Clearly disclose
+  // that the live engine was unreachable — never pretend it was the model.
   const fallback = generateFallbackResponse(persona, toneStyle, prompt, context);
+  const notice = /[\u0600-\u06FF]/.test(prompt)
+    ? '> ⚠️ المحرك السحابي مؤقتاً غير متاح الآن — هذه الإجابة من قاعدة المعرفة المحلية المدمجة في المنصة.\n\n'
+    : "> ⚠️ The live AI engine is temporarily unreachable — this reply comes from the platform's built-in local knowledge base.\n\n";
   return {
     ...fallback,
+    text: `${notice}${fallback.text}`,
     videos: retrievedVideos,
     videoQuery: videoQueryStr,
   };
+}
+
+export async function processAiQuery(options: GenerateAiOptions): Promise<AiQueryResult> {
+  const prep = await prepareAiQuery(options);
+  return runFullQuery(options, prep);
+}
+
+/**
+ * Streaming entry point: emits the answer incrementally through `onDelta` so
+ * the chat can reveal it progressively. If no streaming provider works (or
+ * Gemini web-search grounding is required), it degrades to one full query —
+ * the emitted text is then a single chunk. `result.text` is always the
+ * authoritative complete answer.
+ */
+export async function processAiQueryStream(
+  options: GenerateAiOptions,
+  onDelta: (chunk: string) => void,
+): Promise<AiQueryResult> {
+  const prep = await prepareAiQuery(options);
+  let emitted = false;
+  const emit = (chunk: string) => {
+    emitted = true;
+    onDelta(chunk);
+  };
+
+  // Google web-search grounding only exists on the non-streaming Gemini path.
+  const needsGeminiGrounding =
+    !!options.enableWebSearch && process.env.AI_PROVIDER !== 'ollama' && !!getAiClient();
+
+  if (!needsGeminiGrounding) {
+    let streamed = await queryOllamaStream(prep.instruction, options.prompt, emit);
+    if (streamed === null && !emitted) {
+      streamed = await queryPollinationsStream(prep.instruction, options.prompt, emit);
+    }
+    if (streamed !== null) {
+      return { text: streamed, videos: prep.videos, videoQuery: prep.videoQuery };
+    }
+  }
+
+  const full = await runFullQuery(options, prep);
+  // A partial stream already went out → don't repeat it; the caller's final
+  // event carries `full.text`, which the client syncs to.
+  if (full.text && !emitted) onDelta(full.text);
+  return full;
 }
 
 function generateFallbackResponse(
@@ -862,10 +1145,11 @@ Respond in valid JSON only with this structure:
 }
 
 /**
- * YouTube Video Search via Gemini Search Grounding / Intelligence
- */
-/**
- * YouTube Video Search via YouTube Data API v3 & Gemini Semantic Search Grounding
+ * YouTube Video Search — REAL results only, never invented.
+ * 1) Official YouTube Data API v3 when YOUTUBE_API_KEY is configured.
+ * 2) Keyless live search of YouTube's public results page (ytInitialData).
+ * Returns an honest empty list when neither source is reachable — no
+ * fabricated videos, no placeholder links, ever.
  */
 export async function searchYouTubeVideos(
   query: string,
@@ -874,222 +1158,195 @@ export async function searchYouTubeVideos(
   query: string;
   videos: any[];
   totalResults: number;
-  searchEngine: 'youtube_direct' | 'gemini_grounded';
+  searchEngine: 'youtube_api' | 'youtube_keyless' | 'none';
   aiSummary?: string;
 }> {
+  const trimmedQuery = query.trim();
+  if (!trimmedQuery) {
+    return {
+      query,
+      videos: [],
+      totalResults: 0,
+      searchEngine: 'none',
+      aiSummary: 'Enter a topic to search live YouTube results.',
+    };
+  }
+
+  // 1. Official YouTube Data API v3 (when an API key is configured).
   const youtubeApiKey = process.env.YOUTUBE_API_KEY;
-  const ai = getAiClient();
-
-  // Curated high-relevance educational developer tutorials index
-  const defaultVideos = [
-    {
-      id: 'vid_quickstart_01',
-      title: 'Vanitas Central API Gateway: Full Setup, JWT Auth & Scope Governance',
-      description: 'Comprehensive walkthrough on issuing scoped API keys, configuring sliding window rate limiting, and building resilient clients.',
-      channelTitle: 'Vanitas Developer Network',
-      publishedAt: '2026-05-10T14:00:00Z',
-      thumbnailUrl: 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=640&auto=format&fit=crop',
-      videoUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
-      embedUrl: 'https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ',
-      duration: '14:25',
-      views: '42.8K',
-      tags: ['API Gateway', 'JWT Auth', 'Security', 'TypeScript'],
-      aiTakeaway: 'Learn how to generate scoped credentials, configure burst limits, and monitor traffic in real-time.',
-    },
-    {
-      id: 'vid_bot_02',
-      title: 'Building Discord & WhatsApp Autonomous Bots with Vanitas Gateway',
-      description: 'How to route multi-tenant slash commands, process encrypted webhooks, and trigger background agent tasks.',
-      channelTitle: 'Cloud Architect Guild',
-      publishedAt: '2026-06-22T09:30:00Z',
-      thumbnailUrl: 'https://images.unsplash.com/photo-1526374965328-7f61d4dc18c5?q=80&w=640&auto=format&fit=crop',
-      videoUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
-      embedUrl: 'https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ',
-      duration: '18:50',
-      views: '29.1K',
-      tags: ['Discord Bot', 'WhatsApp API', 'Webhooks', 'Automation'],
-      aiTakeaway: 'Step-by-step webhook dispatch architecture and message signing with HMAC-SHA256.',
-    },
-    {
-      id: 'vid_database_03',
-      title: 'Connecting Free Cloud Databases (Supabase & Neon PostgreSQL) to APIs',
-      description: 'Provisioning zero-cost serverless PostgreSQL clusters, handling connection pooling, and live schema migrations.',
-      channelTitle: 'Database Sovereignty',
-      publishedAt: '2026-07-04T16:15:00Z',
-      thumbnailUrl: 'https://images.unsplash.com/photo-1558494949-ef010cbdcc31?q=80&w=640&auto=format&fit=crop',
-      videoUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
-      embedUrl: 'https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ',
-      duration: '22:10',
-      views: '65.3K',
-      tags: ['Supabase', 'Neon Postgres', 'Free Tier', 'SQL'],
-      aiTakeaway: 'Deploy high-throughput serverless Postgres databases with zero upfront infrastructure cost.',
-    },
-    {
-      id: 'vid_ratelimit_04',
-      title: 'High-Throughput Rate Limiting with Upstash Redis and Sliding Window',
-      description: 'Defend public API gateways against DDoS attacks and brute-force traffic spikes using distributed Redis atomics.',
-      channelTitle: 'Edge Security Masters',
-      publishedAt: '2026-07-18T12:00:00Z',
-      thumbnailUrl: 'https://images.unsplash.com/photo-1544197150-b99a580bb7a8?q=80&w=640&auto=format&fit=crop',
-      videoUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
-      embedUrl: 'https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ',
-      duration: '19:45',
-      views: '51.2K',
-      tags: ['Rate Limiting', 'Upstash Redis', 'DDoS Protection', 'Node.js'],
-      aiTakeaway: 'Implement sub-millisecond sliding window algorithms to throttle abusive callers gracefully.',
-    },
-    {
-      id: 'vid_clients_05',
-      title: 'Modern Mobile & Desktop Client Deployment (Android APK & Windows EXE)',
-      description: 'Deep dive into Android 14/15 ARM64 optimizations, Windows 11 Mica glass acrylic effects, and cryptographic binary signing.',
-      channelTitle: 'Native Systems Engineering',
-      publishedAt: '2026-08-01T11:00:00Z',
-      thumbnailUrl: 'https://images.unsplash.com/photo-1517694712202-14dd9538aa97?q=80&w=640&auto=format&fit=crop',
-      videoUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
-      embedUrl: 'https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ',
-      duration: '16:40',
-      views: '38.7K',
-      tags: ['Android APK', 'Windows EXE', 'Modern UI', 'DirectX'],
-      aiTakeaway: 'Configuring ARM64 native binaries and Windows DirectComposition for high-FPS desktop UI.',
-    },
-    {
-      id: 'vid_arabic_06',
-      title: 'شرح شامل: بناء وربط بوابات الـ API والمفاتيح المشفرة وحمايتها من الاختراق',
-      description: 'دليل عملي باللغة العربية لشرح كيفية تدوير المفاتيح السرية واستخدام Scopes وتأمين الـ Webhooks.',
-      channelTitle: 'أكاديمية السحاب والبرمجة',
-      publishedAt: '2026-08-12T15:20:00Z',
-      thumbnailUrl: 'https://images.unsplash.com/photo-1550751827-4bd374c3f58b?q=80&w=640&auto=format&fit=crop',
-      videoUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
-      embedUrl: 'https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ',
-      duration: '28:15',
-      views: '74.9K',
-      tags: ['تعليم برمجة', 'شرح عربي', 'أمان API', 'بوتات'],
-      aiTakeaway: 'خطوات عملية لربط خوادم الـ Backend مع قواعد البيانات المشفرة والتحكم بالصلاحيات.',
-    },
-  ];
-
-  // 1. If YouTube Data API Key is configured, attempt direct Google API query
-  if (youtubeApiKey && query.trim()) {
+  if (youtubeApiKey) {
     try {
       const url = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&maxResults=${maxResults}&q=${encodeURIComponent(
-        query + ' tutorial development'
+        trimmedQuery + ' tutorial'
       )}&key=${youtubeApiKey}`;
-      const resp = await fetch(url);
+      const resp = await fetch(url, { signal: AbortSignal.timeout(10_000) });
       if (resp.ok) {
-        const data = await resp.json();
-        if (data.items && Array.isArray(data.items) && data.items.length > 0) {
-          const mappedVideos = data.items.map((item: any) => {
+        const data = (await resp.json()) as any;
+        const items = Array.isArray(data.items) ? data.items : [];
+        if (items.length > 0) {
+          const mapped = items.map((item: any) => {
             const videoId = item.id?.videoId || item.id;
             return {
               id: videoId,
-              title: item.snippet?.title || 'YouTube Tutorial',
-              description: item.snippet?.description || 'Educational developer video walkthrough.',
-              channelTitle: item.snippet?.channelTitle || 'YouTube Creator',
-              publishedAt: item.snippet?.publishedAt || new Date().toISOString(),
-              thumbnailUrl: item.snippet?.thumbnails?.high?.url || item.snippet?.thumbnails?.medium?.url || 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=640&auto=format&fit=crop',
+              title: decodeHtmlEntities(item.snippet?.title || 'YouTube video'),
+              description: decodeHtmlEntities(item.snippet?.description || ''),
+              channelTitle: item.snippet?.channelTitle || 'YouTube',
+              publishedAt: item.snippet?.publishedAt || '',
+              thumbnailUrl:
+                item.snippet?.thumbnails?.high?.url ||
+                item.snippet?.thumbnails?.medium?.url ||
+                `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
               videoUrl: `https://www.youtube.com/watch?v=${videoId}`,
               embedUrl: `https://www.youtube-nocookie.com/embed/${videoId}`,
-              duration: '15:00',
-              views: '25K+',
-              tags: ['YouTube Data API', 'Tutorial', 'Dev'],
-              aiTakeaway: `Step-by-step guidance on ${query} directly from ${item.snippet?.channelTitle || 'verified channel'}.`,
+              tags: [],
             };
           });
-
           return {
             query,
-            videos: mappedVideos,
-            totalResults: mappedVideos.length,
-            searchEngine: 'youtube_direct',
-            aiSummary: `Retrieved ${mappedVideos.length} live tutorials from YouTube Data API v3 matching "${query}".`,
+            videos: mapped,
+            totalResults: mapped.length,
+            searchEngine: 'youtube_api' as const,
+            aiSummary: `Retrieved ${mapped.length} live results from the YouTube Data API for "${query}".`,
           };
         }
       }
     } catch (ytApiErr) {
-      console.warn('YouTube Data API direct call error, falling back to Gemini semantic search:', ytApiErr);
+      console.warn('YouTube Data API call failed; trying the keyless live search:', ytApiErr);
     }
   }
 
-  // 2. Intelligent Gemini Semantic Video Curator with Grounding
-  if (ai && query.trim()) {
-    try {
-      const prompt = `You are a YouTube semantic video search engine and developer education specialist.
-The user is searching for educational video tutorials related to: "${query}"
-
-Generate 4 to 6 highly relevant, accurate, and realistic technical YouTube video tutorial cards that directly address this learning need.
-Include practical technical titles, channel names (or prominent tech creators/institutions), realistic durations, tags, and a crisp 1-sentence actionable AI educational takeaway ("aiTakeaway").
-
-Respond with a valid JSON object matching this schema:
-{
-  "aiSummary": "1-2 sentence overview of what these video tutorials cover and recommended sequence",
-  "videos": [
-    {
-      "id": "vid_semantic_id",
-      "title": "Clear technical video title",
-      "description": "2-3 sentence overview of what is covered in the video tutorial",
-      "channelTitle": "Channel Name or Technology Organization",
-      "publishedAt": "2026-06-01T00:00:00Z",
-      "thumbnailUrl": "https://images.unsplash.com/photo-1526374965328-7f61d4dc18c5?q=80&w=640&auto=format&fit=crop",
-      "videoUrl": "https://www.youtube.com/results?search_query=...",
-      "embedUrl": "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
-      "duration": "16:20",
-      "views": "34.5K",
-      "tags": ["Topic1", "Topic2", "Topic3"],
-      "aiTakeaway": "Actionable takeaway: Key concept, security practice, or pattern taught in this video"
+  // 2. Keyless live search — parse YouTube's public results page.
+  try {
+    const videos = await searchYouTubeKeyless(trimmedQuery, maxResults);
+    if (videos.length > 0) {
+      return {
+        query,
+        videos,
+        totalResults: videos.length,
+        searchEngine: 'youtube_keyless',
+        aiSummary: `Found ${videos.length} live YouTube results for "${query}" (real-time search, no API key).`,
+      };
     }
-  ]
-}`;
-
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.7-flash',
-        contents: prompt,
-        config: {
-          temperature: 0.3,
-          responseMimeType: 'application/json',
-        },
-      });
-
-      const parsed = JSON.parse(response.text || '{}');
-      if (parsed.videos && Array.isArray(parsed.videos) && parsed.videos.length > 0) {
-        return {
-          query,
-          videos: parsed.videos.slice(0, maxResults),
-          totalResults: parsed.videos.length,
-          searchEngine: 'gemini_grounded',
-          aiSummary: parsed.aiSummary || `Found ${parsed.videos.length} video guides for "${query}".`,
-        };
-      }
-    } catch (e) {
-      console.warn('Gemini YouTube video search fallback:', e);
-    }
+  } catch (keylessErr) {
+    console.warn('Keyless YouTube search failed:', keylessErr);
   }
 
-  // 3. Filter Default Curated Catalog by Query
-  const qLower = query.toLowerCase();
-  const filtered = defaultVideos.filter(
-    (v) =>
-      v.title.toLowerCase().includes(qLower) ||
-      v.description.toLowerCase().includes(qLower) ||
-      v.tags.some((t) => t.toLowerCase().includes(qLower)) ||
-      (qLower.includes('bot') && v.id.includes('bot')) ||
-      (qLower.includes('database') && v.id.includes('database')) ||
-      (qLower.includes('supabase') && v.id.includes('database')) ||
-      (qLower.includes('postgres') && v.id.includes('database')) ||
-      (qLower.includes('key') && v.id.includes('quickstart')) ||
-      (qLower.includes('rate') && v.id.includes('ratelimit')) ||
-      (qLower.includes('client') && v.id.includes('clients')) ||
-      (qLower.includes('android') && v.id.includes('clients')) ||
-      (qLower.includes('windows') && v.id.includes('clients')) ||
-      (qLower.includes('شرح') && v.id.includes('arabic'))
-  );
-
-  const finalVideos = filtered.length > 0 ? filtered : defaultVideos;
-
+  // Honest empty result — nothing was found, nothing is invented.
   return {
     query,
-    videos: finalVideos.slice(0, maxResults),
-    totalResults: finalVideos.length,
-    searchEngine: 'youtube_direct',
-    aiSummary: `Showing educational tutorials matching "${query}".`,
+    videos: [],
+    totalResults: 0,
+    searchEngine: 'none',
+    aiSummary: `No live YouTube results could be retrieved for "${query}" right now. Please try again in a moment.`,
   };
+}
+
+function decodeHtmlEntities(text: string): string {
+  return String(text)
+    .replace(/&quot;/g, '"')
+    .replace(/&#0?39;|&#x27;/g, "'")
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&nbsp;/g, ' ');
+}
+
+/**
+ * Keyless REAL YouTube search: fetches the public results page and parses the
+ * embedded ytInitialData JSON. If the page shape ever changes this returns []
+ * rather than made-up videos.
+ */
+async function searchYouTubeKeyless(query: string, maxResults: number): Promise<any[]> {
+  const response = await fetch(`https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`, {
+    headers: {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+      'Accept-Language': 'en-US,en;q=0.9',
+      Accept: 'text/html,application/xhtml+xml',
+    },
+    signal: AbortSignal.timeout(12_000),
+  });
+  if (!response.ok) return [];
+  const html = await response.text();
+
+  const marker = 'var ytInitialData = ';
+  const start = html.indexOf(marker);
+  if (start === -1) return [];
+  const jsonStart = start + marker.length;
+
+  // Walk the balanced JSON object, respecting string literals.
+  let depth = 0;
+  let end = -1;
+  let inString = false;
+  let escaped = false;
+  for (let i = jsonStart; i < html.length; i++) {
+    const ch = html[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) {
+        end = i + 1;
+        break;
+      }
+    }
+  }
+  if (end === -1) return [];
+
+  const data = JSON.parse(html.slice(jsonStart, end));
+  const results: any[] = [];
+
+  const visit = (node: any) => {
+    if (!node || results.length >= maxResults * 3) return;
+    if (Array.isArray(node)) {
+      for (const item of node) visit(item);
+      return;
+    }
+    if (typeof node !== 'object') return;
+
+    if (node.videoRenderer) {
+      const vr = node.videoRenderer;
+      const id = vr.videoId;
+      const title = vr.title?.runs?.[0]?.text || vr.title?.simpleText || '';
+      if (id && title) {
+        const description =
+          vr.descriptionSnippet?.runs?.map((r: any) => r.text).join('') ||
+          vr.detailedMetadataSnippets?.[0]?.snippetText?.runs?.map((r: any) => r.text).join('') ||
+          '';
+        results.push({
+          id,
+          title: decodeHtmlEntities(title),
+          description: decodeHtmlEntities(description),
+          channelTitle: decodeHtmlEntities(
+            vr.ownerText?.runs?.[0]?.text || vr.longBylineText?.runs?.[0]?.text || 'YouTube'
+          ),
+          publishedAt: vr.publishedTimeText?.simpleText || '',
+          thumbnailUrl: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
+          videoUrl: `https://www.youtube.com/watch?v=${id}`,
+          embedUrl: `https://www.youtube-nocookie.com/embed/${id}`,
+          duration: vr.lengthText?.simpleText || '',
+          views: vr.viewCountText?.simpleText || '',
+        });
+      }
+      return;
+    }
+
+    for (const key of Object.keys(node)) visit(node[key]);
+  };
+
+  visit(data);
+
+  const seen = new Set<string>();
+  const unique = results.filter((v) => {
+    if (seen.has(v.id)) return false;
+    seen.add(v.id);
+    return true;
+  });
+  return unique.slice(0, maxResults);
 }
