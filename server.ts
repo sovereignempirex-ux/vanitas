@@ -17,7 +17,7 @@ import {
   exchangeCode,
   fetchProfile,
 } from './src/server/oauth.ts';
-import { processAiQuery, processAiQueryStream, diagnoseAndFixCode, performSemanticSearch, searchYouTubeVideos } from './src/server/aiService.ts';
+import { processAiQuery, processAiQueryStream, diagnoseAndFixCode, performSemanticSearch, searchYouTubeVideos, getLastAiUpstream } from './src/server/aiService.ts';
 import { authenticateApiKey, requireScope, rateWindowStatus, nextQuotaReset } from './src/server/apiKeyAuth.ts';
 import { ClientSource, UserRole, PermissionScope, ProductSuggestion, ApiKey } from './src/types.ts';
 import { getActorUser, requireAdmin, rateLimit, sanitizeText, sanitizeUrl, csvCell, parsePagination, secureToken, secureId, isValidScope } from './src/server/security.ts';
@@ -400,6 +400,9 @@ export async function buildApp() {
       database,
       auth: 'ready',
       ai: process.env.AI_PROVIDER === 'ollama' ? 'ollama_configured' : process.env.GEMINI_API_KEY ? 'gemini_enabled' : 'pollinations_free',
+      // Why the last live AI attempt degraded (null when healthy) — honest,
+      // machine-readable diagnostics for ops and smoke tests.
+      aiUpstream: getLastAiUpstream(),
       mode: process.env.DEMO_MODE === 'true' && process.env.NODE_ENV !== 'production' ? 'demo' : 'authenticated',
     });
   });
@@ -1636,6 +1639,8 @@ export async function buildApp() {
           send({
             type: 'done',
             text: finalText,
+            engine: response.engine,
+            upstream: response.upstream ?? null,
             groundingSources: response.groundingSources,
             videos: response.videos,
             videoQuery: response.videoQuery,

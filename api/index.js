@@ -1608,7 +1608,7 @@ async function queryPollinations(systemInstruction, prompt) {
     try {
       const response = await fetch("https://text.pollinations.ai/openai", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: pollinationsHeaders({ "Content-Type": "application/json", Accept: "application/json" }),
         signal: AbortSignal.timeout(2e4),
         body: JSON.stringify({
           model: "openai",
@@ -1619,6 +1619,7 @@ async function queryPollinations(systemInstruction, prompt) {
         })
       });
       if (!response.ok) {
+        lastAiUpstream = `pollinations_http_${response.status}`;
         console.warn(`Pollinations HTTP ${response.status} (attempt ${attempt + 1});`);
         if (attempt === 0) {
           await new Promise((r) => setTimeout(r, 600));
@@ -1628,13 +1629,18 @@ async function queryPollinations(systemInstruction, prompt) {
       }
       const data = await response.json();
       const text = data.choices?.[0]?.message?.content?.trim();
-      if (text) return text;
+      if (text) {
+        lastAiUpstream = null;
+        return text;
+      }
+      lastAiUpstream = "pollinations_empty_reply";
       if (attempt === 0) {
         await new Promise((r) => setTimeout(r, 600));
         continue;
       }
       return null;
     } catch (error) {
+      lastAiUpstream = `pollinations_${error?.name || "network_error"}`;
       console.warn("Pollinations unavailable; using the local deterministic fallback.", error instanceof Error ? error.message : error);
       return null;
     }
@@ -1647,7 +1653,7 @@ async function queryPollinationsStream(systemInstruction, prompt, onDelta) {
     try {
       response = await fetch("https://text.pollinations.ai/openai", {
         method: "POST",
-        headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+        headers: pollinationsHeaders({ "Content-Type": "application/json", Accept: "text/event-stream" }),
         signal: AbortSignal.timeout(24e3),
         body: JSON.stringify({
           model: "openai",
@@ -1663,6 +1669,7 @@ async function queryPollinationsStream(systemInstruction, prompt, onDelta) {
       return null;
     }
     if (!response.ok || !response.body) {
+      lastAiUpstream = `pollinations_stream_http_${response.status}`;
       console.warn(`Pollinations stream HTTP ${response.status} (attempt ${attempt + 1});`);
       if (attempt === 0) {
         await new Promise((r) => setTimeout(r, 600));
@@ -1681,6 +1688,7 @@ async function queryPollinationsStream(systemInstruction, prompt, onDelta) {
         if (content) text = content;
       } catch {
       }
+      lastAiUpstream = null;
       onDelta(text);
       return text;
     }
@@ -1711,13 +1719,59 @@ async function queryPollinationsStream(systemInstruction, prompt, onDelta) {
           }
         }
       }
-      return full.trim() || null;
+      if (full.trim()) {
+        lastAiUpstream = null;
+        return full.trim();
+      }
+      lastAiUpstream = "pollinations_stream_empty_reply";
+      return null;
     } catch (error) {
+      lastAiUpstream = `pollinations_stream_${error?.name || "network_error"}`;
       console.warn("Pollinations stream aborted; using a full response instead.", error instanceof Error ? error.message : error);
       return null;
     }
   }
   return null;
+}
+async function queryPollinationsLegacy(systemInstruction, prompt) {
+  try {
+    const response = await fetch("https://text.pollinations.ai/", {
+      method: "POST",
+      headers: pollinationsHeaders({ "Content-Type": "application/json" }),
+      signal: AbortSignal.timeout(2e4),
+      body: JSON.stringify({
+        model: "openai",
+        messages: [
+          { role: "system", content: systemInstruction },
+          { role: "user", content: prompt }
+        ]
+      })
+    });
+    if (!response.ok) {
+      lastAiUpstream = `pollinations_legacy_http_${response.status}`;
+      return null;
+    }
+    const text = (await response.text()).trim();
+    if (!text) {
+      lastAiUpstream = "pollinations_legacy_empty";
+      return null;
+    }
+    if (text.startsWith("{")) {
+      try {
+        const json = JSON.parse(text);
+        if (json && json.error) {
+          lastAiUpstream = `pollinations_legacy_error_${String(json.error).slice(0, 40)}`;
+          return null;
+        }
+      } catch {
+      }
+    }
+    lastAiUpstream = null;
+    return text;
+  } catch (error) {
+    lastAiUpstream = `pollinations_legacy_${error?.name || "network_error"}`;
+    return null;
+  }
 }
 async function queryOllamaStream(systemInstruction, prompt, onDelta) {
   const baseUrl = process.env.OLLAMA_BASE_URL;
@@ -1766,6 +1820,15 @@ async function queryOllamaStream(systemInstruction, prompt, onDelta) {
     console.warn("Ollama stream unavailable; using a full response instead.", error instanceof Error ? error.message : error);
     return null;
   }
+}
+function getLastAiUpstream() {
+  return lastAiUpstream;
+}
+function pollinationsHeaders(extra = {}) {
+  const headers = { "User-Agent": BROWSER_UA, ...extra };
+  const token = process.env.POLLINATIONS_TOKEN;
+  if (token) headers.authorization = `Bearer ${token}`;
+  return headers;
 }
 async function prepareAiQuery(options) {
   const { persona, toneStyle = "developer", prompt, enableVideoSearch } = options;
@@ -1817,7 +1880,7 @@ async function runFullQuery(options, prep) {
   const videoQueryStr = prep.videoQuery;
   const ollamaText = await queryOllama(selectedInstruction, prompt);
   if (ollamaText) {
-    return { text: ollamaText, videos: retrievedVideos, videoQuery: videoQueryStr };
+    return { text: ollamaText, engine: "ollama", videos: retrievedVideos, videoQuery: videoQueryStr };
   }
   const ai = process.env.AI_PROVIDER === "ollama" ? null : getAiClient();
   if (ai) {
@@ -1850,6 +1913,7 @@ async function runFullQuery(options, prep) {
         }
         return {
           text,
+          engine: "gemini",
           groundingSources: groundingSources.length > 0 ? groundingSources : void 0,
           videos: retrievedVideos,
           videoQuery: videoQueryStr
@@ -1865,13 +1929,19 @@ async function runFullQuery(options, prep) {
   }
   const freeText = await queryPollinations(selectedInstruction, prompt);
   if (freeText) {
-    return { text: freeText, videos: retrievedVideos, videoQuery: videoQueryStr };
+    return { text: freeText, engine: "pollinations", videos: retrievedVideos, videoQuery: videoQueryStr };
+  }
+  const legacyText = await queryPollinationsLegacy(selectedInstruction, prompt);
+  if (legacyText) {
+    return { text: legacyText, engine: "pollinations_legacy", videos: retrievedVideos, videoQuery: videoQueryStr };
   }
   const fallback = generateFallbackResponse(persona, toneStyle, prompt, context);
   const notice = /[\u0600-\u06FF]/.test(prompt) ? "> \u26A0\uFE0F \u0627\u0644\u0645\u062D\u0631\u0643 \u0627\u0644\u0633\u062D\u0627\u0628\u064A \u0645\u0624\u0642\u062A\u0627\u064B \u063A\u064A\u0631 \u0645\u062A\u0627\u062D \u0627\u0644\u0622\u0646 \u2014 \u0647\u0630\u0647 \u0627\u0644\u0625\u062C\u0627\u0628\u0629 \u0645\u0646 \u0642\u0627\u0639\u062F\u0629 \u0627\u0644\u0645\u0639\u0631\u0641\u0629 \u0627\u0644\u0645\u062D\u0644\u064A\u0629 \u0627\u0644\u0645\u062F\u0645\u062C\u0629 \u0641\u064A \u0627\u0644\u0645\u0646\u0635\u0629.\n\n" : "> \u26A0\uFE0F The live AI engine is temporarily unreachable \u2014 this reply comes from the platform's built-in local knowledge base.\n\n";
   return {
     ...fallback,
     text: `${notice}${fallback.text}`,
+    engine: "local_kb",
+    upstream: lastAiUpstream,
     videos: retrievedVideos,
     videoQuery: videoQueryStr
   };
@@ -1889,12 +1959,15 @@ async function processAiQueryStream(options, onDelta) {
   };
   const needsGeminiGrounding = !!options.enableWebSearch && process.env.AI_PROVIDER !== "ollama" && !!getAiClient();
   if (!needsGeminiGrounding) {
-    let streamed = await queryOllamaStream(prep.instruction, options.prompt, emit);
-    if (streamed === null && !emitted) {
-      streamed = await queryPollinationsStream(prep.instruction, options.prompt, emit);
+    const ollamaStreamed = await queryOllamaStream(prep.instruction, options.prompt, emit);
+    if (ollamaStreamed !== null) {
+      return { text: ollamaStreamed, engine: "ollama", videos: prep.videos, videoQuery: prep.videoQuery };
     }
-    if (streamed !== null) {
-      return { text: streamed, videos: prep.videos, videoQuery: prep.videoQuery };
+    if (!emitted) {
+      const polliStreamed = await queryPollinationsStream(prep.instruction, options.prompt, emit);
+      if (polliStreamed !== null) {
+        return { text: polliStreamed, engine: "pollinations", videos: prep.videos, videoQuery: prep.videoQuery };
+      }
     }
   }
   const full = await runFullQuery(options, prep);
@@ -2680,7 +2753,7 @@ async function searchYouTubeKeyless(query, maxResults) {
   });
   return unique.slice(0, maxResults);
 }
-var aiClient, CANDIDATE_MODELS, SITE_FACTS;
+var aiClient, CANDIDATE_MODELS, SITE_FACTS, lastAiUpstream, BROWSER_UA;
 var init_aiService = __esm({
   "src/server/aiService.ts"() {
     aiClient = null;
@@ -2732,6 +2805,8 @@ SYSTEM: GET /health, GET /ready (readiness: database, auth, AI provider), GET /s
 
 DOCS UI SECTIONS: overview, authentication, scopes, endpoints, webhooks, bots, errors, sdks, comments.
 === END REFERENCE ===`;
+    lastAiUpstream = null;
+    BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
   }
 });
 
@@ -3303,6 +3378,9 @@ async function buildApp() {
       database,
       auth: "ready",
       ai: process.env.AI_PROVIDER === "ollama" ? "ollama_configured" : process.env.GEMINI_API_KEY ? "gemini_enabled" : "pollinations_free",
+      // Why the last live AI attempt degraded (null when healthy) — honest,
+      // machine-readable diagnostics for ops and smoke tests.
+      aiUpstream: getLastAiUpstream(),
       mode: process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "production" ? "demo" : "authenticated"
     });
   });
@@ -4334,6 +4412,8 @@ async function buildApp() {
           send({
             type: "done",
             text: finalText,
+            engine: response2.engine,
+            upstream: response2.upstream ?? null,
             groundingSources: response2.groundingSources,
             videos: response2.videos,
             videoQuery: response2.videoQuery,

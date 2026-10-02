@@ -69,7 +69,7 @@ async function queryPollinations(systemInstruction: string, prompt: string): Pro
     try {
       const response = await fetch('https://text.pollinations.ai/openai', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: pollinationsHeaders({ 'Content-Type': 'application/json', Accept: 'application/json' }),
         signal: AbortSignal.timeout(20_000),
         body: JSON.stringify({
           model: 'openai',
@@ -80,6 +80,7 @@ async function queryPollinations(systemInstruction: string, prompt: string): Pro
         }),
       });
       if (!response.ok) {
+        lastAiUpstream = `pollinations_http_${response.status}`;
         console.warn(`Pollinations HTTP ${response.status} (attempt ${attempt + 1});`);
         if (attempt === 0) {
           await new Promise((r) => setTimeout(r, 600));
@@ -89,13 +90,18 @@ async function queryPollinations(systemInstruction: string, prompt: string): Pro
       }
       const data = await response.json() as { choices?: { message?: { content?: string } }[] };
       const text = data.choices?.[0]?.message?.content?.trim();
-      if (text) return text;
+      if (text) {
+        lastAiUpstream = null;
+        return text;
+      }
+      lastAiUpstream = 'pollinations_empty_reply';
       if (attempt === 0) {
         await new Promise((r) => setTimeout(r, 600));
         continue;
       }
       return null;
     } catch (error) {
+      lastAiUpstream = `pollinations_${(error as Error)?.name || 'network_error'}`;
       console.warn('Pollinations unavailable; using the local deterministic fallback.', error instanceof Error ? error.message : error);
       return null; // network/timeout — retrying immediately rarely helps
     }
@@ -121,7 +127,7 @@ async function queryPollinationsStream(
     try {
       response = await fetch('https://text.pollinations.ai/openai', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+        headers: pollinationsHeaders({ 'Content-Type': 'application/json', Accept: 'text/event-stream' }),
         signal: AbortSignal.timeout(24_000),
         body: JSON.stringify({
           model: 'openai',
@@ -138,6 +144,7 @@ async function queryPollinationsStream(
     }
 
     if (!response.ok || !response.body) {
+      lastAiUpstream = `pollinations_stream_http_${response.status}`;
       console.warn(`Pollinations stream HTTP ${response.status} (attempt ${attempt + 1});`);
       if (attempt === 0) {
         await new Promise((r) => setTimeout(r, 600));
@@ -158,6 +165,7 @@ async function queryPollinationsStream(
         const content = json.choices?.[0]?.message?.content;
         if (content) text = content;
       } catch { /* plain-text body */ }
+      lastAiUpstream = null;
       onDelta(text);
       return text;
     }
@@ -188,13 +196,63 @@ async function queryPollinationsStream(
           } catch { /* keep partial frames for the next line */ }
         }
       }
-      return full.trim() || null;
+      if (full.trim()) {
+        lastAiUpstream = null;
+        return full.trim();
+      }
+      lastAiUpstream = 'pollinations_stream_empty_reply';
+      return null;
     } catch (error) {
+      lastAiUpstream = `pollinations_stream_${(error as Error)?.name || 'network_error'}`;
       console.warn('Pollinations stream aborted; using a full response instead.', error instanceof Error ? error.message : error);
       return null;
     }
   }
   return null;
+}
+
+/**
+ * Legacy plain endpoint — same Pollinations models at a different route, used
+ * when /openai misbehaves. Still a REAL model answer (never the local KB).
+ */
+async function queryPollinationsLegacy(systemInstruction: string, prompt: string): Promise<string | null> {
+  try {
+    const response = await fetch('https://text.pollinations.ai/', {
+      method: 'POST',
+      headers: pollinationsHeaders({ 'Content-Type': 'application/json' }),
+      signal: AbortSignal.timeout(20_000),
+      body: JSON.stringify({
+        model: 'openai',
+        messages: [
+          { role: 'system', content: systemInstruction },
+          { role: 'user', content: prompt },
+        ],
+      }),
+    });
+    if (!response.ok) {
+      lastAiUpstream = `pollinations_legacy_http_${response.status}`;
+      return null;
+    }
+    const text = (await response.text()).trim();
+    if (!text) {
+      lastAiUpstream = 'pollinations_legacy_empty';
+      return null;
+    }
+    if (text.startsWith('{')) {
+      try {
+        const json = JSON.parse(text) as { error?: unknown };
+        if (json && json.error) {
+          lastAiUpstream = `pollinations_legacy_error_${String(json.error).slice(0, 40)}`;
+          return null;
+        }
+      } catch { /* the model legitimately answered JSON */ }
+    }
+    lastAiUpstream = null;
+    return text;
+  } catch (error) {
+    lastAiUpstream = `pollinations_legacy_${(error as Error)?.name || 'network_error'}`;
+    return null;
+  }
 }
 
 async function queryOllamaStream(
@@ -302,6 +360,14 @@ DOCS UI SECTIONS: overview, authentication, scopes, endpoints, webhooks, bots, e
 
 export interface AiQueryResult {
   text: string;
+  /**
+   * Which engine actually produced `text`. `local_kb` means every live
+   * provider was unreachable and the disclosed built-in knowledge base
+   * answered instead — never presented as a model reply.
+   */
+  engine?: 'ollama' | 'gemini' | 'pollinations' | 'pollinations_legacy' | 'local_kb';
+  /** Last upstream failure reason (e.g. `pollinations_http_500`) when degraded. */
+  upstream?: string | null;
   groundingSources?: { title: string; url: string }[];
   videos?: any[];
   videoQuery?: string;
@@ -311,6 +377,26 @@ export interface AiQueryResult {
     permission: any;
     status: 'pending';
   };
+}
+
+// Diagnostics: why the last live-provider attempt failed, surfaced through
+// chat responses and /ready so a degraded answer is always explainable.
+let lastAiUpstream: string | null = null;
+export function getLastAiUpstream(): string | null {
+  return lastAiUpstream;
+}
+
+// Undici's default `node` UA plus datacenter egress trips bot rules on some
+// free gateways; present a normal browser identity instead.
+const BROWSER_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+/** Optional Pollinations API token (set as POLLINATIONS_TOKEN in the env). */
+function pollinationsHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  const headers: Record<string, string> = { 'User-Agent': BROWSER_UA, ...extra };
+  const token = process.env.POLLINATIONS_TOKEN;
+  if (token) headers.authorization = `Bearer ${token}`;
+  return headers;
 }
 
 interface PreparedQuery {
@@ -390,7 +476,7 @@ async function runFullQuery(options: GenerateAiOptions, prep: PreparedQuery): Pr
 
   const ollamaText = await queryOllama(selectedInstruction, prompt);
   if (ollamaText) {
-    return { text: ollamaText, videos: retrievedVideos, videoQuery: videoQueryStr };
+    return { text: ollamaText, engine: 'ollama' as const, videos: retrievedVideos, videoQuery: videoQueryStr };
   }
 
   const ai = process.env.AI_PROVIDER === 'ollama' ? null : getAiClient();
@@ -430,6 +516,7 @@ async function runFullQuery(options: GenerateAiOptions, prep: PreparedQuery): Pr
 
         return {
           text,
+          engine: 'gemini' as const,
           groundingSources: groundingSources.length > 0 ? groundingSources : undefined,
           videos: retrievedVideos,
           videoQuery: videoQueryStr,
@@ -452,10 +539,17 @@ async function runFullQuery(options: GenerateAiOptions, prep: PreparedQuery): Pr
   }
 
   // Free keyless model (Pollinations) — real answers whenever no paid
-  // provider is configured (or they all failed). Last resort: canned local.
+  // provider is configured (or they all failed).
   const freeText = await queryPollinations(selectedInstruction, prompt);
   if (freeText) {
-    return { text: freeText, videos: retrievedVideos, videoQuery: videoQueryStr };
+    return { text: freeText, engine: 'pollinations' as const, videos: retrievedVideos, videoQuery: videoQueryStr };
+  }
+
+  // Second real route on the same free engine (legacy endpoint) — still a
+  // live model answer whenever it responds.
+  const legacyText = await queryPollinationsLegacy(selectedInstruction, prompt);
+  if (legacyText) {
+    return { text: legacyText, engine: 'pollinations_legacy' as const, videos: retrievedVideos, videoQuery: videoQueryStr };
   }
 
   // Last resort: deterministic local knowledge-base reply. Clearly disclose
@@ -467,6 +561,8 @@ async function runFullQuery(options: GenerateAiOptions, prep: PreparedQuery): Pr
   return {
     ...fallback,
     text: `${notice}${fallback.text}`,
+    engine: 'local_kb' as const,
+    upstream: lastAiUpstream,
     videos: retrievedVideos,
     videoQuery: videoQueryStr,
   };
@@ -500,12 +596,15 @@ export async function processAiQueryStream(
     !!options.enableWebSearch && process.env.AI_PROVIDER !== 'ollama' && !!getAiClient();
 
   if (!needsGeminiGrounding) {
-    let streamed = await queryOllamaStream(prep.instruction, options.prompt, emit);
-    if (streamed === null && !emitted) {
-      streamed = await queryPollinationsStream(prep.instruction, options.prompt, emit);
+    const ollamaStreamed = await queryOllamaStream(prep.instruction, options.prompt, emit);
+    if (ollamaStreamed !== null) {
+      return { text: ollamaStreamed, engine: 'ollama' as const, videos: prep.videos, videoQuery: prep.videoQuery };
     }
-    if (streamed !== null) {
-      return { text: streamed, videos: prep.videos, videoQuery: prep.videoQuery };
+    if (!emitted) {
+      const polliStreamed = await queryPollinationsStream(prep.instruction, options.prompt, emit);
+      if (polliStreamed !== null) {
+        return { text: polliStreamed, engine: 'pollinations' as const, videos: prep.videos, videoQuery: prep.videoQuery };
+      }
     }
   }
 

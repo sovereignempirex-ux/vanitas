@@ -181,6 +181,7 @@ r = await call('POST', '/ai/chat', {
 });
 const aiText = r.json?.text || '';
 check('POST /ai/chat → 200 with a real reply', r.status === 200 && typeof aiText === 'string' && aiText.length >= 30, { status: r.status, text: aiText.slice(0, 220) });
+check('reply comes from a REAL model engine (not the disclosed local KB)', !!r.json?.engine && r.json.engine !== 'local_kb', { engine: r.json?.engine, upstream: r.json?.upstream });
 
 // Site-awareness: every system prompt carries verified facts about THIS
 // deployment (real routes, scopes, limits), so the model must name real paths.
@@ -229,6 +230,7 @@ try {
   }
   check('stream emits progressive deltas', deltas >= 1, { deltas });
   check('stream done event carries full text', !!done && typeof done.text === 'string' && done.text.length >= 30, { text: String(done?.text || '').slice(0, 120) });
+  check('stream done reports which engine answered', !!done?.engine, { engine: done?.engine, upstream: done?.upstream ?? null });
 } catch (err) {
   check('stream request reachable', false, err.message);
 }

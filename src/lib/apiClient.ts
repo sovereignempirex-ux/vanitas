@@ -409,6 +409,8 @@ class ApiClient {
     onDelta: (delta: string) => void,
   ): Promise<{
     text: string;
+    engine?: string;
+    upstream?: string | null;
     groundingSources?: { title: string; url: string }[];
     videos?: YouTubeVideoItem[];
     videoQuery?: string;
@@ -484,6 +486,8 @@ class ApiClient {
     if (final) {
       return {
         text: typeof final.text === 'string' ? final.text : accumulated,
+        engine: final.engine,
+        upstream: final.upstream,
         groundingSources: final.groundingSources,
         videos: final.videos,
         videoQuery: final.videoQuery,
