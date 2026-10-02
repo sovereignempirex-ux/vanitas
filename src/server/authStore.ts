@@ -176,6 +176,14 @@ export async function createAccount(params: { email: string; password: string; n
   return { ok: true, user };
 }
 
+// A session's cached user must not outlive profile edits made to the
+// account — drop every cached resolution that points at this user.
+function invalidateResolveCache(userId: string): void {
+  for (const [key, rec] of resolveCache) {
+    if (rec.user?.id === userId) resolveCache.delete(key);
+  }
+}
+
 // Persist real profile edits (display name + avatar) to the account record.
 export async function updateProfile(
   userId: string,
@@ -186,13 +194,16 @@ export async function updateProfile(
       'update public.users set name = $2, avatar_url = $3 where id = $1 returning *',
       [userId, updates.name, updates.avatarUrl],
     );
-    return result.rows[0] ? rowToUser(result.rows[0]) : null;
+    const user = result.rows[0] ? rowToUser(result.rows[0]) : null;
+    if (user) invalidateResolveCache(userId); // /auth/me must reflect fresh edits
+    return user;
   }
 
   const user = db.users.find((u) => u.id === userId);
   if (!user) return null;
   user.name = updates.name;
   user.avatarUrl = updates.avatarUrl || DEFAULT_AVATAR;
+  invalidateResolveCache(userId);
   return user;
 }
 
@@ -205,17 +216,16 @@ export async function forgetAccount(userId: string): Promise<void> {
   if (databasePool) {
     await databasePool.query('delete from public.api_keys where owner_id = $1', [userId]);
     await databasePool.query('delete from public.users where id = $1', [userId]);
-    return;
+  } else {
+    const idx = db.users.findIndex((u) => u.id === userId);
+    if (idx !== -1) {
+      const [removed] = db.users.splice(idx, 1);
+      if (removed) memoryPasswords.delete(removed.email);
+    }
+    db.apiKeys = db.apiKeys.filter((k) => k.ownerId !== userId);
+    for (const [key, rec] of memorySessions) if (rec.userId === userId) memorySessions.delete(key);
+    for (const [key, uid] of memoryIdentities) if (uid === userId) memoryIdentities.delete(key);
   }
-
-  const idx = db.users.findIndex((u) => u.id === userId);
-  if (idx !== -1) {
-    const [removed] = db.users.splice(idx, 1);
-    if (removed) memoryPasswords.delete(removed.email);
-  }
-  db.apiKeys = db.apiKeys.filter((k) => k.ownerId !== userId);
-  for (const [key, rec] of memorySessions) if (rec.userId === userId) memorySessions.delete(key);
-  for (const [key, uid] of memoryIdentities) if (uid === userId) memoryIdentities.delete(key);
   // Cached session resolutions must not outlive the account they point to.
   resolveCache.clear();
 }

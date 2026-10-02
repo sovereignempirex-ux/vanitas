@@ -1068,34 +1068,42 @@ async function createAccount(params) {
   memoryPasswords.set(email, { userId: user.id, hash: passwordHash });
   return { ok: true, user };
 }
+function invalidateResolveCache(userId) {
+  for (const [key, rec] of resolveCache) {
+    if (rec.user?.id === userId) resolveCache.delete(key);
+  }
+}
 async function updateProfile(userId, updates) {
   if (databasePool) {
     const result = await databasePool.query(
       "update public.users set name = $2, avatar_url = $3 where id = $1 returning *",
       [userId, updates.name, updates.avatarUrl]
     );
-    return result.rows[0] ? rowToUser(result.rows[0]) : null;
+    const user2 = result.rows[0] ? rowToUser(result.rows[0]) : null;
+    if (user2) invalidateResolveCache(userId);
+    return user2;
   }
   const user = db.users.find((u) => u.id === userId);
   if (!user) return null;
   user.name = updates.name;
   user.avatarUrl = updates.avatarUrl || DEFAULT_AVATAR;
+  invalidateResolveCache(userId);
   return user;
 }
 async function forgetAccount(userId) {
   if (databasePool) {
     await databasePool.query("delete from public.api_keys where owner_id = $1", [userId]);
     await databasePool.query("delete from public.users where id = $1", [userId]);
-    return;
+  } else {
+    const idx = db.users.findIndex((u) => u.id === userId);
+    if (idx !== -1) {
+      const [removed] = db.users.splice(idx, 1);
+      if (removed) memoryPasswords.delete(removed.email);
+    }
+    db.apiKeys = db.apiKeys.filter((k) => k.ownerId !== userId);
+    for (const [key, rec] of memorySessions) if (rec.userId === userId) memorySessions.delete(key);
+    for (const [key, uid] of memoryIdentities) if (uid === userId) memoryIdentities.delete(key);
   }
-  const idx = db.users.findIndex((u) => u.id === userId);
-  if (idx !== -1) {
-    const [removed] = db.users.splice(idx, 1);
-    if (removed) memoryPasswords.delete(removed.email);
-  }
-  db.apiKeys = db.apiKeys.filter((k) => k.ownerId !== userId);
-  for (const [key, rec] of memorySessions) if (rec.userId === userId) memorySessions.delete(key);
-  for (const [key, uid] of memoryIdentities) if (uid === userId) memoryIdentities.delete(key);
   resolveCache.clear();
 }
 async function verifyAccount(email, password) {
