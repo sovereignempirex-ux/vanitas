@@ -28,6 +28,10 @@ async function pickInitialRole(email: string): Promise<UserRole> {
   if (databasePool) {
     const count = await databasePool.query('select count(*)::int as n from public.users');
     if ((count.rows[0]?.n ?? 0) === 0) return 'ADMIN';
+  } else if (db.users.length === 0) {
+    // In-memory mode mirrors PostgreSQL: the very first account bootstraps
+    // as ADMIN so a fresh install always has an owner.
+    return 'ADMIN';
   }
   return 'USER';
 }
@@ -190,6 +194,30 @@ export async function updateProfile(
   user.name = updates.name;
   user.avatarUrl = updates.avatarUrl || DEFAULT_AVATAR;
   return user;
+}
+
+/**
+ * Permanently delete an account: credentials, sessions (FK cascade),
+ * OAuth identities (FK cascade), comments (FK cascade), and API keys
+ * (no FK — removed explicitly). Used by DELETE /auth/account.
+ */
+export async function forgetAccount(userId: string): Promise<void> {
+  if (databasePool) {
+    await databasePool.query('delete from public.api_keys where owner_id = $1', [userId]);
+    await databasePool.query('delete from public.users where id = $1', [userId]);
+    return;
+  }
+
+  const idx = db.users.findIndex((u) => u.id === userId);
+  if (idx !== -1) {
+    const [removed] = db.users.splice(idx, 1);
+    if (removed) memoryPasswords.delete(removed.email);
+  }
+  db.apiKeys = db.apiKeys.filter((k) => k.ownerId !== userId);
+  for (const [key, rec] of memorySessions) if (rec.userId === userId) memorySessions.delete(key);
+  for (const [key, uid] of memoryIdentities) if (uid === userId) memoryIdentities.delete(key);
+  // Cached session resolutions must not outlive the account they point to.
+  resolveCache.clear();
 }
 
 export async function verifyAccount(email: string, password: string): Promise<AuthOutcome> {

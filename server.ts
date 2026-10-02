@@ -3,7 +3,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { db, ALL_SCOPES } from './src/server/db.ts';
 import { databasePool, ensureCommentsSchema } from './src/server/pg.ts';
-import { createAccount, verifyAccount, createSession, resolveSession, revokeSession, upsertOAuthUser, updateProfile } from './src/server/authStore.ts';
+import { createAccount, verifyAccount, createSession, resolveSession, revokeSession, upsertOAuthUser, updateProfile, forgetAccount } from './src/server/authStore.ts';
 import {
   getProviderConfig,
   isOAuthProvider,
@@ -452,6 +452,48 @@ export async function buildApp() {
     res.json({ success: true });
   });
 
+  // Delete the caller's OWN account — sessions, API keys, OAuth links, and
+  // comments go with it. The last admin can only delete themselves when no
+  // other accounts remain (so the system is never left adminless).
+  app.delete('/api/v1/auth/account', async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
+
+    if (actor.role === 'ADMIN') {
+      let otherUsers = 0;
+      let otherAdmins = 0;
+      if (databasePool) {
+        const counts = await databasePool.query(
+          `select (select count(*) from public.users where id <> $1) as other_users,
+                  (select count(*) from public.users where role = 'ADMIN' and id <> $1) as other_admins`,
+          [actor.id],
+        );
+        otherUsers = Number(counts.rows[0].other_users);
+        otherAdmins = Number(counts.rows[0].other_admins);
+      } else {
+        const others = db.users.filter((u) => u.id !== actor.id);
+        otherUsers = others.length;
+        otherAdmins = others.filter((u) => u.role === 'ADMIN').length;
+      }
+      if (otherUsers > 0 && otherAdmins === 0) {
+        return res.status(403).json({ error: 'Promote another admin before deleting the last admin account' });
+      }
+    }
+
+    try {
+      await forgetAccount(actor.id);
+      if (!databasePool) {
+        for (let i = memoryComments.length - 1; i >= 0; i--) {
+          if (memoryComments[i].userId === actor.id) memoryComments.splice(i, 1);
+        }
+      }
+      res.json({ success: true });
+    } catch (err) {
+      console.error('[auth/account] delete failed:', (err as Error).message);
+      res.status(500).json({ error: 'Account deletion failed' });
+    }
+  });
+
   // ----------------------------------------------------
   // DOC COMMENTS — real, DB-backed, written by registered users only.
   // Reading is public; posting requires a real session; only the author
@@ -476,7 +518,9 @@ export async function buildApp() {
     if (!actor) return res.status(401).json({ error: 'Sign in to post a comment' });
     const docId = sanitizeText(req.params.docId, 64).toLowerCase();
     if (!DOC_ID_RE.test(docId)) return res.status(400).json({ error: 'Invalid doc id' });
-    const body = sanitizeText(typeof req.body?.body === 'string' ? req.body.body : '', 2000).trim();
+    const rawBody = typeof req.body?.body === 'string' ? req.body.body : '';
+    if (rawBody.length > 2000) return res.status(400).json({ error: 'Comment must be between 2 and 2000 characters' });
+    const body = sanitizeText(rawBody, 2000).trim();
     if (body.length < 2) return res.status(400).json({ error: 'Comment must be between 2 and 2000 characters' });
     try {
       // Never bloat the comments table with a 300KB avatar data-URL — the UI

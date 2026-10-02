@@ -124,5 +124,18 @@ check('cleanup delete → success', r.status === 200 && r.json?.success === true
 r = await call('GET', `/comments/${doc}`);
 check('doc empty after cleanup', r.json?.total === 0, r.json);
 
+console.log('— account cleanup (production stays empty) —');
+// B first: A may hold the bootstrap ADMIN role while B still exists.
+r = await call('DELETE', '/auth/account', { token: tokB });
+check('B deletes own account', r.status === 200 && r.json?.success === true, r);
+r = await call('DELETE', '/auth/account', { token: tokA });
+check('A deletes own account', r.status === 200 && r.json?.success === true, r);
+r = await call('POST', '/auth/register', {
+  body: { email: `cmt_final_${stamp}@example.com`, password: 'CommentPass123!', name: 'Final Check' },
+});
+check('DB empty → bootstrap ADMIN again', r.status === 201 && r.json?.user?.role === 'ADMIN', r.json?.user);
+r = await call('DELETE', '/auth/account', { token: r.json?.token });
+check('final account removed', r.status === 200, r);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

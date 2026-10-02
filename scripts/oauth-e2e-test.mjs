@@ -152,6 +152,19 @@ async function main() {
     process.exit(1);
   }
 
+  // This server boots with an empty in-memory DB, whose FIRST account
+  // legitimately bootstraps as ADMIN (same rule as a fresh PostgreSQL
+  // install). Register a primer so the OAuth sign-ups below are ordinary
+  // second-account registrations and must come out as USER.
+  const primEmail = `primer_${Date.now()}@example.com`;
+  const primRes = await fetch(`${appBase}/api/v1/auth/register`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email: primEmail, password: 'PrimerPass123!', name: 'Suite Primer' }),
+  });
+  const primJson = await primRes.json().catch(() => null);
+  check('primer owns the bootstrap slot (first account → ADMIN)', primRes.status === 201 && primJson?.user?.role === 'ADMIN', primJson);
+
   try {
     console.log('— providers detection —');
     const provRes = await fetch(`${appBase}/api/v1/auth/providers`);

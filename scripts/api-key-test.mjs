@@ -57,6 +57,13 @@ if (!up) {
 
 // ---- account ---------------------------------------------------------------
 console.log('— account —');
+// Occupy the first-account bootstrap slot first: the tester below must be an
+// ordinary USER (later checks assert USER-level limits, e.g. being refused an
+// adminOnly scope). On a non-empty database the primer is a USER too.
+const primerEmail = `apikey_primer_${Date.now()}@example.com`;
+const primer = await call('POST', '/auth/register', { body: { email: primerEmail, password: 'SuperSecret123!', name: 'API Key Primer' } });
+check('primer registers (occupies bootstrap slot)', primer.status === 201, primer);
+
 const email = `apikey_${Date.now()}@example.com`;
 let r = await call('POST', '/auth/register', { body: { email, password: 'SuperSecret123!', name: 'API Key Tester' } });
 check('register → 201', r.status === 201, r);

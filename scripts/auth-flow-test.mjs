@@ -57,7 +57,7 @@ console.log('— register —');
 let r = await call('POST', '/auth/register', { body: { email, password, name: 'Test User' } });
 check('register → 201', r.status === 201, r);
 check('register returns token', typeof r.json?.token === 'string' && r.json.token.startsWith('vnt_sess_'), r.json);
-check('register returns USER role', r.json?.user?.role === 'USER', r.json?.user);
+check('fresh DB → first register bootstraps as ADMIN', r.json?.user?.role === 'ADMIN', r.json?.user);
 check('register never leaks password_hash', !JSON.stringify(r.json).includes('scrypt$'), r.json);
 const regToken = r.json?.token;
 const userId = r.json?.user?.id;
@@ -132,6 +132,18 @@ check('redirect reports not_configured', startLoc.includes('vnt_error=not_config
 const unknownRes = await fetch(`${BASE}/social/nonsense`, { redirect: 'manual' });
 const unknownLoc = unknownRes.headers.get('location') || '';
 check('unknown provider → unknown_provider', unknownLoc.includes('vnt_error=unknown_provider'), unknownLoc);
+
+console.log('— account self-deletion (real lifecycle) —');
+r = await call('DELETE', '/auth/account');
+check('DELETE account without token → 401', r.status === 401, r);
+r = await call('DELETE', '/auth/account', { token: loginToken });
+check('delete own account → success', r.status === 200 && r.json?.success === true, r);
+r = await call('GET', '/auth/me', { token: loginToken });
+check('session dies with the account → 401', r.status === 401, r);
+r = await call('POST', '/auth/register', { body: { email, password, name: 'Test User' } });
+check('DB empty again → re-register bootstraps as ADMIN', r.status === 201 && r.json?.user?.role === 'ADMIN', r.json?.user);
+r = await call('DELETE', '/auth/account', { token: r.json?.token });
+check('final cleanup → account deleted', r.status === 200, r);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

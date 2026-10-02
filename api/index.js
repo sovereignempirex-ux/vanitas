@@ -952,6 +952,8 @@ async function pickInitialRole(email) {
   if (databasePool) {
     const count = await databasePool.query("select count(*)::int as n from public.users");
     if ((count.rows[0]?.n ?? 0) === 0) return "ADMIN";
+  } else if (db.users.length === 0) {
+    return "ADMIN";
   }
   return "USER";
 }
@@ -1079,6 +1081,22 @@ async function updateProfile(userId, updates) {
   user.name = updates.name;
   user.avatarUrl = updates.avatarUrl || DEFAULT_AVATAR;
   return user;
+}
+async function forgetAccount(userId) {
+  if (databasePool) {
+    await databasePool.query("delete from public.api_keys where owner_id = $1", [userId]);
+    await databasePool.query("delete from public.users where id = $1", [userId]);
+    return;
+  }
+  const idx = db.users.findIndex((u) => u.id === userId);
+  if (idx !== -1) {
+    const [removed] = db.users.splice(idx, 1);
+    if (removed) memoryPasswords.delete(removed.email);
+  }
+  db.apiKeys = db.apiKeys.filter((k) => k.ownerId !== userId);
+  for (const [key, rec] of memorySessions) if (rec.userId === userId) memorySessions.delete(key);
+  for (const [key, uid] of memoryIdentities) if (uid === userId) memoryIdentities.delete(key);
+  resolveCache.clear();
 }
 async function verifyAccount(email, password) {
   const clean = email.trim().toLowerCase();
@@ -3129,6 +3147,42 @@ async function buildApp() {
     }
     res.json({ success: true });
   });
+  app.delete("/api/v1/auth/account", async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
+    if (actor.role === "ADMIN") {
+      let otherUsers = 0;
+      let otherAdmins = 0;
+      if (databasePool) {
+        const counts = await databasePool.query(
+          `select (select count(*) from public.users where id <> $1) as other_users,
+                  (select count(*) from public.users where role = 'ADMIN' and id <> $1) as other_admins`,
+          [actor.id]
+        );
+        otherUsers = Number(counts.rows[0].other_users);
+        otherAdmins = Number(counts.rows[0].other_admins);
+      } else {
+        const others = db.users.filter((u) => u.id !== actor.id);
+        otherUsers = others.length;
+        otherAdmins = others.filter((u) => u.role === "ADMIN").length;
+      }
+      if (otherUsers > 0 && otherAdmins === 0) {
+        return res.status(403).json({ error: "Promote another admin before deleting the last admin account" });
+      }
+    }
+    try {
+      await forgetAccount(actor.id);
+      if (!databasePool) {
+        for (let i = memoryComments.length - 1; i >= 0; i--) {
+          if (memoryComments[i].userId === actor.id) memoryComments.splice(i, 1);
+        }
+      }
+      res.json({ success: true });
+    } catch (err) {
+      console.error("[auth/account] delete failed:", err.message);
+      res.status(500).json({ error: "Account deletion failed" });
+    }
+  });
   const DOC_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
   app.get("/api/v1/comments/:docId", async (req, res) => {
     const docId = sanitizeText(req.params.docId, 64).toLowerCase();
@@ -3146,7 +3200,9 @@ async function buildApp() {
     if (!actor) return res.status(401).json({ error: "Sign in to post a comment" });
     const docId = sanitizeText(req.params.docId, 64).toLowerCase();
     if (!DOC_ID_RE.test(docId)) return res.status(400).json({ error: "Invalid doc id" });
-    const body = sanitizeText(typeof req.body?.body === "string" ? req.body.body : "", 2e3).trim();
+    const rawBody = typeof req.body?.body === "string" ? req.body.body : "";
+    if (rawBody.length > 2e3) return res.status(400).json({ error: "Comment must be between 2 and 2000 characters" });
+    const body = sanitizeText(rawBody, 2e3).trim();
     if (body.length < 2) return res.status(400).json({ error: "Comment must be between 2 and 2000 characters" });
     try {
       const avatar = (actor.avatarUrl || "").slice(0, 2e3);
