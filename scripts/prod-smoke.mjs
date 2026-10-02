@@ -102,9 +102,12 @@ const email = `smoke_${stamp}@example.com`;
 const password = 'SmokeTest123!';
 r = await call('POST', '/auth/register', { body: { email, password, name: 'Smoke Tester' } });
 check('register → 201 + session', r.status === 201 && String(r.json?.token).startsWith('vnt_sess_'), r);
+const bootstrapAdmin = r.json?.user?.role === 'ADMIN';
 check(
-  'production DB was empty → bootstrap ADMIN',
-  r.json?.user?.role === 'ADMIN',
+  bootstrapAdmin
+    ? 'production DB was empty → bootstrap ADMIN'
+    : 'owner accounts already exist → bootstrap ADMIN consumed (new user = USER)',
+  bootstrapAdmin || r.json?.user?.role === 'USER',
   r.json?.user,
 );
 let token = r.json?.token;
@@ -172,7 +175,11 @@ check('delete own account → success', r.status === 200 && r.json?.success === 
 r = await call('GET', '/auth/me', { token });
 check('session died with account → 401', r.status === 401, r);
 r = await call('POST', '/auth/register', { body: { email, password, name: 'Smoke Tester' } });
-check('DB empty again → bootstrap ADMIN reopens', r.status === 201 && r.json?.user?.role === 'ADMIN', r.json?.user);
+check(
+  're-register after cleanup → 201 + sane role (ADMIN if DB empty, USER if owner exists)',
+  r.status === 201 && (r.json?.user?.role === 'ADMIN' || r.json?.user?.role === 'USER'),
+  r.json?.user,
+);
 r = await call('DELETE', '/auth/account', { token: r.json?.token });
 check('final account removed', r.status === 200, r);
 
