@@ -7,3 +7,6 @@ coverage/
 .env*
 !.env.example
 vanitas (1)/
+
+.vercel
+.env*
