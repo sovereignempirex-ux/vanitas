@@ -102,7 +102,7 @@ function usernameFromEmail(email: string, isTaken: (u: string) => boolean): stri
   return candidate;
 }
 
-function rowToUser(row: Record<string, any>): User {
+export function rowToUser(row: Record<string, any>): User {
   const iso = (v: any) => (v instanceof Date ? v.toISOString() : v || undefined);
   return {
     id: row.id,
@@ -112,6 +112,7 @@ function rowToUser(row: Record<string, any>): User {
     avatarUrl: row.avatar_url || DEFAULT_AVATAR,
     bio: row.bio || undefined,
     role: row.role === 'ADMIN' ? 'ADMIN' : 'USER',
+    verification: ['USER', 'DEVELOPER', 'ADMIN'].includes(row.verification) ? row.verification : '',
     twoFactorEnabled: !!row.two_factor_enabled,
     createdAt: iso(row.created_at) || new Date().toISOString(),
     lastLoginAt: iso(row.last_login_at) || iso(row.created_at) || new Date().toISOString(),
@@ -166,6 +167,7 @@ export async function createAccount(params: { email: string; password: string; n
     username: usernameFromEmail(email, (u) => db.users.some((x) => x.username === u)),
     avatarUrl: DEFAULT_AVATAR,
     role,
+    verification: '',
     twoFactorEnabled: false,
     createdAt: new Date().toISOString(),
     lastLoginAt: new Date().toISOString(),
@@ -512,6 +514,7 @@ export async function upsertOAuthUser(p: OAuthIdentityParams): Promise<User> {
     username: usernameFromEmail(email || `${provider}${providerId}`, (u) => db.users.some((x) => x.username === u)),
     avatarUrl,
     role: await pickInitialRole(email),
+    verification: '',
     twoFactorEnabled: false,
     createdAt: nowIso,
     lastLoginAt: nowIso,

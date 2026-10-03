@@ -25,6 +25,7 @@ import {
   MessageSquare,
   Sparkles,
 } from 'lucide-react';
+import { VerifiedBadge } from '../VerifiedBadge.tsx';
 
 type ScopeEntry = { scope: PermissionScope; label: string; group: string; adminOnly: boolean };
 
@@ -149,6 +150,20 @@ export const AdminCenterView: React.FC = () => {
       setError(null);
       await api.updateUserRole(userId, newRole);
       flashSuccess(`User role updated to ${newRole}`);
+      loadAdminData();
+    } catch (err: any) {
+      setError(err.message);
+    }
+  };
+
+  const handleVerificationChange = async (u: User, value: string) => {
+    const current = u.verification || '';
+    if (value === current) return;
+    if (!confirm(`Set verification badge for ${u.name} to "${value || 'none'}"?`)) return;
+    try {
+      setError(null);
+      await api.updateUserVerification(u.id, value);
+      flashSuccess(`Badge for ${u.name}: ${value || 'revoked'}.`);
       loadAdminData();
     } catch (err: any) {
       setError(err.message);
@@ -422,6 +437,7 @@ export const AdminCenterView: React.FC = () => {
                           <div>
                             <p className="font-semibold text-white">
                               {u.name}
+                              <VerifiedBadge type={u.verification} className="ml-1.5" />
                               {u.id === user?.id && (
                                 <span className="ml-2 rounded bg-emerald-500/15 px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase text-emerald-300">
                                   you
@@ -456,6 +472,17 @@ export const AdminCenterView: React.FC = () => {
                       </td>
                       <td className="py-3.5 px-4 text-right">
                         <div className="flex items-center justify-end gap-2">
+                          <select
+                            value={u.verification || ''}
+                            onChange={(e) => handleVerificationChange(u, e.target.value)}
+                            title="Verification badge — only admins can grant it"
+                            className="rounded-lg border border-white/10 bg-slate-900 px-2 py-1 text-[11px] text-slate-300 focus:border-amber-500 focus:outline-none"
+                          >
+                            <option value="">No badge</option>
+                            <option value="USER">✓ Verified</option>
+                            <option value="DEVELOPER">⚙ Developer</option>
+                            <option value="ADMIN">🛡 Admin</option>
+                          </select>
                           {u.id === user?.id ? (
                             <span className="rounded-lg border border-emerald-500/30 bg-emerald-950/20 px-2.5 py-1 text-[11px] font-semibold text-emerald-300">
                               You

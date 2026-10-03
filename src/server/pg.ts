@@ -46,6 +46,7 @@ create table if not exists public.ai_chat_messages (
 create index if not exists ai_chat_user_created_idx on public.ai_chat_messages (user_id, created_at desc);
 alter table public.ai_chat_messages enable row level security;
 alter table if exists public.users add column if not exists two_factor_secret text not null default '';
+alter table if exists public.users add column if not exists verification text not null default '';
 `;
 
 let schemaReady: Promise<void> | null = null;

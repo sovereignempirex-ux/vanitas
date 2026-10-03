@@ -1,5 +1,11 @@
 export type UserRole = 'USER' | 'ADMIN';
 
+/**
+ * Account verification badge (Meta/TikTok style, granted by admins only):
+ * '' = no badge, USER = verified member, DEVELOPER = builder, ADMIN = staff.
+ */
+export type VerificationType = '' | 'USER' | 'DEVELOPER' | 'ADMIN';
+
 export type ClientSource = 'WEB' | 'BOT' | 'MOBILE' | 'DESKTOP' | 'APPLICATION' | 'OTHER';
 
 export interface User {
@@ -10,6 +16,8 @@ export interface User {
   avatarUrl: string;
   bio?: string;
   role: UserRole;
+  /** Verification badge granted by an admin — see VerificationType. */
+  verification: VerificationType;
   twoFactorEnabled: boolean;
   createdAt: string;
   lastLoginAt: string;

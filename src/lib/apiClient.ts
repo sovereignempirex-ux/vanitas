@@ -298,6 +298,13 @@ class ApiClient {
     });
   }
 
+  async updateUserVerification(id: string, verification: string) {
+    return this.request<{ success: boolean; user: User }>(`/admin/users/${id}/verification`, {
+      method: 'PATCH',
+      body: JSON.stringify({ verification }),
+    });
+  }
+
   async getAdminLogs(params: { limit?: number; offset?: number; from?: string; category?: string; search?: string }) {
     const query = new URLSearchParams();
     if (params.limit) query.set('limit', params.limit.toString());

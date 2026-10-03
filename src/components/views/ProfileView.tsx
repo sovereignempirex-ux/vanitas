@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useAuth } from '../../context/AuthContext.tsx';
 import { CHARACTER_AVATARS, BRAND_ASSETS } from '../../data/assets.ts';
+import { VerifiedBadge } from '../VerifiedBadge.tsx';
 import {
   User,
   Shield,
@@ -101,7 +102,10 @@ export const ProfileView: React.FC = () => {
               />
             </div>
 
-            <h2 className="mt-4 text-base font-bold text-white">{name}</h2>
+            <div className="mt-4 flex items-center justify-center gap-2">
+              <h2 className="text-base font-bold text-white">{name}</h2>
+              <VerifiedBadge type={user?.verification} label />
+            </div>
             <p className="font-mono text-xs text-slate-400">{user?.email}</p>
 
             <div className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-blue-500/10 border border-blue-500/30 px-3 py-1 text-xs font-mono font-bold text-blue-300">

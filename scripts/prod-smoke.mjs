@@ -112,6 +112,8 @@ r = await call('GET', '/admin/comments');
 check('GET /admin/comments without session → 401', r.status === 401, r);
 r = await call('GET', '/admin/suggestions');
 check('GET /admin/suggestions without session → 401', r.status === 401, r);
+r = await call('PATCH', '/admin/users/usr_x/verification', { body: { verification: 'USER' } });
+check('PATCH /admin/users/:id/verification without session → 401', r.status === 401, r);
 
 console.log('— bundled real images —');
 for (const img of ['auth-bg.jpg', 'overview-hero.jpg', 'docs-banner.jpg', 'logo.svg', 'avatar-default.svg']) {

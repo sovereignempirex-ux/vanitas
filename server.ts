@@ -3,7 +3,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { db, ALL_SCOPES } from './src/server/db.ts';
 import { databasePool, ensureSchema } from './src/server/pg.ts';
-import { createAccount, verifyAccount, createSession, resolveSession, revokeSession, upsertOAuthUser, updateProfile, forgetAccount, getTwoFactorSecret, setTwoFactor, findUserById, invalidateResolveCache } from './src/server/authStore.ts';
+import { createAccount, verifyAccount, createSession, resolveSession, revokeSession, upsertOAuthUser, updateProfile, forgetAccount, getTwoFactorSecret, setTwoFactor, findUserById, invalidateResolveCache, rowToUser } from './src/server/authStore.ts';
 import { generateTotpSecret, verifyTotp, totpOtpauthUrl } from './src/server/totp.ts';
 import {
   getProviderConfig,
@@ -19,7 +19,7 @@ import {
 } from './src/server/oauth.ts';
 import { processAiQuery, processAiQueryStream, diagnoseAndFixCode, performSemanticSearch, searchYouTubeVideos, getLastAiUpstream } from './src/server/aiService.ts';
 import { authenticateApiKey, requireScope, rateWindowStatus, nextQuotaReset } from './src/server/apiKeyAuth.ts';
-import { ClientSource, UserRole, PermissionScope, ProductSuggestion, ApiKey } from './src/types.ts';
+import { ClientSource, UserRole, PermissionScope, ProductSuggestion, ApiKey, User, AuditLog, VerificationType } from './src/types.ts';
 import { getActorUser, requireAdmin, rateLimit, sanitizeText, sanitizeUrl, csvCell, parsePagination, secureToken, secureId, isValidScope } from './src/server/security.ts';
 
 function mapSuggestion(row: Record<string, any>): ProductSuggestion {
@@ -499,7 +499,7 @@ export async function buildApp() {
       if (outcome.ok === false) return res.status(outcome.status).json({ error: outcome.error });
 
       const token = await createSession(outcome.user, { ip: req.ip, userAgent: String(req.headers['user-agent'] || '') });
-      db.recordAuditLog({
+      persistAuditLog({
         actorId: outcome.user.id,
         actorName: outcome.user.name,
         actorEmail: outcome.user.email,
@@ -546,7 +546,7 @@ export async function buildApp() {
       }
 
       const token = await createSession(outcome.user, { ip: req.ip, userAgent: String(req.headers['user-agent'] || '') });
-      db.recordAuditLog({
+      persistAuditLog({
         actorId: outcome.user.id,
         actorName: outcome.user.name,
         actorEmail: outcome.user.email,
@@ -682,7 +682,7 @@ export async function buildApp() {
       if (!secret) return res.status(400).json({ error: 'Run two-factor setup first' });
       if (!verifyTotp(secret, code)) return res.status(400).json({ error: 'Invalid 6-digit code' });
       await setTwoFactor(actor.id, secret, true);
-      db.recordAuditLog({
+      persistAuditLog({
         actorId: actor.id,
         actorName: actor.name,
         actorEmail: actor.email,
@@ -711,7 +711,7 @@ export async function buildApp() {
         return res.status(400).json({ error: 'Invalid 6-digit code' });
       }
       await setTwoFactor(actor.id, '', false);
-      db.recordAuditLog({
+      persistAuditLog({
         actorId: actor.id,
         actorName: actor.name,
         actorEmail: actor.email,
@@ -742,7 +742,7 @@ export async function buildApp() {
       const secret = await getTwoFactorSecret(result.id);
       if (!secret || !verifyTotp(secret, code)) return res.status(400).json({ error: 'Invalid 6-digit code' });
       const token = await createSession(result, { ip: req.ip, userAgent: String(req.headers['user-agent'] || '') });
-      db.recordAuditLog({
+      persistAuditLog({
         actorId: result.id,
         actorName: result.name,
         actorEmail: result.email,
@@ -882,7 +882,7 @@ export async function buildApp() {
       }
 
       const token = await createSession(user, { ip: req.ip, userAgent: String(req.headers['user-agent'] || '') });
-      db.recordAuditLog({
+      persistAuditLog({
         actorId: user.id,
         actorName: user.name,
         actorEmail: user.email,
@@ -918,7 +918,7 @@ export async function buildApp() {
     const idx = db.sessions.findIndex((s) => s.id === id);
     if (idx !== -1) {
       const removed = db.sessions.splice(idx, 1)[0];
-      db.recordAuditLog({
+      persistAuditLog({
         actorId: actor.id,
         actorName: actor.name,
         actorEmail: actor.email,
@@ -1225,14 +1225,97 @@ export async function buildApp() {
     });
   });
 
-  // Admin Users List
-  app.get('/api/v1/admin/users', (req, res) => {
+  // -------------------------------------------------------------------------
+  // Audit trail: always recorded in the in-memory view AND durably in
+  // PostgreSQL, so the admin log survives restarts and deploys.
+  // -------------------------------------------------------------------------
+  function persistAuditLog(entry: Parameters<typeof db.recordAuditLog>[0]): void {
+    const log = db.recordAuditLog(entry);
+    if (!databasePool) return;
+    databasePool
+      .query(
+        `insert into public.audit_logs
+           (id, timestamp, actor_id, actor_name, actor_email, action, category, target, source, status, request_id, ip_address, metadata)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+         on conflict (id) do nothing`,
+        [
+          log.id,
+          log.timestamp,
+          log.actorId,
+          log.actorName,
+          log.actorEmail,
+          log.action,
+          log.category,
+          log.target,
+          log.source,
+          log.status,
+          log.requestId,
+          log.ipAddress,
+          JSON.stringify(log.metadata || {}),
+        ],
+      )
+      .catch((err) => console.error('[audit/persist]', (err as Error).message));
+  }
+
+  function mapAuditRow(row: Record<string, any>): AuditLog {
+    const iso = (v: any) => (v instanceof Date ? v.toISOString() : v || '');
+    let metadata: Record<string, unknown> = {};
+    try {
+      metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata || {};
+    } catch {
+      metadata = {};
+    }
+    return {
+      id: row.id,
+      timestamp: iso(row.timestamp),
+      actorId: row.actor_id,
+      actorName: row.actor_name,
+      actorEmail: row.actor_email,
+      action: row.action,
+      category: row.category,
+      target: row.target,
+      source: row.source,
+      status: row.status,
+      requestId: row.request_id,
+      ipAddress: row.ip_address,
+      metadata,
+    };
+  }
+
+  // Newest-first audit source: PostgreSQL when connected, memory otherwise.
+  async function loadAuditSource(): Promise<AuditLog[]> {
+    if (!databasePool) return [...db.auditLogs];
+    try {
+      const r = await databasePool.query(
+        'select * from public.audit_logs order by timestamp desc limit 5000',
+      );
+      return r.rows.map(mapAuditRow);
+    } catch (err) {
+      console.error('[admin/logs]', (err as Error).message);
+      return [...db.auditLogs];
+    }
+  }
+
+  // Admin Users List — PostgreSQL when connected; the in-memory array alone
+  // would hide every real production account from this view.
+  app.get('/api/v1/admin/users', async (req, res) => {
     if (!requireAdmin(req, res)) return;
+    if (databasePool) {
+      try {
+        const r = await databasePool.query(
+          'select * from public.users order by created_at asc limit 500',
+        );
+        return res.json({ users: r.rows.map(rowToUser) });
+      } catch (err) {
+        console.error('[admin/users]', (err as Error).message);
+        return res.status(500).json({ error: 'Failed to load users' });
+      }
+    }
     res.json({ users: db.users });
   });
 
   // Admin User Role Update (cannot demote last admin)
-  app.patch('/api/v1/admin/users/:id/role', (req, res) => {
+  app.patch('/api/v1/admin/users/:id/role', async (req, res) => {
     const actor = requireAdmin(req, res);
     if (!actor) return;
 
@@ -1242,23 +1325,40 @@ export async function buildApp() {
       return res.status(400).json({ error: 'Invalid role' });
     }
 
-    const targetUser = db.users.find((u) => u.id === id);
+    let targetUser: User | null = null;
+    if (databasePool) {
+      const found = await databasePool.query('select * from public.users where id = $1', [id]);
+      targetUser = found.rows[0] ? rowToUser(found.rows[0]) : null;
+    } else {
+      targetUser = db.users.find((u) => u.id === id) || null;
+    }
     if (!targetUser) {
       return res.status(404).json({ error: 'User not found' });
     }
 
     if (targetUser.id === actor.id && role !== 'ADMIN') {
-      const adminCount = db.users.filter((u) => u.role === 'ADMIN').length;
+      let adminCount: number;
+      if (databasePool) {
+        const c = await databasePool.query(
+          `select count(*)::int as n from public.users where role = 'ADMIN'`,
+        );
+        adminCount = c.rows[0].n;
+      } else {
+        adminCount = db.users.filter((u) => u.role === 'ADMIN').length;
+      }
       if (adminCount <= 1) return res.status(400).json({ error: 'Cannot demote the last administrator' });
     }
 
     const priorRole = targetUser.role;
     targetUser.role = role as UserRole;
+    if (databasePool) {
+      await databasePool.query('update public.users set role = $2 where id = $1', [id, role]);
+    }
     // The target's live session must see the new role NOW — without this the
     // 60s resolve cache would keep serving the old role after a promotion.
     invalidateResolveCache(targetUser.id);
 
-    db.recordAuditLog({
+    persistAuditLog({
       actorId: actor.id,
       actorName: actor.name,
       actorEmail: actor.email,
@@ -1272,6 +1372,57 @@ export async function buildApp() {
     });
 
     res.json({ success: true, user: targetUser });
+  });
+
+  // Admin: grant or revoke the verification badge shown next to a user's name.
+  // Three kinds — USER (verified), DEVELOPER, ADMIN — only admins may grant.
+  app.patch('/api/v1/admin/users/:id/verification', async (req, res) => {
+    const actor = requireAdmin(req, res);
+    if (!actor) return;
+
+    const id = sanitizeText(req.params.id, 64);
+    const raw = req.body?.verification;
+    if (typeof raw !== 'string') {
+      return res.status(400).json({ error: 'verification field is required' });
+    }
+    const value = sanitizeText(raw, 16);
+    if (!['', 'USER', 'DEVELOPER', 'ADMIN'].includes(value)) {
+      return res.status(400).json({ error: 'verification must be USER, DEVELOPER or ADMIN (empty string revokes)' });
+    }
+
+    let updated: User | null = null;
+    if (databasePool) {
+      const found = await databasePool.query(
+        'update public.users set verification = $2 where id = $1 returning *',
+        [id, value],
+      );
+      updated = found.rows[0] ? rowToUser(found.rows[0]) : null;
+    } else {
+      const u = db.users.find((x) => x.id === id);
+      if (u) {
+        u.verification = value as VerificationType;
+        updated = u;
+      }
+    }
+    if (!updated) return res.status(404).json({ error: 'User not found' });
+
+    // The badge must appear on their live session immediately.
+    invalidateResolveCache(id);
+
+    persistAuditLog({
+      actorId: actor.id,
+      actorName: actor.name,
+      actorEmail: actor.email,
+      action: 'USER_VERIFICATION_CHANGED',
+      category: 'ADMIN',
+      target: `${updated.id} (${updated.email}) -> ${value || 'none'}`,
+      source: detectSource(req),
+      status: 'SUCCESS',
+      ipAddress: req.ip || 'unknown',
+      metadata: { verification: value || 'none' },
+    });
+
+    res.json({ success: true, user: updated });
   });
 
   // Admin: permanently delete an account. Your own account is off-limits and
@@ -1321,7 +1472,7 @@ export async function buildApp() {
       await clearAiChatHistory(id);
       await forgetAccount(id);
 
-      db.recordAuditLog({
+      persistAuditLog({
         actorId: actor.id,
         actorName: actor.name,
         actorEmail: actor.email,
@@ -1354,7 +1505,7 @@ export async function buildApp() {
   });
 
   // Admin Audit Logs (capped pagination, allowlisted filters)
-  app.get('/api/v1/admin/logs', (req, res) => {
+  app.get('/api/v1/admin/logs', async (req, res) => {
     if (!requireAdmin(req, res)) return;
 
     const { limit, offset } = parsePagination(req.query);
@@ -1362,7 +1513,7 @@ export async function buildApp() {
     const category = sanitizeText((req.query.category as string) || 'ALL', 16).toUpperCase();
     const search = sanitizeText((req.query.search as string) || '', 100).toLowerCase();
 
-    let logs = [...db.auditLogs];
+    let logs = await loadAuditSource();
 
     // Time filter
     if (from) {
@@ -1407,11 +1558,11 @@ export async function buildApp() {
   });
 
   // Admin Logs CSV Export (formula-injection hardened)
-  app.get('/api/v1/admin/logs/export', (req, res) => {
+  app.get('/api/v1/admin/logs/export', async (req, res) => {
     if (!requireAdmin(req, res)) return res.status(403).send('Forbidden');
 
     const headers = ['Timestamp', 'Actor', 'Action', 'Category', 'Target', 'Source', 'Status', 'Request ID', 'IP Address', 'Metadata'];
-    const rows = db.auditLogs.slice(0, 5000).map((l) => [
+    const rows = (await loadAuditSource()).slice(0, 5000).map((l) => [
       csvCell(l.timestamp),
       csvCell(`${l.actorName} (${l.actorEmail})`),
       csvCell(l.action),
@@ -1476,7 +1627,7 @@ export async function buildApp() {
       const flag = db.featureFlags.find((f) => f.key === 'SYSTEM_MAINTENANCE_MODE');
       if (flag) {
         flag.enabled = !flag.enabled;
-        db.recordAuditLog({
+        persistAuditLog({
           actorId: actor.id,
           actorName: actor.name,
           actorEmail: actor.email,
@@ -1499,7 +1650,7 @@ export async function buildApp() {
           count++;
         }
       });
-      db.recordAuditLog({
+      persistAuditLog({
         actorId: actor.id,
         actorName: actor.name,
         actorEmail: actor.email,
@@ -1565,7 +1716,7 @@ export async function buildApp() {
       failureCount: 0,
     };
     db.webhooks.unshift(newWebhook);
-    db.recordAuditLog({
+    persistAuditLog({
       actorId: actor.id,
       actorName: actor.name,
       actorEmail: actor.email,
@@ -1626,7 +1777,7 @@ export async function buildApp() {
     bot.commandsExecuted += 1;
     bot.lastPingAt = new Date().toISOString();
 
-    db.recordAuditLog({
+    persistAuditLog({
       actorId: actor.id,
       actorName: actor.name,
       actorEmail: actor.email,
@@ -1804,7 +1955,7 @@ export async function buildApp() {
     if (!['bug', 'feature', 'ux'].includes(category)) return res.status(400).json({ error: 'Invalid suggestion category' });
 
     const suggestion = await createSuggestion({ title, details, category: category as any, code, authorName: sanitizeText(actor.name, 80) });
-    db.recordAuditLog({
+    persistAuditLog({
       actorId: actor.id, actorName: actor.name, actorEmail: actor.email,
       action: 'SUGGESTION_CREATED', category: 'ADMIN', target: suggestion.id,
       source: detectSource(req), status: 'SUCCESS', ipAddress: req.ip || 'unknown', metadata: { category },
@@ -1969,7 +2120,7 @@ export async function buildApp() {
 
     const created = db.addExternalDatabase({ name, provider: provider as any, connectionUrl, region: region || undefined });
 
-    db.recordAuditLog({
+    persistAuditLog({
       actorId: actor.id,
       actorName: actor.name,
       actorEmail: actor.email,

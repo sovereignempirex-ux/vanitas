@@ -137,6 +137,7 @@ create table if not exists public.users (
   avatar_url text not null default '',
   bio text,
   role text not null default 'USER' check (role in ('USER', 'ADMIN')),
+  verification text not null default '',
   password_hash text not null,
   two_factor_enabled boolean not null default false,
   connected_accounts jsonb not null default '{"google":false,"github":false,"discord":false}',

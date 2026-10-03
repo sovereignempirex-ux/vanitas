@@ -122,6 +122,7 @@ export function getActorUser(req: Request): User | null {
           twoFactorEnabled: false,
           createdAt: '1970-01-01T00:00:00.000Z',
           lastLoginAt: new Date().toISOString(),
+          verification: '',
           connectedAccounts: { google: false, github: false, discord: false },
         };
       }

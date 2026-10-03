@@ -182,6 +182,38 @@ check('malformed user id -> 400', badId.status === 400, badId.status);
 const missing = await call('DELETE', '/admin/users/usr_does_not_exist', { token: tokenA });
 check('unknown user id -> 404', missing.status === 404, missing.status);
 
+console.log('— verification badges (admin grants, Meta/TikTok style) —');
+const anonVer = await call('PATCH', '/admin/users/usr_x/verification', { body: { verification: 'USER' } });
+check('anon PATCH verification -> 401', anonVer.status === 401, anonVer.status);
+const bVer = await call('PATCH', `/admin/users/${idA}/verification`, { token: tokenB, body: { verification: 'USER' } });
+check('B cannot grant badges -> 403', bVer.status === 403, bVer.status);
+const grantUser = await call('PATCH', `/admin/users/${idB}/verification`, { token: tokenA, body: { verification: 'USER' } });
+const meBv1 = await call('GET', '/auth/me', { token: tokenB });
+check(
+  'A grants B USER badge -> visible on B session instantly',
+  grantUser.status === 200 && meBv1.json?.user?.verification === 'USER',
+  { s: grantUser.status, v: meBv1.json?.user?.verification },
+);
+const grantDev = await call('PATCH', `/admin/users/${idB}/verification`, { token: tokenA, body: { verification: 'DEVELOPER' } });
+const meBv2 = await call('GET', '/auth/me', { token: tokenB });
+check('A upgrades badge to DEVELOPER -> instant', grantDev.status === 200 && meBv2.json?.user?.verification === 'DEVELOPER', meBv2.json?.user?.verification);
+const grantStaff = await call('PATCH', `/admin/users/${idB}/verification`, { token: tokenA, body: { verification: 'ADMIN' } });
+const meBv3 = await call('GET', '/auth/me', { token: tokenB });
+check(
+  'ADMIN badge is separate from role (B stays USER)',
+  grantStaff.status === 200 && meBv3.json?.user?.verification === 'ADMIN' && meBv3.json?.user?.role === 'USER',
+  { v: meBv3.json?.user?.verification, role: meBv3.json?.user?.role },
+);
+const revoke = await call('PATCH', `/admin/users/${idB}/verification`, { token: tokenA, body: { verification: '' } });
+const meBv4 = await call('GET', '/auth/me', { token: tokenB });
+check('A revokes badge -> instant none', revoke.status === 200 && (meBv4.json?.user?.verification || '') === '', meBv4.json?.user?.verification);
+const badVer = await call('PATCH', `/admin/users/${idB}/verification`, { token: tokenA, body: { verification: 'GOLD' } });
+check('invalid badge type -> 400', badVer.status === 400, badVer.status);
+const noVerUser = await call('PATCH', '/admin/users/usr_nope/verification', { token: tokenA, body: { verification: 'USER' } });
+check('badge for unknown user -> 404', noVerUser.status === 404, noVerUser.status);
+const verLogs = await call('GET', '/admin/logs?limit=100', { token: tokenA });
+check('audit log records USER_VERIFICATION_CHANGED', (verLogs.json?.logs || []).some((l) => l.action === 'USER_VERIFICATION_CHANGED'), 'missing');
+
 console.log('— moderation: comments across all docs —');
 const anonMod = await call('GET', '/admin/comments');
 check('anon GET /admin/comments -> 401', anonMod.status === 401, anonMod.status);

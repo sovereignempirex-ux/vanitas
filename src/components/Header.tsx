@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext.tsx';
 import { BRAND_ASSETS } from '../data/assets.ts';
 import { detectUserPlatform } from '../lib/platformDetector.ts';
+import { VerifiedBadge } from './VerifiedBadge.tsx';
 import {
   Shield,
   Search,
@@ -211,13 +212,17 @@ export const Header: React.FC<HeaderProps> = ({ onOpenCommandPalette }) => {
                 <span className="text-xs font-medium text-slate-200 hidden sm:inline-block max-w-[100px] truncate">
                   {user.name.split(' ')[0]}
                 </span>
+                <VerifiedBadge type={user.verification} />
                 <ChevronDown className="h-3 w-3 text-slate-400" />
               </button>
 
               {isProfileMenuOpen && (
                 <div className="absolute right-0 mt-2 w-56 rounded-2xl border border-white/10 bg-slate-950/95 p-2 shadow-2xl backdrop-blur-xl z-50">
                   <div className="px-3 py-2 border-b border-white/10">
-                    <p className="text-xs font-semibold text-white truncate">{user.name}</p>
+                    <p className="flex items-center gap-1.5 text-xs font-semibold text-white">
+                      <span className="truncate">{user.name}</span>
+                      <VerifiedBadge type={user.verification} label />
+                    </p>
                     <p className="text-[11px] font-mono text-slate-400 truncate">{user.email}</p>
                     <div className="mt-1 flex items-center gap-1.5">
                       <span
