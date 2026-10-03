@@ -6,6 +6,26 @@ export type UserRole = 'USER' | 'ADMIN';
  */
 export type VerificationType = '' | 'USER' | 'DEVELOPER' | 'ADMIN';
 
+/**
+ * Developer invite link — created by an admin, handed to someone who does
+ * NOT have an account yet; the role/badge is applied when they register
+ * through it (single-use or limited-use, revocable, expiring).
+ */
+export interface AdminInvite {
+  id: string;
+  token: string;
+  createdBy: string;
+  createdByName: string;
+  role: UserRole;
+  verification: VerificationType;
+  note: string;
+  maxUses: number;
+  uses: number;
+  revoked: boolean;
+  expiresAt: string;
+  createdAt: string;
+}
+
 export type ClientSource = 'WEB' | 'BOT' | 'MOBILE' | 'DESKTOP' | 'APPLICATION' | 'OTHER';
 
 export interface User {

@@ -10,6 +10,7 @@ import {
   DocComment,
   ProductSuggestion,
   PermissionScope,
+  AdminInvite,
 } from '../../types.ts';
 import {
   Users,
@@ -24,6 +25,9 @@ import {
   Zap,
   MessageSquare,
   Sparkles,
+  Link2,
+  Copy,
+  Ban,
 } from 'lucide-react';
 import { VerifiedBadge } from '../VerifiedBadge.tsx';
 
@@ -59,6 +63,14 @@ const SECTION_META: Record<string, { title: string; subtitle: string; icon: Reac
   },
 };
 
+/** Live status of an invite link, derived from revoked/uses/expiry. */
+const inviteStatus = (inv: AdminInvite): { label: string; cls: string } => {
+  if (inv.revoked) return { label: 'Revoked', cls: 'text-red-300 bg-red-500/15 border-red-500/30' };
+  if (inv.uses >= inv.maxUses) return { label: 'Used', cls: 'text-slate-400 bg-slate-500/15 border-slate-500/30' };
+  if (Date.parse(inv.expiresAt) <= Date.now()) return { label: 'Expired', cls: 'text-amber-300 bg-amber-500/15 border-amber-500/30' };
+  return { label: 'Active', cls: 'text-emerald-300 bg-emerald-500/15 border-emerald-500/30' };
+};
+
 export const AdminCenterView: React.FC = () => {
   const { role, user, activeView } = useAuth();
   const [users, setUsers] = useState<User[]>([]);
@@ -68,6 +80,14 @@ export const AdminCenterView: React.FC = () => {
   const [comments, setComments] = useState<DocComment[]>([]);
   const [suggestions, setSuggestions] = useState<ProductSuggestion[]>([]);
   const [allScopes, setAllScopes] = useState<ScopeEntry[]>([]);
+  const [invites, setInvites] = useState<AdminInvite[]>([]);
+  /** Just-created invite link — highlighted for copying until the next one. */
+  const [freshLink, setFreshLink] = useState<string | null>(null);
+  // Developer invite form
+  const [inviteRole, setInviteRole] = useState('ADMIN');
+  const [inviteBadge, setInviteBadge] = useState('');
+  const [inviteUses, setInviteUses] = useState(1);
+  const [inviteNote, setInviteNote] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
@@ -84,15 +104,17 @@ export const AdminCenterView: React.FC = () => {
     try {
       setLoading(true);
       setError(null);
-      const [usersData, flagsData, statsData] = await Promise.all([
+      const [usersData, flagsData, statsData, invitesData] = await Promise.all([
         api.getAdminUsers(),
         api.getFeatureFlags(),
         api.getAdminStatistics(),
+        api.listAdminInvites(),
       ]);
       setUsers(usersData.users);
       setFlags(flagsData.featureFlags);
       setThreats(statsData.threats);
       setStats(statsData.stats);
+      setInvites(invitesData.invites);
     } catch (err: any) {
       setError(err.message || 'Failed loading admin control center');
     } finally {
@@ -164,6 +186,42 @@ export const AdminCenterView: React.FC = () => {
       setError(null);
       await api.updateUserVerification(u.id, value);
       flashSuccess(`Badge for ${u.name}: ${value || 'revoked'}.`);
+      loadAdminData();
+    } catch (err: any) {
+      setError(err.message);
+    }
+  };
+
+  const handleCreateInvite = async () => {
+    try {
+      setError(null);
+      const data = await api.createAdminInvite({
+        role: inviteRole,
+        verification: inviteBadge,
+        note: inviteNote.trim(),
+        maxUses: Number(inviteUses) || 1,
+      });
+      setFreshLink(`${window.location.origin}/invite/${data.invite.token}`);
+      setInviteNote('');
+      flashSuccess('Invite link created — copy it and send it to the person');
+      loadAdminData();
+    } catch (err: any) {
+      setError(err.message);
+    }
+  };
+
+  const handleRevokeInvite = async (inv: AdminInvite) => {
+    if (
+      !confirm(
+        `Revoke this invite link (${inv.role}${inv.verification ? ' + ' + inv.verification : ''})? It stops working immediately.`,
+      )
+    )
+      return;
+    try {
+      setError(null);
+      await api.revokeAdminInvite(inv.id);
+      if (freshLink && freshLink.endsWith(inv.token)) setFreshLink(null);
+      flashSuccess('Invite revoked');
       loadAdminData();
     } catch (err: any) {
       setError(err.message);
@@ -479,9 +537,9 @@ export const AdminCenterView: React.FC = () => {
                             className="rounded-lg border border-white/10 bg-slate-900 px-2 py-1 text-[11px] text-slate-300 focus:border-amber-500 focus:outline-none"
                           >
                             <option value="">No badge</option>
-                            <option value="USER">✓ Verified</option>
-                            <option value="DEVELOPER">⚙ Developer</option>
-                            <option value="ADMIN">🛡 Admin</option>
+                            <option value="USER">Verified</option>
+                            <option value="DEVELOPER">Developer</option>
+                            <option value="ADMIN">Admin</option>
                           </select>
                           {u.id === user?.id ? (
                             <span className="rounded-lg border border-emerald-500/30 bg-emerald-950/20 px-2.5 py-1 text-[11px] font-semibold text-emerald-300">
@@ -525,6 +583,152 @@ export const AdminCenterView: React.FC = () => {
                   )}
                 </tbody>
               </table>
+            </div>
+          </div>
+
+          {/* Developer Invite Links — hand a not-yet-registered person a URL */}
+          <div className="rounded-3xl border border-white/10 bg-slate-950/60 p-6 backdrop-blur-xl">
+            <div className="flex items-center gap-2 pb-4 border-b border-white/10">
+              <Link2 className="h-4 w-4 text-cyan-400" />
+              <h3 className="text-sm font-bold text-white">Developer Invite Links</h3>
+              <span className="ml-auto rounded bg-white/[0.06] px-2 py-0.5 font-mono text-[10px] text-slate-400">
+                {invites.length} {invites.length === 1 ? 'link' : 'links'}
+              </span>
+            </div>
+
+            <p className="mt-3 text-[11px] leading-relaxed text-slate-400">
+              رابط خاص لشخص <b className="text-slate-200">غير مسجَّل بعد</b> — عند إنشائه للحساب عبر الرابط يحصل
+              فوراً على الصلاحيات والتوثيق المحددين هنا. صالح 7 أيام ويُلغى بضغطة واحدة.
+            </p>
+
+            {/* Create form */}
+            <div className="mt-4 flex flex-wrap items-end gap-3 rounded-2xl border border-white/10 bg-slate-900/50 p-3">
+              <label className="text-[11px] text-slate-400">
+                Role
+                <select
+                  value={inviteRole}
+                  onChange={(e) => setInviteRole(e.target.value)}
+                  className="mt-1 block rounded-lg border border-white/10 bg-slate-900 px-2 py-1.5 text-[11px] text-slate-200 focus:border-cyan-500 focus:outline-none"
+                >
+                  <option value="ADMIN">ADMIN — أدمن</option>
+                  <option value="USER">USER — مستخدم</option>
+                </select>
+              </label>
+              <label className="text-[11px] text-slate-400">
+                Badge
+                <select
+                  value={inviteBadge}
+                  onChange={(e) => setInviteBadge(e.target.value)}
+                  className="mt-1 block rounded-lg border border-white/10 bg-slate-900 px-2 py-1.5 text-[11px] text-slate-200 focus:border-cyan-500 focus:outline-none"
+                >
+                  <option value="">No badge</option>
+                  <option value="USER">Verified</option>
+                  <option value="DEVELOPER">Developer</option>
+                  <option value="ADMIN">Admin</option>
+                </select>
+              </label>
+              <label className="text-[11px] text-slate-400">
+                Uses
+                <select
+                  value={inviteUses}
+                  onChange={(e) => setInviteUses(Number(e.target.value))}
+                  className="mt-1 block rounded-lg border border-white/10 bg-slate-900 px-2 py-1.5 text-[11px] text-slate-200 focus:border-cyan-500 focus:outline-none"
+                >
+                  <option value={1}>1 use</option>
+                  <option value={5}>5 uses</option>
+                  <option value={10}>10 uses</option>
+                </select>
+              </label>
+              <label className="grow min-w-[180px] text-[11px] text-slate-400">
+                Note (optional)
+                <input
+                  value={inviteNote}
+                  onChange={(e) => setInviteNote(e.target.value)}
+                  maxLength={200}
+                  placeholder="e.g. co-developer for the bot"
+                  className="mt-1 block w-full rounded-lg border border-white/10 bg-slate-900 px-2 py-1.5 text-[11px] text-slate-200 placeholder:text-slate-600 focus:border-cyan-500 focus:outline-none"
+                />
+              </label>
+              <button
+                onClick={handleCreateInvite}
+                className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 px-4 py-2 text-[11px] font-semibold text-white transition-all hover:from-cyan-400 hover:to-blue-500"
+              >
+                <Link2 className="h-3.5 w-3.5" /> Create link
+              </button>
+            </div>
+
+            {/* Just-created link, ready to copy */}
+            {freshLink && (
+              <div className="mt-3 flex items-center gap-2 rounded-xl border border-cyan-500/30 bg-cyan-500/10 p-2.5">
+                <Link2 className="h-4 w-4 shrink-0 text-cyan-300" />
+                <code className="min-w-0 flex-1 truncate font-mono text-[11px] text-cyan-100">{freshLink}</code>
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(freshLink);
+                    flashSuccess('Link copied to clipboard');
+                  }}
+                  className="flex shrink-0 items-center gap-1 rounded-lg border border-cyan-400/40 bg-slate-950/60 px-3 py-1.5 text-[11px] font-semibold text-cyan-200 transition-all hover:bg-slate-900"
+                >
+                  <Copy className="h-3.5 w-3.5" /> Copy
+                </button>
+              </div>
+            )}
+
+            {/* Invite list */}
+            <div className="mt-4 space-y-2">
+              {invites.length === 0 && (
+                <p className="text-xs text-slate-500">No invite links yet — create one above.</p>
+              )}
+              {invites.map((inv) => {
+                const st = inviteStatus(inv);
+                return (
+                  <div
+                    key={inv.id}
+                    className="flex flex-wrap items-center gap-3 rounded-xl border border-white/10 bg-slate-900/40 px-3 py-2.5"
+                  >
+                    <span
+                      className={`rounded-full border px-2 py-0.5 font-mono text-[9px] font-bold uppercase ${st.cls}`}
+                    >
+                      {st.label}
+                    </span>
+                    <span className="flex items-center gap-1.5 text-[11px] font-semibold text-white">
+                      {inv.role === 'ADMIN' ? 'ADMIN' : 'USER'}
+                      {inv.verification && <VerifiedBadge type={inv.verification} />}
+                    </span>
+                    <span className="font-mono text-[10px] text-slate-500">
+                      {inv.uses}/{inv.maxUses} uses
+                    </span>
+                    <span className="min-w-0 truncate text-[11px] text-slate-400">
+                      by {inv.createdByName}
+                      {inv.note ? ` — ${inv.note}` : ''}
+                    </span>
+                    <span className="font-mono text-[10px] text-slate-600">
+                      exp {new Date(inv.expiresAt).toLocaleDateString()}
+                    </span>
+                    <div className="ml-auto flex items-center gap-2">
+                      {!inv.revoked && (
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(`${window.location.origin}/invite/${inv.token}`);
+                            flashSuccess('Invite link copied to clipboard');
+                          }}
+                          className="flex items-center gap-1 rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-2.5 py-1 text-[10px] text-cyan-200 transition-all hover:bg-cyan-500/20"
+                        >
+                          <Copy className="h-3 w-3" /> Copy link
+                        </button>
+                      )}
+                      {!inv.revoked && (
+                        <button
+                          onClick={() => handleRevokeInvite(inv)}
+                          className="flex items-center gap-1 rounded-lg border border-red-500/30 bg-red-500/10 px-2.5 py-1 text-[10px] text-red-300 transition-all hover:bg-red-500/20"
+                        >
+                          <Ban className="h-3 w-3" /> Revoke
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
 

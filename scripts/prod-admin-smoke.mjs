@@ -123,12 +123,61 @@ check('delete temp account -> 200', del.status === 200 && del.json?.success === 
 const me5 = await call('GET', '/auth/me', { token: probeToken });
 check("temp account's session dies -> 401", me5.status === 401, me5.status);
 
+console.log('— developer invite E2E (create → preview → redeem → consume → revoke) —');
+const inv = await call('POST', '/admin/invites', {
+  ...admin,
+  body: { role: 'ADMIN', verification: 'USER', note: 'prod probe', maxUses: 1 },
+});
+check('create invite -> 201 + token', inv.status === 201 && !!inv.json?.invite?.token, { s: inv.status });
+const invToken = inv.json?.invite?.token;
+const pv = await call('GET', `/invites/${invToken}`);
+check(
+  'public preview -> valid + ADMIN',
+  pv.status === 200 && pv.json?.valid === true && pv.json?.role === 'ADMIN',
+  pv.json,
+);
+const regI = await call('POST', '/auth/register', {
+  body: {
+    email: `invite-probe-${ts}@example.test`,
+    password: 'Prod-Admin-Probe!42',
+    name: 'Invite Probe',
+    invite: invToken,
+  },
+});
+check(
+  'signup via invite -> lands ADMIN + USER badge instantly',
+  (regI.status === 201 || regI.status === 200) &&
+    regI.json?.user?.role === 'ADMIN' &&
+    regI.json?.user?.verification === 'USER',
+  { s: regI.status, role: regI.json?.user?.role, v: regI.json?.user?.verification },
+);
+const regI2 = await call('POST', '/auth/register', {
+  body: {
+    email: `invite-probe2-${ts}@example.test`,
+    password: 'Prod-Admin-Probe!42',
+    name: 'Invite Probe 2',
+    invite: invToken,
+  },
+});
+check('single-use invite consumed -> next signup 400', regI2.status === 400, regI2.status);
+const rv = await call('DELETE', `/admin/invites/${inv.json?.invite?.id}`, admin);
+check('revoke invite -> 200', rv.status === 200 && rv.json?.success === true, { s: rv.status });
+const pv2 = await call('GET', `/invites/${invToken}`);
+check('revoked preview -> valid:false revoked', pv2.json?.valid === false && pv2.json?.reason === 'revoked', pv2.json);
+const delI = await call('DELETE', `/admin/users/${regI.json?.user?.id}`, admin);
+check('cleanup: invitee account deleted -> 200', delI.status === 200, { s: delI.status });
+
 console.log('— durable audit trail (must come from PostgreSQL) —');
 const logs = await call('GET', '/admin/logs?limit=200', admin);
 const actions = (logs.json?.logs || []).map((l) => l.action);
 check('audit contains USER_VERIFICATION_CHANGED', actions.includes('USER_VERIFICATION_CHANGED'), actions.slice(0, 10));
 check('audit contains USER_ROLE_CHANGED', actions.includes('USER_ROLE_CHANGED'), actions.slice(0, 10));
 check('audit contains USER_DELETED', actions.includes('USER_DELETED'), actions.slice(0, 10));
+check(
+  'audit contains INVITE_CREATED + INVITE_USED',
+  actions.includes('INVITE_CREATED') && actions.includes('INVITE_USED'),
+  actions.slice(0, 10),
+);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

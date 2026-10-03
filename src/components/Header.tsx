@@ -221,7 +221,7 @@ export const Header: React.FC<HeaderProps> = ({ onOpenCommandPalette }) => {
                   <div className="px-3 py-2 border-b border-white/10">
                     <p className="flex items-center gap-1.5 text-xs font-semibold text-white">
                       <span className="truncate">{user.name}</span>
-                      <VerifiedBadge type={user.verification} label />
+                      <VerifiedBadge type={user.verification} />
                     </p>
                     <p className="text-[11px] font-mono text-slate-400 truncate">{user.email}</p>
                     <div className="mt-1 flex items-center gap-1.5">

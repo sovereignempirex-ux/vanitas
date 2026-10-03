@@ -2,7 +2,8 @@ import React, { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext.tsx';
 import { api } from '../lib/apiClient.ts';
 import { BRAND_ASSETS } from '../data/assets.ts';
-import { Mail, Lock, UserPlus, ArrowRight, Shield, Loader2 } from 'lucide-react';
+import { Mail, Lock, UserPlus, ArrowRight, Shield, Loader2, Link2 } from 'lucide-react';
+import { VerifiedBadge } from '../components/VerifiedBadge.tsx';
 
 // ---------------------------------------------------------------------------
 // Standalone auth pages served at /register and /login (shareable links).
@@ -50,9 +51,18 @@ const SOCIALS: Array<{ id: string; label: string; Icon: React.FC<{ className?: s
 
 interface AuthPageProps {
   mode: AuthPageMode;
+  /** Developer invite being redeemed — its token rides along with register. */
+  invite?: {
+    token: string;
+    creatorName: string;
+    role: string;
+    verification?: string;
+    note?: string;
+    expiresAt?: string;
+  };
 }
 
-export const AuthPage: React.FC<AuthPageProps> = ({ mode }) => {
+export const AuthPage: React.FC<AuthPageProps> = ({ mode, invite }) => {
   const { loginWithEmail, completeOAuthLogin, completeTwoFactorLogin } = useAuth();
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -123,7 +133,14 @@ export const AuthPage: React.FC<AuthPageProps> = ({ mode }) => {
     }
     setLoading(true);
     try {
-      const result = await loginWithEmail(email, password, mode, mode === 'register' ? name : undefined);
+      const result = await loginWithEmail(
+        email,
+        password,
+        mode,
+        mode === 'register' ? name : undefined,
+        undefined,
+        mode === 'register' ? invite?.token : undefined,
+      );
       if (!result.success) {
         if (result.twoFactorRequired) {
           // Real 2FA — password accepted, now ask for the authenticator code.
@@ -217,6 +234,31 @@ export const AuthPage: React.FC<AuthPageProps> = ({ mode }) => {
           {/* Error banner */}
           {error && (
             <div className="mt-4 rounded-xl border border-red-500/30 bg-red-950/40 p-3 text-xs text-red-300">{error}</div>
+          )}
+
+          {/* Developer invite banner — exactly what this private link grants */}
+          {invite && mode === 'register' && (
+            <div className="mt-4 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-[11px] leading-relaxed text-amber-100">
+              <div className="flex items-center gap-1.5 font-semibold text-amber-200">
+                <Link2 className="h-3.5 w-3.5" />
+                <span>Developer invite • دعوة مطوّر</span>
+              </div>
+              <p className="mt-1.5 text-amber-200/90">
+                دعوتكم من <b className="text-white">{invite.creatorName}</b> — عند إنشاء الحساب تحصل مباشرة على
+                صلاحيات <b>{invite.role === 'ADMIN' ? 'أدمن ADMIN' : 'مستخدم USER'}</b>
+                {invite.verification ? ' مع شارة توثيق' : ''}.
+                {invite.verification && <VerifiedBadge type={invite.verification} className="ml-1.5 h-4 w-4" />}
+              </p>
+              <p className="mt-1 text-amber-300/70">
+                سجّل عبر البريد الإلكتروني لتفعيل الدعوة
+                {invite.expiresAt ? ` • تنتهي ${new Date(invite.expiresAt).toLocaleDateString()}` : ''}
+              </p>
+              {invite.note && (
+                <p className="mt-1 border-t border-amber-500/20 pt-1.5 text-amber-100/80">
+                  ملاحظة إضافية: {invite.note}
+                </p>
+              )}
+            </div>
           )}
 
           {/* Social login buttons */}

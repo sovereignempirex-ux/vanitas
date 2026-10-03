@@ -4,8 +4,9 @@ import { Header } from './components/Header.tsx';
 import { Sidebar } from './components/Sidebar.tsx';
 import { CommandPalette } from './components/CommandPalette.tsx';
 import { AuthPage } from './pages/AuthPage.tsx';
+import { InvitePage } from './pages/InvitePage.tsx';
 import { AuthModal } from './components/AuthModal.tsx';
-import { VIEW_SEO, seoForAuthPage, setPageSeo } from './lib/seo.ts';
+import { VIEW_SEO, seoForAuthPage, seoForInvitePage, setPageSeo } from './lib/seo.ts';
 
 // Views
 import { OverviewView } from './components/views/OverviewView.tsx';
@@ -30,10 +31,16 @@ const AppContent: React.FC = () => {
   // Standalone shareable auth pages: /register and /login (no modal, no shell).
   const path = window.location.pathname.replace(/\/+$/, '') || '/';
   const authPage: 'login' | 'register' | null = path === '/login' ? 'login' : path === '/register' ? 'register' : null;
+  // Developer invite landing page: /invite/<token> (public, no shell).
+  const inviteToken = path.startsWith('/invite/') ? path.slice('/invite/'.length) : null;
 
   // Per-view SEO: keep title/description/canonical/OG in sync with what is on
   // screen (auth pages first, then the signed-in dashboard view).
   useEffect(() => {
+    if (inviteToken) {
+      setPageSeo(seoForInvitePage());
+      return;
+    }
     if (authPage) {
       setPageSeo(seoForAuthPage(authPage));
       return;
@@ -44,7 +51,7 @@ const AppContent: React.FC = () => {
       return;
     }
     setPageSeo(VIEW_SEO[activeView] || VIEW_SEO.overview);
-  }, [authPage, authLoading, user, activeView, path]);
+  }, [authPage, authLoading, user, activeView, path, inviteToken]);
 
   const renderActiveView = () => {
     switch (activeView) {
@@ -85,6 +92,11 @@ const AppContent: React.FC = () => {
 
   if (authPage) {
     return <AuthPage mode={authPage} />;
+  }
+
+  // Developer invite landing — standalone public page (like /register).
+  if (inviteToken) {
+    return <InvitePage token={inviteToken} />;
   }
 
   // REAL ACCOUNTS ONLY: the dashboard is gated behind server-verified auth.

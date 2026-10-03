@@ -214,6 +214,103 @@ check('badge for unknown user -> 404', noVerUser.status === 404, noVerUser.statu
 const verLogs = await call('GET', '/admin/logs?limit=100', { token: tokenA });
 check('audit log records USER_VERIFICATION_CHANGED', (verLogs.json?.logs || []).some((l) => l.action === 'USER_VERIFICATION_CHANGED'), 'missing');
 
+console.log('— developer invite links (register through the URL → role/badge) —');
+const anonInv = await call('POST', '/admin/invites', { body: { role: 'ADMIN' } });
+check('anon POST invite -> 401', anonInv.status === 401, anonInv.status);
+const bInv = await call('POST', '/admin/invites', { token: tokenB, body: { role: 'ADMIN' } });
+check('B cannot create invites -> 403', bInv.status === 403, bInv.status);
+const badInvRole = await call('POST', '/admin/invites', { token: tokenA, body: { role: 'ROOT' } });
+check('invalid invite role -> 400', badInvRole.status === 400, badInvRole.status);
+
+const invA = await call('POST', '/admin/invites', {
+  token: tokenA,
+  body: { role: 'ADMIN', verification: 'DEVELOPER', note: 'co-dev' },
+});
+check('A creates admin+developer invite -> 201 + token', invA.status === 201 && !!invA.json?.invite?.token, invA.status);
+const invToken = invA.json?.invite?.token;
+
+const prev = await call('GET', `/invites/${invToken}`);
+check(
+  'public preview -> valid + ADMIN + creator is A',
+  prev.status === 200 && prev.json?.valid === true && prev.json?.role === 'ADMIN' && prev.json?.creatorName === 'Admin Suite A',
+  prev.json,
+);
+const prevBad = await call('GET', '/invites/inv_bogus_does_not_exist');
+check(
+  'bogus invite preview -> valid:false not_found',
+  prevBad.status === 200 && prevBad.json?.valid === false && prevBad.json?.reason === 'not_found',
+  prevBad.json,
+);
+
+// The core promise: someone with NO account registers via the link and lands
+// as ADMIN with the DEVELOPER badge — instantly on their own session.
+const regC = await call('POST', '/auth/register', {
+  body: {
+    email: `invite-c-${ts}@example.test`,
+    password: 'Adm1n-Test-Pass!42',
+    name: 'Invitee C',
+    invite: invToken,
+  },
+});
+check('register via invite -> 201', (regC.status === 201 || regC.status === 200) && !!regC.json?.token, regC.status);
+const tokenC = regC.json?.token;
+check(
+  'invitee lands as ADMIN with DEVELOPER badge',
+  regC.json?.user?.role === 'ADMIN' && regC.json?.user?.verification === 'DEVELOPER',
+  { role: regC.json?.user?.role, v: regC.json?.user?.verification },
+);
+const meC = await call('GET', '/auth/me', { token: tokenC });
+check('invitee session shows ADMIN instantly', meC.json?.user?.role === 'ADMIN', meC.json?.user?.role);
+
+// Single-use links: the second signup must be rejected (and no account made).
+const regD = await call('POST', '/auth/register', {
+  body: { email: `invite-d-${ts}@example.test`, password: 'Adm1n-Test-Pass!42', name: 'Invitee D', invite: invToken },
+});
+check('second signup on single-use invite -> 400', regD.status === 400, regD.status);
+const regE = await call('POST', '/auth/register', {
+  body: { email: `invite-e-${ts}@example.test`, password: 'Adm1n-Test-Pass!42', name: 'Invitee E', invite: 'inv_nope' },
+});
+check('signup with dead invite -> 400', regE.status === 400, regE.status);
+
+// Revoke: dies immediately, before anyone redeems it.
+const invB = await call('POST', '/admin/invites', { token: tokenA, body: { role: 'ADMIN' } });
+const invTokenB = invB.json?.invite?.token;
+const rev = await call('DELETE', `/admin/invites/${invB.json?.invite?.id}`, { token: tokenA });
+check('A revokes invite -> 200', rev.status === 200 && rev.json?.success === true, rev.status);
+const prevRev = await call('GET', `/invites/${invTokenB}`);
+check(
+  'revoked invite preview -> valid:false revoked',
+  prevRev.json?.valid === false && prevRev.json?.reason === 'revoked',
+  prevRev.json,
+);
+const regF = await call('POST', '/auth/register', {
+  body: { email: `invite-f-${ts}@example.test`, password: 'Adm1n-Test-Pass!42', name: 'Invitee F', invite: invTokenB },
+});
+check('signup via revoked invite -> 400', regF.status === 400, regF.status);
+
+const anonInvList = await call('GET', '/admin/invites');
+check('anon GET invites list -> 401', anonInvList.status === 401, anonInvList.status);
+const invList = await call('GET', '/admin/invites', { token: tokenA });
+check(
+  'A lists invites -> 200 + both present',
+  invList.status === 200 && (invList.json?.invites || []).length >= 2,
+  invList.status,
+);
+
+const invLogs = await call('GET', '/admin/logs?limit=100', { token: tokenA });
+const invActions = (invLogs.json?.logs || []).map((l) => l.action);
+check(
+  'audit has INVITE_CREATED + INVITE_USED + INVITE_REVOKED',
+  invActions.includes('INVITE_CREATED') && invActions.includes('INVITE_USED') && invActions.includes('INVITE_REVOKED'),
+  invActions.slice(0, 8),
+);
+
+// Cleanup: remove the temporary invitee admin so account math below is unchanged.
+const delC = await call('DELETE', `/admin/users/${regC.json?.user?.id}`, { token: tokenA });
+check('cleanup: delete invitee C -> 200', delC.status === 200, delC.status);
+const meCdead = await call('GET', '/auth/me', { token: tokenC });
+check("cleanup: invitee C's session dies -> 401", meCdead.status === 401, meCdead.status);
+
 console.log('— moderation: comments across all docs —');
 const anonMod = await call('GET', '/admin/comments');
 check('anon GET /admin/comments -> 401', anonMod.status === 401, anonMod.status);

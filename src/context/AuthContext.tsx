@@ -19,6 +19,7 @@ interface AuthContextType {
     mode: 'login' | 'register',
     name?: string,
     code?: string,
+    invite?: string,
   ) => Promise<{ success: boolean; error?: string; twoFactorRequired?: boolean }>;
   /** Adopt the session token delivered by the OAuth callback (#vnt_oauth=…). */
   completeOAuthLogin: (token: string) => Promise<void>;
@@ -225,7 +226,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const loginWithEmail = async (email: string, password: string, mode: 'login' | 'register', name?: string, code?: string) => {
+  const loginWithEmail = async (email: string, password: string, mode: 'login' | 'register', name?: string, code?: string, invite?: string) => {
     const cleanEmail = email.trim().toLowerCase().slice(0, 120);
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
       return { success: false, error: 'Invalid email address' };
@@ -240,7 +241,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       const data =
         mode === 'register'
-          ? await api.register({ email: cleanEmail, password, name: (name || cleanEmail.split('@')[0]).slice(0, 80) })
+          ? await api.register({
+              email: cleanEmail,
+              password,
+              name: (name || cleanEmail.split('@')[0]).slice(0, 80),
+              invite: invite || undefined,
+            })
           : await api.login({ email: cleanEmail, password, code });
 
       // Server is the source of truth for role & permissions.

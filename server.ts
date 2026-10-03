@@ -19,7 +19,7 @@ import {
 } from './src/server/oauth.ts';
 import { processAiQuery, processAiQueryStream, diagnoseAndFixCode, performSemanticSearch, searchYouTubeVideos, getLastAiUpstream } from './src/server/aiService.ts';
 import { authenticateApiKey, requireScope, rateWindowStatus, nextQuotaReset } from './src/server/apiKeyAuth.ts';
-import { ClientSource, UserRole, PermissionScope, ProductSuggestion, ApiKey, User, AuditLog, VerificationType } from './src/types.ts';
+import { ClientSource, UserRole, PermissionScope, ProductSuggestion, ApiKey, User, AuditLog, VerificationType, AdminInvite } from './src/types.ts';
 import { getActorUser, requireAdmin, rateLimit, sanitizeText, sanitizeUrl, csvCell, parsePagination, secureToken, secureId, isValidScope } from './src/server/security.ts';
 
 function mapSuggestion(row: Record<string, any>): ProductSuggestion {
@@ -483,6 +483,7 @@ export async function buildApp() {
     const email = sanitizeText(req.body?.email, 120).toLowerCase();
     const name = sanitizeText(req.body?.name, 80);
     const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    const inviteToken = sanitizeText(req.body?.invite || '', 128);
 
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       return res.status(400).json({ error: 'A valid email address is required' });
@@ -495,8 +496,49 @@ export async function buildApp() {
     }
 
     try {
+      // Validate the invite BEFORE creating the account — a dead link must
+      // fail loudly instead of silently dropping the promised role/badge.
+      let invite: AdminInvite | null = null;
+      if (inviteToken) {
+        invite = await findInviteByToken(inviteToken);
+        if (!invite || !inviteUsable(invite)) {
+          return res
+            .status(400)
+            .json({ error: 'This invite link is no longer valid (expired, already used, or revoked)' });
+        }
+      }
+
       const outcome = await createAccount({ email, password, name });
       if (outcome.ok === false) return res.status(outcome.status).json({ error: outcome.error });
+
+      // Redeem: claim one use atomically (a racing signup loses gracefully),
+      // then apply the promised role + badge to the fresh account.
+      if (invite && (await claimInvite(invite.id))) {
+        // Bootstrap rule wins: an invite can never strip the only ADMIN.
+        const grantRole =
+          outcome.user.role === 'ADMIN' && invite.role === 'USER' ? 'ADMIN' : invite.role;
+        outcome.user.role = grantRole as UserRole;
+        outcome.user.verification = invite.verification;
+        if (databasePool) {
+          await databasePool.query(
+            'update public.users set role = $2, verification = $3 where id = $1',
+            [outcome.user.id, grantRole, invite.verification],
+          );
+        }
+        invalidateResolveCache(outcome.user.id);
+        persistAuditLog({
+          actorId: outcome.user.id,
+          actorName: outcome.user.name,
+          actorEmail: outcome.user.email,
+          action: 'INVITE_USED',
+          category: 'ADMIN',
+          target: `${invite.id} by ${invite.createdByName}`,
+          source: detectSource(req),
+          status: 'SUCCESS',
+          ipAddress: req.ip || 'unknown',
+          metadata: { role: grantRole, verification: invite.verification },
+        });
+      }
 
       const token = await createSession(outcome.user, { ip: req.ip, userAgent: String(req.headers['user-agent'] || '') });
       persistAuditLog({
@@ -1296,6 +1338,144 @@ export async function buildApp() {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // Developer invite links — an admin hands a URL to someone who has NO
+  // account yet; the promised role/badge lands when they register through it.
+  // -------------------------------------------------------------------------
+  const memoryInvites: AdminInvite[] = [];
+
+  function mapInviteRow(row: Record<string, any>): AdminInvite {
+    const iso = (v: any) => (v instanceof Date ? v.toISOString() : v || '');
+    return {
+      id: row.id,
+      token: row.token,
+      createdBy: row.created_by,
+      createdByName: row.created_by_name,
+      role: row.role === 'USER' ? 'USER' : 'ADMIN',
+      verification: ['USER', 'DEVELOPER', 'ADMIN'].includes(row.verification) ? row.verification : '',
+      note: row.note || '',
+      maxUses: Number(row.max_uses) || 1,
+      uses: Number(row.uses) || 0,
+      revoked: !!row.revoked,
+      expiresAt: iso(row.expires_at),
+      createdAt: iso(row.created_at),
+    };
+  }
+
+  /** An invite can still be redeemed only if it is live: not revoked, uses left, not expired. */
+  function inviteUsable(invite: AdminInvite): boolean {
+    return !invite.revoked && invite.uses < invite.maxUses && Date.parse(invite.expiresAt) > Date.now();
+  }
+
+  async function findInviteByToken(token: string): Promise<AdminInvite | null> {
+    if (!databasePool) return memoryInvites.find((i) => i.token === token) || null;
+    try {
+      const r = await databasePool.query('select * from public.admin_invites where token = $1', [token]);
+      return r.rows[0] ? mapInviteRow(r.rows[0]) : null;
+    } catch (err) {
+      console.error('[invites/lookup]', (err as Error).message);
+      return null;
+    }
+  }
+
+  async function listInvites(): Promise<AdminInvite[]> {
+    if (!databasePool) {
+      return [...memoryInvites].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+    }
+    try {
+      const r = await databasePool.query(
+        'select * from public.admin_invites order by created_at desc limit 100',
+      );
+      return r.rows.map(mapInviteRow);
+    } catch (err) {
+      console.error('[invites/list]', (err as Error).message);
+      return [];
+    }
+  }
+
+  async function createInvite(params: {
+    createdBy: string;
+    createdByName: string;
+    role: 'USER' | 'ADMIN';
+    verification: string;
+    note: string;
+    maxUses: number;
+  }): Promise<AdminInvite> {
+    const invite: AdminInvite = {
+      id: secureId('inv'),
+      token: secureToken('inv_'),
+      createdBy: params.createdBy,
+      createdByName: params.createdByName,
+      role: params.role,
+      verification: (params.verification || '') as VerificationType,
+      note: params.note,
+      maxUses: params.maxUses,
+      uses: 0,
+      revoked: false,
+      expiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString(),
+      createdAt: new Date().toISOString(),
+    };
+    if (!databasePool) {
+      memoryInvites.unshift(invite);
+      return invite;
+    }
+    const r = await databasePool.query(
+      `insert into public.admin_invites
+         (id, token, created_by, created_by_name, role, verification, note, max_uses, uses, revoked, expires_at, created_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, 0, false, $9, $10) returning *`,
+      [
+        invite.id,
+        invite.token,
+        invite.createdBy,
+        invite.createdByName,
+        invite.role,
+        invite.verification,
+        invite.note,
+        invite.maxUses,
+        invite.expiresAt,
+        invite.createdAt,
+      ],
+    );
+    return mapInviteRow(r.rows[0]);
+  }
+
+  async function revokeInvite(id: string): Promise<AdminInvite | null> {
+    if (!databasePool) {
+      const inv = memoryInvites.find((i) => i.id === id);
+      if (!inv) return null;
+      inv.revoked = true;
+      return inv;
+    }
+    const r = await databasePool.query(
+      'update public.admin_invites set revoked = true where id = $1 returning *',
+      [id],
+    );
+    return r.rows[0] ? mapInviteRow(r.rows[0]) : null;
+  }
+
+  /** Atomically consume one use — two signups racing the same link can't both win. */
+  async function claimInvite(id: string): Promise<boolean> {
+    if (!databasePool) {
+      const inv = memoryInvites.find((i) => i.id === id);
+      if (!inv || !inviteUsable(inv)) return false;
+      inv.uses += 1;
+      return true;
+    }
+    try {
+      const r = await databasePool.query(
+        `update public.admin_invites
+            set uses = uses + 1
+          where id = $1 and not revoked and uses < max_uses and expires_at > now()
+          returning id`,
+        [id],
+      );
+      return (r.rowCount ?? 0) > 0;
+    } catch (err) {
+      console.error('[invites/claim]', (err as Error).message);
+      return false;
+    }
+  }
+
   // Admin Users List — PostgreSQL when connected; the in-memory array alone
   // would hide every real production account from this view.
   app.get('/api/v1/admin/users', async (req, res) => {
@@ -1423,6 +1603,104 @@ export async function buildApp() {
     });
 
     res.json({ success: true, user: updated });
+  });
+
+  // Admin: developer invite links — generate a URL for someone who does not
+  // have an account yet; registering through it grants the configured role
+  // and badge. Links expire after 7 days and are revocable at any time.
+  app.post('/api/v1/admin/invites', async (req, res) => {
+    const actor = requireAdmin(req, res);
+    if (!actor) return;
+
+    const role = sanitizeText(req.body?.role || 'ADMIN', 8).toUpperCase();
+    const verification = sanitizeText(req.body?.verification ?? '', 16);
+    const note = sanitizeText(req.body?.note || '', 200);
+    const maxUsesRaw = Number(req.body?.maxUses ?? 1);
+    if (!['USER', 'ADMIN'].includes(role)) {
+      return res.status(400).json({ error: 'role must be USER or ADMIN' });
+    }
+    if (!['', 'USER', 'DEVELOPER', 'ADMIN'].includes(verification)) {
+      return res.status(400).json({ error: 'verification must be USER, DEVELOPER or ADMIN (or empty)' });
+    }
+    const maxUses = Number.isInteger(maxUsesRaw) && maxUsesRaw >= 1 && maxUsesRaw <= 20 ? maxUsesRaw : 1;
+
+    try {
+      const invite = await createInvite({
+        createdBy: actor.id,
+        createdByName: actor.name,
+        role: role as 'USER' | 'ADMIN',
+        verification,
+        note,
+        maxUses,
+      });
+      persistAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorEmail: actor.email,
+        action: 'INVITE_CREATED',
+        category: 'ADMIN',
+        target: `${invite.id} -> ${role}${verification ? ` +${verification}` : ''}`,
+        source: detectSource(req),
+        status: 'SUCCESS',
+        ipAddress: req.ip || 'unknown',
+        metadata: { role, verification, maxUses },
+      });
+      res.status(201).json({ invite });
+    } catch (err) {
+      console.error('[invites] create failed:', (err as Error).message);
+      res.status(500).json({ error: 'Failed to create invite' });
+    }
+  });
+
+  app.get('/api/v1/admin/invites', async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    res.json({ invites: await listInvites() });
+  });
+
+  app.delete('/api/v1/admin/invites/:id', async (req, res) => {
+    const actor = requireAdmin(req, res);
+    if (!actor) return;
+    const id = sanitizeText(req.params.id, 64);
+    try {
+      const invite = await revokeInvite(id);
+      if (!invite) return res.status(404).json({ error: 'Invite not found' });
+      persistAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorEmail: actor.email,
+        action: 'INVITE_REVOKED',
+        category: 'ADMIN',
+        target: invite.id,
+        source: detectSource(req),
+        status: 'SUCCESS',
+        ipAddress: req.ip || 'unknown',
+        metadata: { role: invite.role },
+      });
+      res.json({ success: true, invite });
+    } catch (err) {
+      console.error('[invites] revoke failed:', (err as Error).message);
+      res.status(500).json({ error: 'Failed to revoke invite' });
+    }
+  });
+
+  // Public invite preview — what this link grants. Only display-safe fields:
+  // no emails, no user ids, no token of anything else.
+  app.get('/api/v1/invites/:token', async (req, res) => {
+    const token = sanitizeText(req.params.token, 128);
+    const invalid = (reason: string) => res.json({ valid: false, reason });
+    const invite = token ? await findInviteByToken(token) : null;
+    if (!invite) return invalid('not_found');
+    if (invite.revoked) return invalid('revoked');
+    if (invite.uses >= invite.maxUses) return invalid('used');
+    if (Date.parse(invite.expiresAt) <= Date.now()) return invalid('expired');
+    res.json({
+      valid: true,
+      role: invite.role,
+      verification: invite.verification,
+      creatorName: invite.createdByName,
+      note: invite.note,
+      expiresAt: invite.expiresAt,
+    });
   });
 
   // Admin: permanently delete an account. Your own account is off-limits and

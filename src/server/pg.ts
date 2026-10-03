@@ -45,6 +45,22 @@ create table if not exists public.ai_chat_messages (
 );
 create index if not exists ai_chat_user_created_idx on public.ai_chat_messages (user_id, created_at desc);
 alter table public.ai_chat_messages enable row level security;
+create table if not exists public.admin_invites (
+  id text primary key,
+  token text not null unique,
+  created_by text not null,
+  created_by_name text not null default '',
+  role text not null default 'ADMIN' check (role in ('USER', 'ADMIN')),
+  verification text not null default '',
+  note text not null default '',
+  max_uses int not null default 1 check (max_uses between 1 and 20),
+  uses int not null default 0,
+  revoked boolean not null default false,
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists admin_invites_created_idx on public.admin_invites (created_at desc);
+alter table public.admin_invites enable row level security;
 alter table if exists public.users add column if not exists two_factor_secret text not null default '';
 alter table if exists public.users add column if not exists verification text not null default '';
 `;

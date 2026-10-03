@@ -114,6 +114,15 @@ export function seoForAuthPage(mode: 'login' | 'register'): SeoEntry {
       };
 }
 
+/** Metadata for the standalone /invite/<token> developer invite page. */
+export function seoForInvitePage(): SeoEntry {
+  return {
+    title: 'Developer invite',
+    description:
+      'You have been invited to Vanitas — create your account through this private link to receive the invited role and verification badge.',
+  };
+}
+
 function setMeta(kind: 'name' | 'property', key: string, content: string) {
   let el = document.head.querySelector<HTMLMetaElement>(`meta[${kind}="${key}"]`);
   if (!el) {

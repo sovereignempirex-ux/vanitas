@@ -66,6 +66,26 @@ create index if not exists audit_logs_timestamp_idx on public.audit_logs (timest
 create index if not exists audit_logs_category_idx on public.audit_logs (category);
 
 -- ---------------------------------------------------------------------------
+-- Developer invite links: a not-yet-registered person opens the link and the
+-- granted role/badge is applied the moment they create their account.
+-- ---------------------------------------------------------------------------
+create table if not exists public.admin_invites (
+  id text primary key,
+  token text not null unique,
+  created_by text not null,
+  created_by_name text not null default '',
+  role text not null default 'ADMIN' check (role in ('USER', 'ADMIN')),
+  verification text not null default '',
+  note text not null default '',
+  max_uses int not null default 1 check (max_uses between 1 and 20),
+  uses int not null default 0,
+  revoked boolean not null default false,
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists admin_invites_created_idx on public.admin_invites (created_at desc);
+
+-- ---------------------------------------------------------------------------
 -- Webhooks
 -- ---------------------------------------------------------------------------
 create table if not exists public.webhooks (
@@ -87,6 +107,7 @@ create table if not exists public.webhooks (
 alter table public.product_suggestions enable row level security;
 alter table public.api_keys enable row level security;
 alter table public.audit_logs enable row level security;
+alter table public.admin_invites enable row level security;
 alter table public.webhooks enable row level security;
 
 do $$

@@ -732,6 +732,22 @@ create table if not exists public.ai_chat_messages (
 );
 create index if not exists ai_chat_user_created_idx on public.ai_chat_messages (user_id, created_at desc);
 alter table public.ai_chat_messages enable row level security;
+create table if not exists public.admin_invites (
+  id text primary key,
+  token text not null unique,
+  created_by text not null,
+  created_by_name text not null default '',
+  role text not null default 'ADMIN' check (role in ('USER', 'ADMIN')),
+  verification text not null default '',
+  note text not null default '',
+  max_uses int not null default 1 check (max_uses between 1 and 20),
+  uses int not null default 0,
+  revoked boolean not null default false,
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists admin_invites_created_idx on public.admin_invites (created_at desc);
+alter table public.admin_invites enable row level security;
 alter table if exists public.users add column if not exists two_factor_secret text not null default '';
 alter table if exists public.users add column if not exists verification text not null default '';
 `;
@@ -3503,6 +3519,7 @@ async function buildApp() {
     const email = sanitizeText(req.body?.email, 120).toLowerCase();
     const name = sanitizeText(req.body?.name, 80);
     const password = typeof req.body?.password === "string" ? req.body.password : "";
+    const inviteToken = sanitizeText(req.body?.invite || "", 128);
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       return res.status(400).json({ error: "A valid email address is required" });
     }
@@ -3513,8 +3530,39 @@ async function buildApp() {
       return res.status(400).json({ error: "Password must be between 8 and 128 characters" });
     }
     try {
+      let invite = null;
+      if (inviteToken) {
+        invite = await findInviteByToken(inviteToken);
+        if (!invite || !inviteUsable(invite)) {
+          return res.status(400).json({ error: "This invite link is no longer valid (expired, already used, or revoked)" });
+        }
+      }
       const outcome = await createAccount({ email, password, name });
       if (outcome.ok === false) return res.status(outcome.status).json({ error: outcome.error });
+      if (invite && await claimInvite(invite.id)) {
+        const grantRole = outcome.user.role === "ADMIN" && invite.role === "USER" ? "ADMIN" : invite.role;
+        outcome.user.role = grantRole;
+        outcome.user.verification = invite.verification;
+        if (databasePool) {
+          await databasePool.query(
+            "update public.users set role = $2, verification = $3 where id = $1",
+            [outcome.user.id, grantRole, invite.verification]
+          );
+        }
+        invalidateResolveCache(outcome.user.id);
+        persistAuditLog({
+          actorId: outcome.user.id,
+          actorName: outcome.user.name,
+          actorEmail: outcome.user.email,
+          action: "INVITE_USED",
+          category: "ADMIN",
+          target: `${invite.id} by ${invite.createdByName}`,
+          source: detectSource(req),
+          status: "SUCCESS",
+          ipAddress: req.ip || "unknown",
+          metadata: { role: grantRole, verification: invite.verification }
+        });
+      }
       const token = await createSession(outcome.user, { ip: req.ip, userAgent: String(req.headers["user-agent"] || "") });
       persistAuditLog({
         actorId: outcome.user.id,
@@ -4190,6 +4238,123 @@ async function buildApp() {
       return [...db.auditLogs];
     }
   }
+  const memoryInvites = [];
+  function mapInviteRow(row) {
+    const iso = (v) => v instanceof Date ? v.toISOString() : v || "";
+    return {
+      id: row.id,
+      token: row.token,
+      createdBy: row.created_by,
+      createdByName: row.created_by_name,
+      role: row.role === "USER" ? "USER" : "ADMIN",
+      verification: ["USER", "DEVELOPER", "ADMIN"].includes(row.verification) ? row.verification : "",
+      note: row.note || "",
+      maxUses: Number(row.max_uses) || 1,
+      uses: Number(row.uses) || 0,
+      revoked: !!row.revoked,
+      expiresAt: iso(row.expires_at),
+      createdAt: iso(row.created_at)
+    };
+  }
+  function inviteUsable(invite) {
+    return !invite.revoked && invite.uses < invite.maxUses && Date.parse(invite.expiresAt) > Date.now();
+  }
+  async function findInviteByToken(token) {
+    if (!databasePool) return memoryInvites.find((i) => i.token === token) || null;
+    try {
+      const r = await databasePool.query("select * from public.admin_invites where token = $1", [token]);
+      return r.rows[0] ? mapInviteRow(r.rows[0]) : null;
+    } catch (err) {
+      console.error("[invites/lookup]", err.message);
+      return null;
+    }
+  }
+  async function listInvites() {
+    if (!databasePool) {
+      return [...memoryInvites].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+    }
+    try {
+      const r = await databasePool.query(
+        "select * from public.admin_invites order by created_at desc limit 100"
+      );
+      return r.rows.map(mapInviteRow);
+    } catch (err) {
+      console.error("[invites/list]", err.message);
+      return [];
+    }
+  }
+  async function createInvite(params) {
+    const invite = {
+      id: secureId("inv"),
+      token: secureToken("inv_"),
+      createdBy: params.createdBy,
+      createdByName: params.createdByName,
+      role: params.role,
+      verification: params.verification || "",
+      note: params.note,
+      maxUses: params.maxUses,
+      uses: 0,
+      revoked: false,
+      expiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1e3).toISOString(),
+      createdAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    if (!databasePool) {
+      memoryInvites.unshift(invite);
+      return invite;
+    }
+    const r = await databasePool.query(
+      `insert into public.admin_invites
+         (id, token, created_by, created_by_name, role, verification, note, max_uses, uses, revoked, expires_at, created_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, 0, false, $9, $10) returning *`,
+      [
+        invite.id,
+        invite.token,
+        invite.createdBy,
+        invite.createdByName,
+        invite.role,
+        invite.verification,
+        invite.note,
+        invite.maxUses,
+        invite.expiresAt,
+        invite.createdAt
+      ]
+    );
+    return mapInviteRow(r.rows[0]);
+  }
+  async function revokeInvite(id) {
+    if (!databasePool) {
+      const inv = memoryInvites.find((i) => i.id === id);
+      if (!inv) return null;
+      inv.revoked = true;
+      return inv;
+    }
+    const r = await databasePool.query(
+      "update public.admin_invites set revoked = true where id = $1 returning *",
+      [id]
+    );
+    return r.rows[0] ? mapInviteRow(r.rows[0]) : null;
+  }
+  async function claimInvite(id) {
+    if (!databasePool) {
+      const inv = memoryInvites.find((i) => i.id === id);
+      if (!inv || !inviteUsable(inv)) return false;
+      inv.uses += 1;
+      return true;
+    }
+    try {
+      const r = await databasePool.query(
+        `update public.admin_invites
+            set uses = uses + 1
+          where id = $1 and not revoked and uses < max_uses and expires_at > now()
+          returning id`,
+        [id]
+      );
+      return (r.rowCount ?? 0) > 0;
+    } catch (err) {
+      console.error("[invites/claim]", err.message);
+      return false;
+    }
+  }
   app.get("/api/v1/admin/users", async (req, res) => {
     if (!requireAdmin(req, res)) return;
     if (databasePool) {
@@ -4296,6 +4461,93 @@ async function buildApp() {
       metadata: { verification: value || "none" }
     });
     res.json({ success: true, user: updated });
+  });
+  app.post("/api/v1/admin/invites", async (req, res) => {
+    const actor = requireAdmin(req, res);
+    if (!actor) return;
+    const role = sanitizeText(req.body?.role || "ADMIN", 8).toUpperCase();
+    const verification = sanitizeText(req.body?.verification ?? "", 16);
+    const note = sanitizeText(req.body?.note || "", 200);
+    const maxUsesRaw = Number(req.body?.maxUses ?? 1);
+    if (!["USER", "ADMIN"].includes(role)) {
+      return res.status(400).json({ error: "role must be USER or ADMIN" });
+    }
+    if (!["", "USER", "DEVELOPER", "ADMIN"].includes(verification)) {
+      return res.status(400).json({ error: "verification must be USER, DEVELOPER or ADMIN (or empty)" });
+    }
+    const maxUses = Number.isInteger(maxUsesRaw) && maxUsesRaw >= 1 && maxUsesRaw <= 20 ? maxUsesRaw : 1;
+    try {
+      const invite = await createInvite({
+        createdBy: actor.id,
+        createdByName: actor.name,
+        role,
+        verification,
+        note,
+        maxUses
+      });
+      persistAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorEmail: actor.email,
+        action: "INVITE_CREATED",
+        category: "ADMIN",
+        target: `${invite.id} -> ${role}${verification ? ` +${verification}` : ""}`,
+        source: detectSource(req),
+        status: "SUCCESS",
+        ipAddress: req.ip || "unknown",
+        metadata: { role, verification, maxUses }
+      });
+      res.status(201).json({ invite });
+    } catch (err) {
+      console.error("[invites] create failed:", err.message);
+      res.status(500).json({ error: "Failed to create invite" });
+    }
+  });
+  app.get("/api/v1/admin/invites", async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    res.json({ invites: await listInvites() });
+  });
+  app.delete("/api/v1/admin/invites/:id", async (req, res) => {
+    const actor = requireAdmin(req, res);
+    if (!actor) return;
+    const id = sanitizeText(req.params.id, 64);
+    try {
+      const invite = await revokeInvite(id);
+      if (!invite) return res.status(404).json({ error: "Invite not found" });
+      persistAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorEmail: actor.email,
+        action: "INVITE_REVOKED",
+        category: "ADMIN",
+        target: invite.id,
+        source: detectSource(req),
+        status: "SUCCESS",
+        ipAddress: req.ip || "unknown",
+        metadata: { role: invite.role }
+      });
+      res.json({ success: true, invite });
+    } catch (err) {
+      console.error("[invites] revoke failed:", err.message);
+      res.status(500).json({ error: "Failed to revoke invite" });
+    }
+  });
+  app.get("/api/v1/invites/:token", async (req, res) => {
+    const token = sanitizeText(req.params.token, 128);
+    const invalid = (reason) => res.json({ valid: false, reason });
+    const invite = token ? await findInviteByToken(token) : null;
+    if (!invite) return invalid("not_found");
+    if (invite.revoked) return invalid("revoked");
+    if (invite.uses >= invite.maxUses) return invalid("used");
+    if (Date.parse(invite.expiresAt) <= Date.now()) return invalid("expired");
+    res.json({
+      valid: true,
+      role: invite.role,
+      verification: invite.verification,
+      creatorName: invite.createdByName,
+      note: invite.note,
+      expiresAt: invite.expiresAt
+    });
   });
   app.delete("/api/v1/admin/users/:id", async (req, res) => {
     const actor = requireAdmin(req, res);

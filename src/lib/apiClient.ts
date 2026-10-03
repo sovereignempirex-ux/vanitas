@@ -25,6 +25,7 @@ import {
   ProductSuggestion,
   DocComment,
   AiChatHistoryMessage,
+  AdminInvite,
 } from '../types.ts';
 
 class ApiClient {
@@ -108,8 +109,10 @@ class ApiClient {
     return this.request<{ user: User; permissions: PermissionScope[] }>('/auth/me');
   }
 
-  /** Create a real account (scrypt-hashed password, server-side session). */
-  async register(params: { email: string; password: string; name: string }) {
+  /** Create a real account (scrypt-hashed password, server-side session).
+   *  Pass `invite` to redeem a developer invite link — the granted role/badge
+   *  is applied server-side the moment the account is created. */
+  async register(params: { email: string; password: string; name: string; invite?: string }) {
     const data = await this.request<{ token: string; user: User; permissions: PermissionScope[] }>('/auth/register', {
       method: 'POST',
       body: JSON.stringify(params),
@@ -303,6 +306,38 @@ class ApiClient {
       method: 'PATCH',
       body: JSON.stringify({ verification }),
     });
+  }
+
+  /** Create a developer invite link (admin only) — grants role/badge on signup. */
+  async createAdminInvite(body: { role: string; verification: string; note: string; maxUses: number }) {
+    return this.request<{ invite: AdminInvite }>('/admin/invites', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
+  async listAdminInvites() {
+    return this.request<{ invites: AdminInvite[] }>('/admin/invites');
+  }
+
+  /** Revoke an invite link — it stops redeeming immediately. */
+  async revokeAdminInvite(id: string) {
+    return this.request<{ success: boolean; invite: AdminInvite }>(`/admin/invites/${id}`, {
+      method: 'DELETE',
+    });
+  }
+
+  /** Public: what does this invite link grant? (valid / reason when dead) */
+  async previewInvite(token: string) {
+    return this.request<{
+      valid: boolean;
+      reason?: string;
+      role?: string;
+      verification?: string;
+      creatorName?: string;
+      note?: string;
+      expiresAt?: string;
+    }>(`/invites/${encodeURIComponent(token)}`);
   }
 
   async getAdminLogs(params: { limit?: number; offset?: number; from?: string; category?: string; search?: string }) {

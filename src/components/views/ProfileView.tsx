@@ -104,7 +104,7 @@ export const ProfileView: React.FC = () => {
 
             <div className="mt-4 flex items-center justify-center gap-2">
               <h2 className="text-base font-bold text-white">{name}</h2>
-              <VerifiedBadge type={user?.verification} label />
+              <VerifiedBadge type={user?.verification} className="h-4 w-4" />
             </div>
             <p className="font-mono text-xs text-slate-400">{user?.email}</p>
 
