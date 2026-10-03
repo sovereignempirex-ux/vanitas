@@ -354,6 +354,110 @@ check('A resolves suggestion -> 200', sugResolve.status === 200 && sugResolve.js
 const sugBad = await call('PATCH', `/admin/suggestions/${sugId}`, { token: tokenA, body: { status: 'nonsense' } });
 check('invalid suggestion status -> 400', sugBad.status === 400, sugBad.status);
 
+console.log('— webhooks (owner-scoped, REAL delivery with HMAC signature) —');
+const { createHmac } = await import('node:crypto');
+const http = await import('node:http');
+
+const anonWh = await call('GET', '/webhooks');
+check('anon GET /webhooks -> 401', anonWh.status === 401, anonWh.status);
+const anonWhTest = await call('POST', '/webhooks/wh_whatever/test');
+check('anon POST /webhooks/:id/test -> 401', anonWhTest.status === 401, anonWhTest.status);
+
+// Local receiver: proves the delivery is a REAL network call, and that the
+// HMAC signature verifies against the webhook's secret.
+let received = null;
+const receiver = http.createServer((req, res) => {
+  let body = '';
+  req.on('data', (d) => (body += d));
+  req.on('end', () => {
+    received = { url: req.url, sig: req.headers['x-vanitas-signature'], event: req.headers['x-vanitas-event'], body };
+    res.statusCode = 200;
+    res.end('ok');
+  });
+});
+await new Promise((resolve) => receiver.listen(0, '127.0.0.1', resolve));
+const receiverPort = receiver.address().port;
+
+const whCreate = await call('POST', '/webhooks', {
+  token: tokenA,
+  body: { name: 'Suite Receiver', url: `http://127.0.0.1:${receiverPort}/hook`, events: ['user.login'] },
+});
+check(
+  'A creates webhook -> 201 + secret returned once',
+  whCreate.status === 201 && typeof whCreate.json?.webhook?.secret === 'string',
+  whCreate.json ?? whCreate.status,
+);
+const whId = whCreate.json?.webhook?.id;
+const whSecret = whCreate.json?.webhook?.secret;
+
+const bTest = await call('POST', `/webhooks/${whId}/test`, { token: tokenB });
+check("B tests A's webhook -> 403", bTest.status === 403, bTest.status);
+
+const aList = await call('GET', '/webhooks', { token: tokenA });
+const aRow = (aList.json?.webhooks || []).find((w) => w.id === whId);
+check('A lists own webhook', aList.status === 200 && !!aRow, { status: aList.status });
+check('list response never carries the signing secret', aList.status === 200 && aRow && aRow.secret === undefined, aRow);
+
+const bList2 = await call('GET', '/webhooks', { token: tokenB });
+check(
+  "B's webhook list does not leak A's endpoint or logs",
+  bList2.status === 200 &&
+    !(bList2.json?.webhooks || []).some((w) => w.id === whId) &&
+    (bList2.json?.logs || []).every((l) => l.webhookId !== whId),
+  { status: bList2.status, hooks: (bList2.json?.webhooks || []).length },
+);
+
+received = null;
+const testRes = await call('POST', `/webhooks/${whId}/test`, { token: tokenA });
+check(
+  'A test -> success with delivered log',
+  testRes.status === 200 && testRes.json?.success === true && testRes.json?.log?.status === 'delivered' && testRes.json?.log?.statusCode === 200,
+  testRes.json ?? testRes.status,
+);
+check('receiver actually received the POST', !!received && received.url === '/hook' && received.event === 'ping.test', received);
+const expectSig = received ? `sha256=${createHmac('sha256', whSecret).update(received.body).digest('hex')}` : '';
+check('HMAC signature verifies against the webhook secret', !!received && received.sig === expectSig, {
+  got: received?.sig?.slice(0, 30),
+});
+
+// An unreachable endpoint must produce an HONEST failed log (the old
+// handler fabricated `delivered / 200` without any network call).
+await new Promise((resolve) => receiver.close(resolve));
+const whDead = await call('POST', '/webhooks', {
+  token: tokenA,
+  body: { name: 'Dead endpoint', url: `http://127.0.0.1:${receiverPort}/closed`, events: ['key.rotated'] },
+});
+check('A creates second webhook -> 201', whDead.status === 201, whDead.json ?? whDead.status);
+const deadTest = await call('POST', `/webhooks/${whDead.json?.webhook?.id}/test`, { token: tokenA });
+check(
+  'unreachable endpoint -> honest FAILED delivery (no fabrication)',
+  deadTest.status === 200 && deadTest.json?.success === false && deadTest.json?.log?.status === 'failed',
+  deadTest.json ?? deadTest.status,
+);
+
+console.log('— external database connection metadata (admin-only) —');
+const dbAnon = await call('GET', '/databases/external');
+check('anon GET /databases/external -> 401', dbAnon.status === 401, dbAnon.status);
+const dbB = await call('GET', '/databases/external', { token: tokenB });
+check('B GET /databases/external -> 403', dbB.status === 403, dbB.status);
+const dbTestB = await call('POST', '/databases/external/test', { token: tokenB, body: { id: 'db_1' } });
+check('B POST /databases/external/test -> 403', dbTestB.status === 403, dbTestB.status);
+const dbA = await call('GET', '/databases/external', { token: tokenA });
+check(
+  'A GET /databases/external -> 200 with connection metadata',
+  dbA.status === 200 && Array.isArray(dbA.json?.databases),
+  dbA.status,
+);
+
+console.log('— failed logins are audited —');
+const badLogin = await call('POST', '/auth/login', {
+  body: { email: `definitely-not-registered-${ts}@example.test`, password: 'Whatever123!' },
+});
+check('unknown account login -> 401', badLogin.status === 401, badLogin.status);
+const auditAfter = await call('GET', '/admin/logs?limit=100&category=AUTH', { token: tokenA });
+const auditActions = (auditAfter.json?.logs || []).map((l) => l.action);
+check('audit log records LOGIN_FAILURE', auditActions.includes('LOGIN_FAILURE'), auditActions.slice(0, 10));
+
 console.log('— B writes content, admin deletes the account fully —');
 const c = await call('POST', '/comments/getting-started', { token: tokenB, body: { body: 'Temporary comment from the admin suite.' } });
 check('B posts a comment -> 201', c.status === 201, c.status);

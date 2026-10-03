@@ -42,6 +42,12 @@ class ApiClient {
     }
   }
 
+  /** Read-only view of the current session token for same-origin tools
+   * (API Playground) that build their own fetch calls. */
+  getSessionToken(): string | null {
+    return this.getAuthToken();
+  }
+
   setAuthToken(token: string | null) {
     try {
       if (token) localStorage.setItem('vanitas_auth_token', token);
@@ -222,6 +228,15 @@ class ApiClient {
   async revokeSession(id: string) {
     return this.request<{ success: boolean }>('/auth/sessions/' + id, {
       method: 'DELETE',
+    });
+  }
+
+  /** Rotate the password: proves the current one server-side, and every
+   * OTHER session of the account is revoked with it. */
+  async changePassword(currentPassword: string, newPassword: string) {
+    return this.request<{ success: boolean; sessionsRevoked: number }>('/auth/password', {
+      method: 'POST',
+      body: JSON.stringify({ currentPassword, newPassword }),
     });
   }
 

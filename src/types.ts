@@ -146,6 +146,9 @@ export interface WebhookEndpoint {
   createdAt: string;
   lastTriggeredAt: string | null;
   failureCount: number;
+  /** Account that created this endpoint — rows predating ownership
+   * hardening have none and are therefore admin-only. */
+  ownerId?: string;
 }
 
 export interface WebhookDeliveryLog {

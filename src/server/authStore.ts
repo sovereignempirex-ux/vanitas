@@ -179,7 +179,7 @@ export function rowToUser(row: Record<string, any>): User {
 
 /** In-memory password store used when DATABASE_URL is not configured. */
 const memoryPasswords = new Map<string, { userId: string; hash: string }>();
-const memorySessions = new Map<string, { userId: string; expiresAt: number }>();
+const memorySessions = new Map<string, { userId: string; expiresAt: number; ip?: string; userAgent?: string; createdAt?: number }>();
 /** Short-lived cache so a session token costs one map lookup per request. */
 const resolveCache = new Map<string, { user: User | null; until: number }>();
 
@@ -328,6 +328,34 @@ export async function forgetAccount(userId: string): Promise<void> {
 // setTwoFactor always invalidates the session resolve-cache so /auth/me and
 // every Bearer request see the new state immediately.
 const memoryTwoFactor = new Map<string, string>();
+// Highest TOTP time-step already spent on a session-creating login (replay
+// protection). PG mode keeps this in users.totp_last_step.
+const memoryTotpStep = new Map<string, number>();
+
+export async function getTotpLastStep(userId: string): Promise<number> {
+  if (databasePool) {
+    try {
+      const result = await databasePool.query('select totp_last_step from public.users where id = $1', [userId]);
+      return Number(result.rows[0]?.totp_last_step || 0);
+    } catch (err) {
+      console.error('[auth] totp step read failed:', (err as Error).message);
+      return 0; // fail open on the watermark only — the code itself still verifies
+    }
+  }
+  return memoryTotpStep.get(userId) || 0;
+}
+
+export async function setTotpLastStep(userId: string, step: number): Promise<void> {
+  if (databasePool) {
+    try {
+      await databasePool.query('update public.users set totp_last_step = $2 where id = $1', [userId, step]);
+    } catch (err) {
+      console.error('[auth] totp step persist failed:', (err as Error).message);
+    }
+  } else {
+    memoryTotpStep.set(userId, step);
+  }
+}
 
 export async function getTwoFactorSecret(userId: string): Promise<string | null> {
   if (databasePool) {
@@ -340,12 +368,13 @@ export async function getTwoFactorSecret(userId: string): Promise<string | null>
 export async function setTwoFactor(userId: string, secret: string, enabled: boolean): Promise<void> {
   if (databasePool) {
     await databasePool.query(
-      'update public.users set two_factor_secret = $2, two_factor_enabled = $3 where id = $1',
+      'update public.users set two_factor_secret = $2, two_factor_enabled = $3, totp_last_step = 0 where id = $1',
       [userId, secret, enabled],
     );
   } else {
     if (secret) memoryTwoFactor.set(userId, secret);
     else memoryTwoFactor.delete(userId);
+    memoryTotpStep.delete(userId); // new secret ⇒ replay watermark starts fresh
     const user = db.users.find((u) => u.id === userId);
     if (user) user.twoFactorEnabled = enabled;
   }
@@ -427,7 +456,7 @@ export async function createSession(user: User, meta: { ip?: string; userAgent?:
       const now = Date.now();
       for (const [k, v] of memorySessions) if (v.expiresAt < now) memorySessions.delete(k);
     }
-    memorySessions.set(hash, { userId: user.id, expiresAt: expiresAt.getTime() });
+    memorySessions.set(hash, { userId: user.id, expiresAt: expiresAt.getTime(), ip: String(meta.ip || '').slice(0, 64), userAgent: String(meta.userAgent || '').slice(0, 200), createdAt: Date.now() });
   }
   return token;
 }
@@ -483,6 +512,156 @@ export async function revokeSession(token: string): Promise<void> {
   } else {
     memorySessions.delete(hash);
   }
+}
+
+// ---- session inventory -----------------------------------------------------
+// auth_sessions has no surrogate id: the token hash IS the row identity. It
+// is sha256(token) — irreversible — so handing it to the owning client as
+// the revocation id leaks nothing.
+
+export interface SessionRow {
+  id: string; // token hash (irreversible)
+  ip: string;
+  userAgent: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
+export async function listUserSessions(userId: string): Promise<SessionRow[]> {
+  if (databasePool) {
+    try {
+      const result = await databasePool.query(
+        `select token_hash, ip, user_agent, created_at, expires_at
+           from public.auth_sessions
+          where user_id = $1 and expires_at > now()
+          order by created_at desc`,
+        [userId],
+      );
+      return result.rows.map((r: Record<string, any>) => ({
+        id: String(r.token_hash),
+        ip: String(r.ip || ''),
+        userAgent: String(r.user_agent || ''),
+        createdAt: new Date(r.created_at).toISOString(),
+        expiresAt: new Date(r.expires_at).toISOString(),
+      }));
+    } catch (err) {
+      console.error('[auth] session list failed:', (err as Error).message);
+      return [];
+    }
+  }
+  const out: SessionRow[] = [];
+  const now = Date.now();
+  for (const [id, rec] of memorySessions) {
+    if (rec.userId !== userId || rec.expiresAt < now) continue;
+    out.push({
+      id,
+      ip: rec.ip || '',
+      userAgent: rec.userAgent || '',
+      createdAt: new Date(rec.createdAt || 0).toISOString(),
+      expiresAt: new Date(rec.expiresAt).toISOString(),
+    });
+  }
+  return out.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+}
+
+/** Revoke ONE session — ownership is enforced by the user_id predicate. */
+export async function revokeUserSession(userId: string, sessionId: string): Promise<boolean> {
+  if (databasePool) {
+    try {
+      const r = await databasePool.query(
+        'delete from public.auth_sessions where user_id = $1 and token_hash = $2',
+        [userId, sessionId],
+      );
+      resolveCache.delete(sessionId);
+      return Number(r.rowCount || 0) > 0;
+    } catch (err) {
+      console.error('[auth] session revoke failed:', (err as Error).message);
+      return false;
+    }
+  }
+  const rec = memorySessions.get(sessionId);
+  if (!rec || rec.userId !== userId) return false;
+  memorySessions.delete(sessionId);
+  resolveCache.delete(sessionId);
+  return true;
+}
+
+/**
+ * Revoke every session of a user except the one making the request. Used
+ * when 2FA is enabled: an attacker who planted sessions before the account
+ * was hardened must lose them at the moment protection turns on.
+ */
+export async function revokeOtherSessions(userId: string, keepSessionId?: string): Promise<number> {
+  let removed = 0;
+  if (databasePool) {
+    try {
+      const r = await databasePool.query(
+        keepSessionId
+          ? 'delete from public.auth_sessions where user_id = $1 and token_hash <> $2'
+          : 'delete from public.auth_sessions where user_id = $1',
+        keepSessionId ? [userId, keepSessionId] : [userId],
+      );
+      removed = Number(r.rowCount || 0);
+    } catch (err) {
+      console.error('[auth] revoke-others failed:', (err as Error).message);
+      return 0;
+    }
+  } else {
+    for (const [id, rec] of Array.from(memorySessions)) {
+      if (rec.userId === userId && id !== keepSessionId) {
+        memorySessions.delete(id);
+        removed += 1;
+      }
+    }
+  }
+  // Cached resolutions for revoked rows must die too; the kept session simply
+  // re-resolves from storage on its next request.
+  invalidateResolveCache(userId);
+  return removed;
+}
+
+// ---- password rotation ------------------------------------------------------
+
+/** Verify a password for a specific account with NO login side effects
+ * (no last_login write, no role promotion) — used by password change. */
+export async function verifyPasswordFor(userId: string, password: string): Promise<boolean> {
+  if (databasePool) {
+    try {
+      const result = await databasePool.query('select password_hash from public.users where id = $1', [userId]);
+      const hash = result.rows[0]?.password_hash;
+      if (!hash) {
+        await burnPasswordTime(password);
+        return false;
+      }
+      return await verifyPassword(password, hash);
+    } catch (err) {
+      console.error('[auth] password check failed:', (err as Error).message);
+      return false;
+    }
+  }
+  for (const rec of memoryPasswords.values()) {
+    if (rec.userId === userId) return await verifyPassword(password, rec.hash);
+  }
+  await burnPasswordTime(password);
+  return false;
+}
+
+/** Replace the stored password hash (caller has already proven the current
+ * password). No login side effects. */
+export async function setPassword(userId: string, passwordHash: string): Promise<void> {
+  if (databasePool) {
+    await databasePool.query('update public.users set password_hash = $2 where id = $1', [userId, passwordHash]);
+  } else {
+    const user = db.users.find((u) => u.id === userId);
+    if (user) {
+      const clean = user.email.trim().toLowerCase();
+      const rec = memoryPasswords.get(clean);
+      if (rec) rec.hash = passwordHash;
+      else memoryPasswords.set(clean, { userId, hash: passwordHash });
+    }
+  }
+  // Any cached resolution that captured the old credential state is stale.
+  invalidateResolveCache(userId);
 }
 
 // ---- OAuth identities (Discord / Google / GitHub) -------------------------

@@ -148,7 +148,8 @@ function renderInline(text: string, keyPrefix: string): React.ReactNode[] {
       const link = /^\[([^\]]+)\]\(([^)\s]+)\)$/.exec(token);
       if (link) {
         const href = link[2];
-        const safe = /^(https?:\/\/|\/|#|mailto:)/i.test(href) ? href : '#';
+        // https://…, site paths (but NOT protocol-relative //host), #fragments, mailto.
+        const safe = /^(https?:\/\/|\/(?!\/)|#|mailto:)/i.test(href) ? href : '#';
         nodes.push(
           <a
             key={key}

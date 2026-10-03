@@ -110,6 +110,7 @@ export const CommentsSection: React.FC<{ docId: string }> = ({ docId }) => {
                     <img
                       src={c.authorAvatar}
                       alt=""
+                      referrerPolicy="no-referrer"
                       className="h-7 w-7 rounded-lg object-cover border border-white/15"
                     />
                   ) : (
@@ -151,6 +152,7 @@ export const CommentsSection: React.FC<{ docId: string }> = ({ docId }) => {
           <img
             src={user.avatarUrl}
             alt=""
+            referrerPolicy="no-referrer"
             className="hidden sm:block h-8 w-8 rounded-xl object-cover border border-white/15"
           />
         ) : null}

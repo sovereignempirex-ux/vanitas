@@ -63,6 +63,7 @@ console.log('— account —');
 const primerEmail = `apikey_primer_${Date.now()}@example.com`;
 const primer = await call('POST', '/auth/register', { body: { email: primerEmail, password: 'SuperSecret123!', name: 'API Key Primer' } });
 check('primer registers (occupies bootstrap slot)', primer.status === 201, primer);
+const primerToken = primer.json?.token;
 
 const email = `apikey_${Date.now()}@example.com`;
 let r = await call('POST', '/auth/register', { body: { email, password: 'SuperSecret123!', name: 'API Key Tester' } });
@@ -284,7 +285,44 @@ const allowHeaders = (preflight.headers.get('access-control-allow-headers') || '
 check('CORS allows the x-api-key header', allowHeaders.includes('x-api-key'), allowHeaders);
 
 // ---- counters really moved -------------------------------------------------
-console.log('— usage counters —');
+console.log('- ownership & authorization (IDOR guard) -');
+// Fresh key owned by the tester, used purely for cross-account checks.
+r = await call('POST', '/api-keys', { token, body: { name: 'Ownership Probe', scopes: ['api.read'] } });
+check('create ownership probe key -> 201', r.status === 201, r);
+const probeId = r.json?.key?.id;
+
+// The attacker must be a PLAIN user: admins are intentionally allowed to
+// manage every key (consistent with webhooks/admin surfaces), so the primer
+// (bootstrap ADMIN) is the wrong subject for an IDOR assertion.
+const attackerEmail = `apikey_attacker_${Date.now()}@example.com`;
+const attackerReg = await call('POST', '/auth/register', {
+  body: { email: attackerEmail, password: 'SuperSecret123!', name: 'API Key Attacker' },
+});
+check('attacker account registers', attackerReg.status === 201, attackerReg);
+const attackerToken = attackerReg.json?.token;
+
+r = await call('GET', '/api-keys/usage-analytics');
+check('anon GET /api-keys/usage-analytics -> 401', r.status === 401, r.status);
+r = await call('GET', '/api-keys/usage-analytics', { token });
+check('owner GET /api-keys/usage-analytics -> 200', r.status === 200, r.status);
+r = await call('GET', '/api-keys/usage-analytics', { token: attackerToken });
+check(
+  "another account's analytics never summarise this account's key",
+  r.status === 200 && !(r.json?.summaries || []).some((s) => s.keyId === probeId),
+  { status: r.status, keys: (r.json?.summaries || []).map((s) => s.keyId) },
+);
+
+r = await call('POST', '/api-keys/does-not-exist/simulate-traffic');
+check('anon simulate-traffic -> 401', r.status === 401, r.status);
+r = await call('POST', `/api-keys/${probeId}/simulate-traffic`, { token: attackerToken, body: { requestCount: 5 } });
+check("another account's simulate-traffic -> 403", r.status === 403, r.status);
+r = await call('POST', `/api-keys/${probeId}/simulate-traffic`, { token, body: { requestCount: 5 } });
+check('owner simulate-traffic -> 200 (no key object leaked cross-account)', r.status === 200 && r.json?.success === true, r.json ?? r.status);
+
+r = await call('PATCH', `/api-keys/${probeId}/scopes`, { token: attackerToken, body: { scopes: ['api.read', 'bot.execute'] } });
+check("another account's PATCH scopes -> 403", r.status === 403, r.status);
+
+console.log('- usage counters -');
 r = await call('GET', '/public/me', { apiKey: raw });
 check('usageCount incremented on served requests', r.json?.key?.usageCount >= 3, r.json?.key?.usageCount);
 check('currentUsageThisMonth incremented', r.json?.limits?.usedThisMonth >= 3, r.json?.limits?.usedThisMonth);

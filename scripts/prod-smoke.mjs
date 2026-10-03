@@ -116,6 +116,19 @@ r = await call('PATCH', '/admin/users/usr_x/verification', { body: { verificatio
 check('PATCH /admin/users/:id/verification without session → 401', r.status === 401, r);
 r = await call('POST', '/admin/invites', { body: { role: 'ADMIN' } });
 check('POST /admin/invites without session → 401', r.status === 401, r);
+// Hardened surfaces: key/webhook/database metadata is never anonymous.
+r = await call('GET', '/api-keys/usage-analytics');
+check('GET /api-keys/usage-analytics without session → 401', r.status === 401, r);
+r = await call('POST', '/api-keys/probe_key/simulate-traffic', { body: { requestCount: 5 } });
+check('POST /api-keys/:id/simulate-traffic without session → 401', r.status === 401, r);
+r = await call('GET', '/webhooks');
+check('GET /webhooks without session → 401', r.status === 401, r);
+r = await call('POST', '/webhooks/wh_probe/test');
+check('POST /webhooks/:id/test without session → 401', r.status === 401, r);
+r = await call('GET', '/databases/external');
+check('GET /databases/external without session → 401', r.status === 401, r);
+r = await call('POST', '/auth/password', { body: { currentPassword: 'whatever-1', newPassword: 'whatever-22' } });
+check('POST /auth/password without session → 401', r.status === 401, r);
 r = await call('GET', '/invites/inv_bogus_probe_token');
 check(
   'public invite preview for unknown token → valid:false',

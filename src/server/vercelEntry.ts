@@ -31,7 +31,7 @@ function loadApp(): Promise<any> {
 }
 
 function fail(res: AnyRes | null, stage: string, err: any): void {
-  const payload = {
+  const detail = {
     error: 'function_error',
     stage,
     message: String(err?.message || err),
@@ -44,14 +44,19 @@ function fail(res: AnyRes | null, stage: string, err: any): void {
     nodeEnv: process.env.NODE_ENV || '',
     time: new Date().toISOString(),
   };
-  console.error('[vanitas]', JSON.stringify(payload));
+  // Full details (stack, runtime metadata) stay in the function logs only —
+  // never in the response body: driver/SQL text and version info are for
+  // operators, not for whoever triggered the failure.
+  console.error('[vanitas]', JSON.stringify(detail));
   if (!res) return;
+  const clientPayload: Record<string, unknown> = { error: 'function_error', stage };
+  if (process.env.NODE_ENV !== 'production') clientPayload.message = detail.message;
   try {
     if (!res.headersSent) {
       res.statusCode = 500;
       res.setHeader('content-type', 'application/json; charset=utf-8');
     }
-    res.end(JSON.stringify(payload, null, 2));
+    res.end(JSON.stringify(clientPayload, null, 2));
   } catch {
     /* response already gone */
   }

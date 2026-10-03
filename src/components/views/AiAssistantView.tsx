@@ -3,6 +3,7 @@ import { api } from '../../lib/apiClient.ts';
 import { AiToneStyle, CodeDiagnosisResult, ProductSuggestion } from '../../types.ts';
 import { useAuth } from '../../context/AuthContext.tsx';
 import { Markdown } from '../Markdown.tsx';
+import { safeWebHref } from '../../lib/urls.ts';
 import {
   Sparkles,
   Send,
@@ -682,18 +683,24 @@ export const AiAssistantView: React.FC = () => {
                             Grounding Verified Sources
                           </p>
                           <div className="flex flex-wrap gap-2">
-                            {msg.sources.map((s, idx) => (
-                              <a
-                                key={idx}
-                                href={s.url}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-black/40 px-2.5 py-1 text-[11px] text-slate-300 hover:border-cyan-400/40 hover:text-white transition-colors"
-                              >
-                                <span className="truncate max-w-[180px]">{s.title}</span>
-                                <ExternalLink className="h-3 w-3 text-cyan-400" />
-                              </a>
-                            ))}
+                            {msg.sources.map((s, idx) => {
+                              // Source URLs come from an AI/upstream response:
+                              // only http(s) targets ever become clickable.
+                              const href = safeWebHref(s.url);
+                              if (!href) return null;
+                              return (
+                                <a
+                                  key={idx}
+                                  href={href}
+                                  target="_blank"
+                                  rel="noopener noreferrer nofollow"
+                                  className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-black/40 px-2.5 py-1 text-[11px] text-slate-300 hover:border-cyan-400/40 hover:text-white transition-colors"
+                                >
+                                  <span className="truncate max-w-[180px]">{s.title}</span>
+                                  <ExternalLink className="h-3 w-3 text-cyan-400" />
+                                </a>
+                              );
+                            })}
                           </div>
                         </div>
                       )}

@@ -207,6 +207,7 @@ export const Header: React.FC<HeaderProps> = ({ onOpenCommandPalette }) => {
                 <img
                   src={user.avatarUrl}
                   alt={user.name}
+                  referrerPolicy="no-referrer"
                   className="h-7 w-7 rounded-lg object-cover border border-blue-500/30"
                 />
                 <span className="text-xs font-medium text-slate-200 hidden sm:inline-block max-w-[100px] truncate">

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useAuth } from '../context/AuthContext.tsx';
 import { api } from '../lib/apiClient.ts';
 import { BRAND_ASSETS } from '../data/assets.ts';
@@ -63,7 +63,7 @@ interface AuthPageProps {
 }
 
 export const AuthPage: React.FC<AuthPageProps> = ({ mode, invite }) => {
-  const { loginWithEmail, completeOAuthLogin, completeTwoFactorLogin } = useAuth();
+  const { loginWithEmail, completeOAuthLogin, completeTwoFactorLogin, user, authLoading } = useAuth();
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -86,32 +86,61 @@ export const AuthPage: React.FC<AuthPageProps> = ({ mode, invite }) => {
       .finally(() => setProvidersLoaded(true));
   }, []);
 
-  // Consume results delivered by the OAuth callback in the URL fragment.
+  // Read the OAuth callback fragment EXACTLY once (and scrub it from the URL
+  // immediately so a session token never lingers in history), but defer any
+  // decision until the real session state is known.
+  const pendingFragment = useRef<{ token?: string; twoFaState?: string; oauthError?: string } | 'none' | 'unread'>('unread');
+
   useEffect(() => {
     const hash = window.location.hash.replace(/^#/, '');
-    if (!hash) return;
+    if (!hash) {
+      pendingFragment.current = 'none';
+      return;
+    }
     const params = new URLSearchParams(hash);
-    const token = params.get('vnt_oauth');
-    const oauthError = params.get('vnt_error');
-    const twoFaState = params.get('vnt_2fa');
+    pendingFragment.current = {
+      token: params.get('vnt_oauth') || undefined,
+      twoFaState: params.get('vnt_2fa') || undefined,
+      oauthError: params.get('vnt_error') || undefined,
+    };
     // Clear the fragment from history immediately — the token must not linger.
     window.history.replaceState(null, '', window.location.pathname);
-    if (token) {
+  }, []);
+
+  // Consume the pending fragment only after the initial /auth/me check has
+  // finished. Adopting a token while the visitor is already signed in would
+  // be session fixation (an attacker could log victims INTO the attacker's
+  // account by handing them a link), and adopting during the check would
+  // race it. The token shape is validated too — only server-minted
+  // `vnt_sess_` tokens are ever sent to the API.
+  useEffect(() => {
+    const pending = pendingFragment.current;
+    if (pending === 'unread' || pending === 'none') return;
+    if (authLoading) return;
+    pendingFragment.current = 'none'; // consume exactly once
+    if (pending.token) {
+      const shapeOk = /^vnt_sess_[A-Za-z0-9_-]{40,}$/.test(pending.token);
+      if (user) return; // already signed in — ignore the injected token, keep our session
+      if (!shapeOk) {
+        setError(OAUTH_ERROR_MESSAGES.provider_failed);
+        return;
+      }
       setLoading(true);
-      completeOAuthLogin(token)
+      completeOAuthLogin(pending.token)
         .then(() => window.location.assign('/'))
         .catch(() => {
           setError(OAUTH_ERROR_MESSAGES.provider_failed);
           setLoading(false);
         });
-    } else if (twoFaState) {
-      // OAuth sign-in paused for the account's real TOTP code.
-      setTwoFactor({ state: twoFaState });
-    } else if (oauthError) {
-      setError(OAUTH_ERROR_MESSAGES[oauthError] || OAUTH_ERROR_MESSAGES.provider_failed);
+    } else if (pending.twoFaState) {
+      // OAuth sign-in paused for the account's real TOTP code (HMAC-signed
+      // server-side — a forged value is rejected there).
+      setTwoFactor({ state: pending.twoFaState });
+    } else if (pending.oauthError) {
+      setError(OAUTH_ERROR_MESSAGES[pending.oauthError] || OAUTH_ERROR_MESSAGES.provider_failed);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [user, authLoading]);
 
   const startOAuth = (provider: string) => {
     setError(null);

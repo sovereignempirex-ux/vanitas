@@ -262,8 +262,17 @@ check('enable with wrong code → 400', r.status === 400, r);
 r = await call('GET', '/auth/me', { token: loginToken });
 check('wrong attempt did NOT enable 2FA', r.json?.user?.twoFactorEnabled === false, r.json?.user);
 
+// A second session "planted" while the account is still unprotected: turning
+// 2FA on must flush it out (hardening flush — no pre-planted session survives).
+r = await call('POST', '/auth/login', { body: { email, password } });
+check('second plain login before enabling 2FA → session', r.status === 200 && typeof r.json?.token === 'string', r);
+const plantedToken = r.json?.token;
+
 r = await call('POST', '/auth/2fa/enable', { token: loginToken, body: { code: totp(totpSecret) } });
 check('enable with live code → success', r.status === 200 && r.json?.success === true, r);
+check('enabling 2FA revoked the other session(s)', (r.json?.sessionsRevoked || 0) >= 1, r.json);
+r = await call('GET', '/auth/me', { token: plantedToken });
+check('planted session died when 2FA was turned on → 401', r.status === 401, r);
 
 r = await call('GET', '/auth/me', { token: loginToken });
 check('/auth/me shows twoFactorEnabled (cache invalidated)', r.json?.user?.twoFactorEnabled === true, r.json?.user);
@@ -279,9 +288,15 @@ const badCode = liveCode === '000000' ? '123456' : '000000';
 r = await call('POST', '/auth/login', { body: { email, password, code: badCode } });
 check('login with wrong code → 401', r.status === 401, r);
 
-r = await call('POST', '/auth/login', { body: { email, password, code: totp(totpSecret) } });
+const liveLoginCode = totp(totpSecret);
+r = await call('POST', '/auth/login', { body: { email, password, code: liveLoginCode } });
 check('login with live code → 200 + session', r.status === 200 && typeof r.json?.token === 'string', r);
 const twoFaLoginToken = r.json?.token;
+
+// One code buys exactly one session: replaying it fails even though the
+// code still verifies cryptographically (inside the ±1 drift window).
+r = await call('POST', '/auth/login', { body: { email, password, code: liveLoginCode } });
+check('replaying the same TOTP code → 401 (replay blocked)', r.status === 401 && r.json?.twoFactorRequired === true, r);
 
 r = await call('POST', '/auth/2fa/disable', { token: twoFaLoginToken, body: { code: totp(totpSecret) } });
 check('disable with live code → success', r.status === 200 && r.json?.success === true, r);
@@ -291,6 +306,41 @@ check('2FA off again after disable', r.json?.user?.twoFactorEnabled === false, r
 
 r = await call('POST', '/auth/login', { body: { email, password } });
 check('plain password login works again after disable', r.status === 200 && typeof r.json?.token === 'string', r);
+
+console.log('— session inventory (real auth_sessions rows) —');
+r = await call('GET', '/auth/sessions', { token: loginToken });
+const sessRows = Array.isArray(r.json?.sessions) ? r.json.sessions : [];
+check('GET /auth/sessions → real rows', r.status === 200 && sessRows.length >= 2, r.json);
+check('current session is flagged', sessRows.some((s) => s.isCurrent === true), sessRows.map((s) => s.isCurrent));
+check(
+  'row ids are 64-hex token hashes (irreversible, no raw tokens)',
+  sessRows.every((s) => typeof s.id === 'string' && /^[0-9a-f]{64}$/.test(s.id)),
+  sessRows[0],
+);
+
+const twoFaSessionId = crypto.createHash('sha256').update(twoFaLoginToken).digest('hex');
+r = await call('DELETE', `/auth/sessions/${twoFaSessionId}`, { token: loginToken });
+check('revoke own other session → 200', r.status === 200 && r.json?.success === true, r);
+r = await call('GET', '/auth/me', { token: twoFaLoginToken });
+check('revoked session → 401', r.status === 401, r);
+r = await call('DELETE', `/auth/sessions/${'0'.repeat(64)}`, { token: loginToken });
+check('revoke unknown session → 404', r.status === 404, r);
+
+console.log('— password rotation —');
+r = await call('POST', '/auth/password', {
+  token: loginToken,
+  body: { currentPassword: 'WrongPass999!', newPassword: 'RotatedPass123!' },
+});
+check('wrong current password → 401', r.status === 401, r);
+r = await call('POST', '/auth/password', {
+  token: loginToken,
+  body: { currentPassword: password, newPassword: 'RotatedPass123!' },
+});
+check('password change → success (other sessions revoked)', r.status === 200 && r.json?.success === true, r);
+r = await call('POST', '/auth/login', { body: { email, password } });
+check('old password no longer accepted → 401', r.status === 401, r);
+r = await call('POST', '/auth/login', { body: { email, password: 'RotatedPass123!' } });
+check('new password accepted → 200 + session', r.status === 200 && typeof r.json?.token === 'string', r);
 
 console.log('— account self-deletion (real lifecycle) —');
 r = await call('DELETE', '/auth/account');

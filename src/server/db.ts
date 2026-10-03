@@ -295,7 +295,7 @@ export class VanitasDatabase {
       target: `${newKey.id} (${newKey.name})`,
       source: 'WEB',
       status: 'SUCCESS',
-      ipAddress: '194.230.14.88',
+      ipAddress: 'unknown', // db-layer call has no request context — never fake an IP
       metadata: { scopes: newKey.scopes, environment: newKey.environment, rateLimitPerMin: newKey.rateLimitPerMin },
     });
 
@@ -329,7 +329,7 @@ export class VanitasDatabase {
       target: `${key.id} (${key.name})`,
       source: 'WEB',
       status: 'SUCCESS',
-      ipAddress: '194.230.14.88',
+      ipAddress: 'unknown', // db-layer call has no request context — never fake an IP
       metadata: { newPrefix: key.keyPrefix },
     });
 
@@ -356,7 +356,7 @@ export class VanitasDatabase {
       target: `${key.id} (${key.name})`,
       source: 'WEB',
       status: 'SUCCESS',
-      ipAddress: '194.230.14.88',
+      ipAddress: 'unknown', // db-layer call has no request context — never fake an IP
       metadata: { reason: reason || 'User explicit revocation' },
     });
 
@@ -366,6 +366,12 @@ export class VanitasDatabase {
   updateApiKeyScopes(keyId: string, newScopes: PermissionScope[], actor: User): ApiKey {
     const key = this.apiKeys.find((k) => k.id === keyId);
     if (!key) throw new Error('API key not found');
+
+    // Same ownership rule as rotate/revoke/rate-limit: you may only widen or
+    // narrow the scopes of a key you own (admins excepted).
+    if (actor.role !== 'ADMIN' && key.ownerId !== actor.id) {
+      throw new Error('Forbidden: You can only update scopes for keys you own');
+    }
 
     this.assertGrantableScopes(actor.role, newScopes);
 
@@ -381,7 +387,7 @@ export class VanitasDatabase {
       target: `${key.id} (${key.name})`,
       source: 'WEB',
       status: 'SUCCESS',
-      ipAddress: '194.230.14.88',
+      ipAddress: 'unknown', // db-layer call has no request context — never fake an IP
       metadata: { oldScopes, newScopes },
     });
 
@@ -422,7 +428,7 @@ export class VanitasDatabase {
       target: `${key.id} (${key.name}) -> ${key.rateLimitPerMin} req/m`,
       source: 'WEB',
       status: 'SUCCESS',
-      ipAddress: '194.230.14.88',
+      ipAddress: 'unknown', // db-layer call has no request context — never fake an IP
       metadata: {
         oldLimit,
         newLimit: key.rateLimitPerMin,
@@ -548,7 +554,7 @@ export class VanitasDatabase {
       target: release ? `${release.name} (${release.filename})` : `Binary:${type}`,
       source: source || 'WEB',
       status: 'SUCCESS',
-      ipAddress: '194.230.14.88',
+      ipAddress: 'unknown', // db-layer call has no request context — never fake an IP
       metadata: {
         binaryType: type,
         version: release?.version || '1.4.2',
@@ -683,8 +689,10 @@ export class VanitasDatabase {
     ep.avgLatencyMs = Math.round(ep.avgLatencyMs * 0.85 + latencyMs * 0.15);
   }
 
-  getKeyUsageAnalytics(period: '24h' | '7d' | '30d' = '24h'): ApiKeyUsageResponse {
-    const activeKeys = this.apiKeys;
+  getKeyUsageAnalytics(period: '24h' | '7d' | '30d' = '24h', ownerId: string | null = null): ApiKeyUsageResponse {
+    // ownerId = null → fleet-wide view (admin); otherwise only that owner's
+    // keys are ever summarised — no cross-tenant leakage of key metadata.
+    const activeKeys = ownerId === null ? this.apiKeys : this.apiKeys.filter((k) => k.ownerId === ownerId);
     const now = Date.now();
     const timeSeries: ApiKeyUsagePoint[] = [];
 

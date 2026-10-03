@@ -491,7 +491,7 @@ export const AdminCenterView: React.FC = () => {
                     <tr key={u.id} className="hover:bg-white/[0.02] transition-colors">
                       <td className="py-3.5 px-4">
                         <div className="flex items-center gap-3">
-                          <img src={u.avatarUrl} alt={u.name} className="h-8 w-8 rounded-lg object-cover border border-blue-500/30" />
+                          <img src={u.avatarUrl} alt={u.name} referrerPolicy="no-referrer" className="h-8 w-8 rounded-lg object-cover border border-blue-500/30" />
                           <div>
                             <p className="font-semibold text-white">
                               {u.name}

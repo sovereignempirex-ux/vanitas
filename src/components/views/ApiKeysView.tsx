@@ -457,6 +457,16 @@ export const ApiKeysView: React.FC = () => {
   );
 
   // CSV Export Logic
+  // Spreadsheet formula-injection guard (same rule as the server's csvCell):
+  // a cell starting with = + - @ TAB or CR gets a leading apostrophe so
+  // Excel/Sheets treat it as text instead of executing it. Key names and
+  // owner names are user-controlled input.
+  const csvCell = (value: string | number): string => {
+    let s = String(value ?? '');
+    if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+    return `"${s.replace(/"/g, '""')}"`;
+  };
+
   const handleExportCsv = (filterType: 'all' | 'active' | 'live' | 'test' = 'all') => {
     setExportMenuOpen(false);
     let targetKeys = keys;
@@ -491,24 +501,24 @@ export const ApiKeysView: React.FC = () => {
     ];
 
     const rows = targetKeys.map((k) => [
-      `"${k.id}"`,
-      `"${k.name.replace(/"/g, '""')}"`,
-      `"${k.keyPrefix}"`,
-      `"${k.maskedSecret}"`,
-      `"${k.ownerName.replace(/"/g, '""')}"`,
-      `"${k.environment}"`,
-      `"${k.status}"`,
+      csvCell(k.id),
+      csvCell(k.name),
+      csvCell(k.keyPrefix),
+      csvCell(k.maskedSecret),
+      csvCell(k.ownerName),
+      csvCell(k.environment),
+      csvCell(k.status),
       k.rateLimitPerMin || 0,
       k.burstLimit || 0,
-      `"${k.rateLimitAlgorithm || 'sliding_window'}"`,
-      `"${k.actionOnExceed || 'reject_429'}"`,
+      csvCell(k.rateLimitAlgorithm || 'sliding_window'),
+      csvCell(k.actionOnExceed || 'reject_429'),
       k.monthlyQuota || 0,
       k.usageCount || 0,
       k.currentUsageThisMonth || 0,
-      `"${k.scopes.join('; ')}"`,
-      `"${k.createdAt}"`,
-      `"${k.lastUsedAt || 'Never'}"`,
-      `"${k.expiresAt || 'Never'}"`,
+      csvCell(k.scopes.join('; ')),
+      csvCell(k.createdAt),
+      csvCell(k.lastUsedAt || 'Never'),
+      csvCell(k.expiresAt || 'Never'),
     ]);
 
     // Prepend UTF-8 BOM so Excel & Sheets open Arabic / Unicode characters seamlessly

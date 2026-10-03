@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useAuth } from '../../context/AuthContext.tsx';
+import { api } from '../../lib/apiClient.ts';
 import { getPortalUrl } from '../../lib/runtime.ts';
 import {
   Terminal,
@@ -25,6 +26,8 @@ interface PresetEndpoint {
 
 export const PlaygroundView: React.FC = () => {
   const { role, clientSource } = useAuth();
+  // Whether requests will actually carry a session Bearer token.
+  const sessionActive = !!api.getSessionToken();
 
   const presets: PresetEndpoint[] = [
     {
@@ -106,18 +109,28 @@ export const PlaygroundView: React.FC = () => {
   };
 
   const handleExecute = async () => {
+    // Same-origin API only: a free-form URL would turn this console into a
+    // request gadget pointed anywhere the browser can reach.
+    if (!endpoint.startsWith('/api/v1/')) {
+      setResponseStatus(400);
+      setResponseLatency(0);
+      setResponseBody(JSON.stringify({ error: 'Endpoint must start with /api/v1/ — the playground only calls this API' }, null, 2));
+      return;
+    }
     setLoading(true);
     const start = performance.now();
 
     try {
-      const options: RequestInit = {
-        method,
-        headers: {
-          'Content-Type': 'application/json',
-          'x-user-role': role,
-          'x-client-source': clientSource,
-        },
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'x-client-source': clientSource,
       };
+      // Real auth: the signed-in session's Bearer token. Role/permissions
+      // are decided by the server from this session — never sent as a
+      // spoofable header.
+      const sessionToken = api.getSessionToken();
+      if (sessionToken) headers['Authorization'] = `Bearer ${sessionToken}`;
+      const options: RequestInit = { method, headers };
 
       if (['POST', 'PATCH', 'PUT'].includes(method) && payload.trim()) {
         try {
@@ -297,8 +310,8 @@ print(response.json())`;
                   <span className="text-cyan-300">{clientSource}</span>
                 </div>
                 <div className="flex justify-between text-slate-400">
-                  <span>x-user-role (RBAC)</span>
-                  <span className={role === 'ADMIN' ? 'text-amber-400' : 'text-blue-400'}>{role}</span>
+                  <span>Authorization</span>
+                  <span className={role === 'ADMIN' ? 'text-amber-400' : 'text-blue-400'}>{sessionActive ? `Bearer •••• (${role})` : 'not signed in'}</span>
                 </div>
                 <div className="flex justify-between text-slate-400">
                   <span>Content-Type</span>

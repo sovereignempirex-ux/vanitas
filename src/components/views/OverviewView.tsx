@@ -4,6 +4,7 @@ import { api } from '../../lib/apiClient.ts';
 import { BRAND_ASSETS } from '../../data/assets.ts';
 import { SystemStats, VideoTutorialItem, ExternalDatabaseConfig, YouTubeVideoItem } from '../../types.ts';
 import { detectUserPlatform } from '../../lib/platformDetector.ts';
+import { safeWebHref, safeEmbedSrc } from '../../lib/urls.ts';
 import {
   Activity,
   Layers,
@@ -44,6 +45,12 @@ export const OverviewView: React.FC = () => {
   const [databases, setDatabases] = useState<ExternalDatabaseConfig[]>([]);
   const [activeVideoModal, setActiveVideoModal] = useState<VideoTutorialItem | null>(null);
   const [loading, setLoading] = useState(true);
+  // The player frame only ever loads a YouTube host — a tampered or
+  // injected embed URL renders no frame at all instead of arbitrary web
+  // content inside a privileged page.
+  const embedSrc = activeVideoModal
+    ? safeEmbedSrc(activeVideoModal.videoEmbedUrl, ['youtube-nocookie.com', 'youtube.com'])
+    : null;
 
   // YouTube Live Search State
   const [ytQuery, setYtQuery] = useState('Vanitas API Gateway Supabase');
@@ -66,7 +73,11 @@ export const OverviewView: React.FC = () => {
         const [statsData, tutData, dbData] = await Promise.all([
           api.getAdminStatistics().catch(() => ({ stats: null })),
           api.getVideoTutorials().catch(() => ({ tutorials: [] })),
-          api.getExternalDatabases().catch(() => ({ databases: [] })),
+          // Connection metadata is admin-only server-side — don't even ask
+          // as a regular signed-in user.
+          role === 'ADMIN'
+            ? api.getExternalDatabases().catch(() => ({ databases: [] }))
+            : Promise.resolve({ databases: [] }),
         ]);
 
         if (statsData?.stats) setStats(statsData.stats);
@@ -377,7 +388,10 @@ export const OverviewView: React.FC = () => {
 
       {/* ---------------------------------------------------------------- */}
       {/* 2. EXTERNAL CLOUD DATABASES & SERVERS (SUPABASE / NEON / UPSTASH) */}
+      {/* Workspace administration: the API answers 403 for non-admins, so   */}
+      {/* the whole panel is mounted for administrators only.                */}
       {/* ---------------------------------------------------------------- */}
+      {role === 'ADMIN' && (
       <div className="rounded-3xl border border-white/15 bg-slate-950/70 p-6 sm:p-8 backdrop-blur-2xl shadow-[0_20px_50px_rgba(0,0,0,0.6)]">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-white/10">
           <div>
@@ -474,6 +488,7 @@ export const OverviewView: React.FC = () => {
           </div>
         )}
       </div>
+      )}
 
       {/* ---------------------------------------------------------------- */}
       {/* 3. YOUTUBE VIDEO SEARCH & AI COPILOT GROUNDING */}
@@ -576,9 +591,9 @@ export const OverviewView: React.FC = () => {
 
                 <div className="mt-3 pt-2 border-t border-white/5 flex items-center justify-between">
                   <a
-                    href={vid.videoUrl}
+                    href={safeWebHref(vid.videoUrl) || '#'}
                     target="_blank"
-                    rel="noreferrer"
+                    rel="noopener noreferrer nofollow"
                     className="text-[10px] font-medium text-slate-400 hover:text-white flex items-center gap-1"
                   >
                     <span>Open on YouTube</span>
@@ -616,15 +631,23 @@ export const OverviewView: React.FC = () => {
               </button>
             </div>
 
-            {/* Video Frame */}
+            {/* Video Frame — sandboxed, YouTube hosts only (see embedSrc). */}
             <div className="aspect-video w-full bg-black">
-              <iframe
-                src={activeVideoModal.videoEmbedUrl}
-                title={activeVideoModal.title}
-                className="w-full h-full border-0"
-                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                allowFullScreen
-              />
+              {embedSrc ? (
+                <iframe
+                  src={embedSrc}
+                  title={activeVideoModal.title}
+                  className="w-full h-full border-0"
+                  sandbox="allow-scripts allow-popups allow-presentation allow-same-origin"
+                  referrerPolicy="no-referrer"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                />
+              ) : (
+                <div className="w-full h-full flex items-center justify-center text-xs text-slate-400">
+                  Video player unavailable for this entry.
+                </div>
+              )}
             </div>
 
             {/* Details & Actions Footer */}

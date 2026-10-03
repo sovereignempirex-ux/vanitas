@@ -45,7 +45,12 @@ export const ProfilePage: React.FC<{ username: string }> = ({ username }) => {
   const [state, setState] = useState<State>({ s: 'loading' });
 
   useEffect(() => {
-    const clean = decodeURIComponent(username || '').trim().toLowerCase();
+    let clean = '';
+    try {
+      clean = decodeURIComponent(username || '').trim().toLowerCase();
+    } catch {
+      clean = ''; // malformed percent-encoding (/u/%) — falls through to "missing"
+    }
     if (!clean) {
       setState({ s: 'missing' });
       setPageSeo({ title: 'Profile not found', description: 'No Vanitas profile matches this username.' });
@@ -109,7 +114,7 @@ export const ProfilePage: React.FC<{ username: string }> = ({ username }) => {
 
         <div className="px-6 pb-6 -mt-12 text-center">
           <div className="relative mx-auto h-24 w-24 rounded-2xl overflow-hidden border-4 border-slate-950 shadow-[0_0_30px_rgba(56,189,248,0.4)] bg-slate-900">
-            <img src={p.avatarUrl} alt={p.name} className="h-full w-full object-cover" />
+            <img src={p.avatarUrl} alt={p.name} referrerPolicy="no-referrer" className="h-full w-full object-cover" />
           </div>
 
           <div className="mt-3 flex items-center justify-center gap-2">

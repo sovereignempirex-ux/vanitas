@@ -3,8 +3,8 @@ import path from 'path';
 import crypto from 'crypto';
 import { db, ALL_SCOPES } from './src/server/db.ts';
 import { databasePool, ensureSchema } from './src/server/pg.ts';
-import { createAccount, verifyAccount, createSession, resolveSession, revokeSession, upsertOAuthUser, updateProfile, forgetAccount, getTwoFactorSecret, setTwoFactor, findUserById, invalidateResolveCache, rowToUser, usernameValidationError, isUsernameTaken, findPublicProfile } from './src/server/authStore.ts';
-import { generateTotpSecret, verifyTotp, totpOtpauthUrl } from './src/server/totp.ts';
+import { createAccount, verifyAccount, createSession, resolveSession, revokeSession, upsertOAuthUser, updateProfile, forgetAccount, getTwoFactorSecret, setTwoFactor, findUserById, invalidateResolveCache, rowToUser, usernameValidationError, isUsernameTaken, findPublicProfile, hashPassword, verifyPasswordFor, setPassword, listUserSessions, revokeUserSession, revokeOtherSessions, getTotpLastStep, setTotpLastStep } from './src/server/authStore.ts';
+import { generateTotpSecret, verifyTotp, verifyTotpStep, totpOtpauthUrl } from './src/server/totp.ts';
 import {
   getProviderConfig,
   isOAuthProvider,
@@ -19,7 +19,7 @@ import {
 } from './src/server/oauth.ts';
 import { processAiQuery, processAiQueryStream, diagnoseAndFixCode, performSemanticSearch, searchYouTubeVideos, getLastAiUpstream } from './src/server/aiService.ts';
 import { authenticateApiKey, requireScope, rateWindowStatus, nextQuotaReset } from './src/server/apiKeyAuth.ts';
-import { ClientSource, UserRole, PermissionScope, ProductSuggestion, ApiKey, User, AuditLog, VerificationType, AdminInvite } from './src/types.ts';
+import { ClientSource, UserRole, PermissionScope, ProductSuggestion, ApiKey, User, AuditLog, VerificationType, AdminInvite, WebhookEndpoint, WebhookDeliveryLog } from './src/types.ts';
 import { getActorUser, requireAdmin, rateLimit, sanitizeText, sanitizeUrl, csvCell, parsePagination, secureToken, secureId, isValidScope } from './src/server/security.ts';
 
 function mapSuggestion(row: Record<string, any>): ProductSuggestion {
@@ -268,17 +268,48 @@ export async function buildApp() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
 
-  app.set('trust proxy', 1);
+  // Trust X-Forwarded-For ONLY when we are actually behind a proxy (Vercel's
+  // platform, or an operator opt-in via TRUST_PROXY). On a direct-bind server
+  // the header is client-controlled: believing it would let an attacker mint
+  // a fresh rate-limit bucket on every request just by rotating the value.
+  if (process.env.VERCEL || process.env.TRUST_PROXY === 'true' || process.env.TRUST_PROXY === '1') {
+    app.set('trust proxy', 1);
+  } else {
+    app.set('trust proxy', false);
+  }
   app.disable('x-powered-by');
   app.use(express.json({ limit: '256kb' }));
   app.use(express.urlencoded({ extended: true, limit: '256kb' }));
 
-  // Hardened CORS — same-origin by default, allowlist via FRONTEND_URL
+  // Idempotent schema upgrades also run at boot, so columns introduced by
+  // hardening rounds (users.totp_last_step, admin_invites.token_hash, …)
+  // exist before the first request that needs them. Per-route
+  // ensureSchema() calls remain as the lazy fallback.
+  if (databasePool) {
+    ensureSchema().catch((err: Error) => console.error('[schema] boot migrate failed:', err.message));
+  }
+
+  // Express 4 does NOT catch rejected promises from async handlers: a
+  // storage hiccup would become an unhandled rejection (hanging request, or
+  // a dead process on Node's default policy). wrap() turns any rejection
+  // into a logged 500 instead.
+  function wrap(fn: (req: Request, res: Response) => Promise<unknown>) {
+    return (req: Request, res: Response) => {
+      Promise.resolve(fn(req, res)).catch((err: unknown) => {
+        console.error('[route] handler failed:', err instanceof Error ? err.message : String(err));
+        if (!res.headersSent) res.status(500).json({ error: 'Internal server error' });
+      });
+    };
+  }
+
+  // Hardened CORS — same-origin by default, allowlist via FRONTEND_URL.
+  // '*' is deliberately NOT treated as "reflect any origin": that would let
+  // every website on the internet call this API from a visitor's browser.
   app.use((req, res, next) => {
     const allowed = (process.env.FRONTEND_URL || '')
       .split(',')
       .map((s) => s.trim())
-      .filter(Boolean);
+      .filter((s) => s && s !== '*');
     const origin = req.headers.origin as string | undefined;
     if (origin && (allowed.includes(origin) || allowed.includes('*'))) {
       res.setHeader('Access-Control-Allow-Origin', origin);
@@ -303,9 +334,19 @@ export async function buildApp() {
       : defaultLimiter(req, res, next),
   );
   app.use('/api/v1/auth/', rateLimit({ windowMs: 60_000, max: 60 }));
-  app.use('/api/v1/ai/', rateLimit({ windowMs: 60_000, max: 60 }));
+  // Anonymous token-burning + upstream fan-out surfaces: a per-IP ceiling
+  // tight enough to make sustained abuse uneconomic, loose enough for the UI.
+  app.use('/api/v1/ai/', rateLimit({ windowMs: 60_000, max: 30 }));
   app.use('/api/v1/bot/', rateLimit({ windowMs: 60_000, max: 120 }));
   app.use('/api/v1/comments/', rateLimit({ windowMs: 60_000, max: 30 }));
+  app.use('/api/v1/youtube/', rateLimit({ windowMs: 60_000, max: 60 }));
+  app.use('/api/v1/search/', rateLimit({ windowMs: 60_000, max: 60 }));
+  app.use('/api/v1/semantic-search', rateLimit({ windowMs: 60_000, max: 60 }));
+  // Value-keyed PUBLIC routes (invite link, profile lookup): bucket purely
+  // per IP so spraying distinct /invites/<token> URLs can't mint unlimited
+  // buckets inside the path-keyed default limiter.
+  const invitePreviewLimiter = rateLimit({ windowMs: 60_000, max: 60, perIpOnly: true });
+  const publicProfileLimiter = rateLimit({ windowMs: 60_000, max: 60, perIpOnly: true });
 
   // Real login sessions: resolve Bearer token → authenticated actor.
   // getActorUser() then reads (req as any).actor synchronously in routes.
@@ -626,7 +667,7 @@ export async function buildApp() {
       });
       return res.status(201).json({ token, user: outcome.user, permissions: permissionsFor(outcome.user) });
     } catch (err) {
-      console.error('[auth] register failed:', err);
+      console.error('[auth] register failed:', (err as Error).message);
       const msg = (err as Error).message || '';
       if (msg.includes('db:migrate')) {
         return res.status(503).json({ error: 'Auth storage unavailable — run npm run db:migrate first' });
@@ -644,18 +685,48 @@ export async function buildApp() {
 
     try {
       const outcome = await verifyAccount(email, password);
-      if (outcome.ok === false) return res.status(outcome.status).json({ error: outcome.error });
+      if (outcome.ok === false) {
+        // Failed logins are security events. Only the attempted address and
+        // a generic reason are recorded — never the password itself.
+        persistAuditLog({
+          actorId: '',
+          actorName: 'unknown',
+          actorEmail: email,
+          action: 'LOGIN_FAILURE',
+          category: 'AUTH',
+          target: `Failed login: ${email}`,
+          source: detectSource(req),
+          status: 'FAILURE',
+          ipAddress: req.ip || 'unknown',
+          metadata: { reason: 'invalid_credentials' },
+        });
+        return res.status(outcome.status).json({ error: outcome.error });
+      }
 
       // Real 2FA (RFC 6238): once TOTP is enabled the password alone is no
       // longer enough — a valid 6-digit authenticator code is required too.
       if (outcome.user.twoFactorEnabled) {
         const secret = await getTwoFactorSecret(outcome.user.id);
         const code = sanitizeText(req.body?.code, 16);
-        if (!secret || !verifyTotp(secret, code)) {
+        const step = secret ? verifyTotpStep(secret, code) : null;
+        if (step === null) {
           return res
             .status(401)
             .json({ twoFactorRequired: true, error: 'Enter the 6-digit code from your authenticator app' });
         }
+        // Replay protection: one code buys exactly one session. A code that
+        // was already spent (or an older step still inside the ±1 drift
+        // window) is rejected even though it cryptographically verifies.
+        const lastStep = await getTotpLastStep(outcome.user.id);
+        if (step <= lastStep) {
+          console.warn('[auth] TOTP replay rejected for user', outcome.user.id);
+          return res
+            .status(401)
+            .json({ twoFactorRequired: true, error: 'That code was already used — wait for the next one' });
+        }
+        // Burn the step BEFORE creating the session (fail closed: a session
+        // error costs the user one refresh cycle, a race costs a second login).
+        await setTotpLastStep(outcome.user.id, step);
       }
 
       const token = await createSession(outcome.user, { ip: req.ip, userAgent: String(req.headers['user-agent'] || '') });
@@ -671,9 +742,10 @@ export async function buildApp() {
         ipAddress: req.ip || 'unknown',
         metadata: { role: outcome.user.role },
       });
+      dispatchWebhooks('user.login', { userId: outcome.user.id, email: outcome.user.email });
       return res.json({ token, user: outcome.user, permissions: permissionsFor(outcome.user) });
     } catch (err) {
-      console.error('[auth] login failed:', err);
+      console.error('[auth] login failed:', (err as Error).message);
       const msg = (err as Error).message || '';
       if (msg.includes('db:migrate')) {
         return res.status(503).json({ error: 'Auth storage unavailable — run npm run db:migrate first' });
@@ -747,10 +819,23 @@ export async function buildApp() {
 
   // Stateless HMAC-signed challenge for the OAuth + 2FA path. Signed with a
   // key derived from DATABASE_URL so any serverless instance can verify it.
+  // With neither secret configured (pure local dev, single process), fall
+  // back to a random per-process key: challenges are short-lived anyway,
+  // whereas a hardcoded constant would let anyone forge them.
   const twoFactorStateKey = crypto
     .createHash('sha256')
-    .update(process.env.DATABASE_URL || process.env.ADMIN_API_TOKEN || 'vanitas-local-2fa')
+    .update(process.env.DATABASE_URL || process.env.ADMIN_API_TOKEN || `local-${crypto.randomBytes(32).toString('hex')}`)
     .digest();
+
+  /** sha256 of the caller's bearer SESSION token (undefined for admin/API
+   * tokens) — lets a hardening action keep the caller's own session alive
+   * while revoking every other one. */
+  function currentSessionHash(req: Request): string | undefined {
+    const auth = req.headers.authorization || '';
+    const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+    if (!token.startsWith('vnt_sess_')) return undefined;
+    return crypto.createHash('sha256').update(token).digest('hex');
+  }
 
   function makeTwoFactorState(userId: string): string {
     const payload = Buffer.from(`${userId}.${Date.now() + 10 * 60_000}`).toString('base64url');
@@ -795,6 +880,11 @@ export async function buildApp() {
       if (!secret) return res.status(400).json({ error: 'Run two-factor setup first' });
       if (!verifyTotp(secret, code)) return res.status(400).json({ error: 'Invalid 6-digit code' });
       await setTwoFactor(actor.id, secret, true);
+      // Hardening flush: turning 2FA ON revokes every OTHER session of this
+      // account — a session planted before the account was protected must
+      // not survive the moment protection starts.
+      const keep = currentSessionHash(req);
+      const sessionsRevoked = await revokeOtherSessions(actor.id, keep);
       persistAuditLog({
         actorId: actor.id,
         actorName: actor.name,
@@ -805,8 +895,9 @@ export async function buildApp() {
         source: detectSource(req),
         status: 'SUCCESS',
         ipAddress: req.ip || 'unknown',
+        metadata: { sessionsRevoked },
       });
-      res.json({ success: true });
+      res.json({ success: true, sessionsRevoked });
     } catch (err) {
       console.error('[2fa/enable]', (err as Error).message);
       res.status(500).json({ error: 'Could not enable two-factor authentication' });
@@ -853,7 +944,14 @@ export async function buildApp() {
       if (!result) return res.status(401).json({ error: 'Two-factor challenge expired — sign in again' });
       if (!result.twoFactorEnabled) return res.status(400).json({ error: 'Two-factor authentication is not enabled' });
       const secret = await getTwoFactorSecret(result.id);
-      if (!secret || !verifyTotp(secret, code)) return res.status(400).json({ error: 'Invalid 6-digit code' });
+      const step = secret ? verifyTotpStep(secret, code) : null;
+      if (step === null) return res.status(400).json({ error: 'Invalid 6-digit code' });
+      // Replay protection: this challenge consumes one code, exactly once.
+      const lastStep = await getTotpLastStep(result.id);
+      if (step <= lastStep) {
+        return res.status(401).json({ error: 'That code was already used — wait for the next one' });
+      }
+      await setTotpLastStep(result.id, step);
       const token = await createSession(result, { ip: req.ip, userAgent: String(req.headers['user-agent'] || '') });
       persistAuditLog({
         actorId: result.id,
@@ -1017,35 +1115,139 @@ export async function buildApp() {
     }
   });
 
-  // Auth Sessions (demo device list — real sessions live in auth_sessions)
-  app.get('/api/v1/auth/sessions', (req, res) => {
+  // ---- Active sessions: REAL rows from auth_sessions ------------------------
+  // A session row's only identity is its (irreversible) token hash, which is
+  // what the client sends back to revoke. We know when a session was created
+  // but do not track per-request activity — lastActiveAt therefore mirrors
+  // createdAt rather than inventing an activity time.
+  function sessionFacts(ua: string) {
+    const l = ua.toLowerCase();
+    const browser = /edg\//.test(l) ? 'Edge'
+      : /opr\//.test(l) ? 'Opera'
+      : /chrome\//.test(l) ? 'Chrome'
+      : /firefox\//.test(l) ? 'Firefox'
+      : /safari\//.test(l) ? 'Safari'
+      : ua ? 'Other' : 'Unknown';
+    const os = /windows/.test(l) ? 'Windows'
+      : /android/.test(l) ? 'Android'
+      : /iphone|ipad|ipod/.test(l) ? 'iOS'
+      : /mac os|macintosh/.test(l) ? 'macOS'
+      : /linux/.test(l) ? 'Linux'
+      : 'Unknown';
+    const device = /android|iphone|ipad|ipod|mobile/.test(l) ? 'Mobile' : ua ? 'Desktop' : 'Unknown';
+    const source: ClientSource = /bot|crawl|spider|curl|axios|discord|wget/.test(l) ? 'BOT'
+      : /android|iphone|ipad|ipod|mobile/.test(l) ? 'MOBILE'
+      : /electron/.test(l) ? 'DESKTOP'
+      : 'WEB';
+    return { browser, os, device, source };
+  }
+
+  app.get('/api/v1/auth/sessions', async (req, res) => {
     const actor = getActorUser(req);
     if (!actor) return res.status(401).json({ error: 'Authentication required' });
-    res.json({ sessions: db.sessions });
+    try {
+      const current = currentSessionHash(req);
+      const rows = await listUserSessions(actor.id);
+      const sessions = rows.map((row) => {
+        const facts = sessionFacts(row.userAgent);
+        return {
+          id: row.id,
+          browser: facts.browser,
+          os: facts.os,
+          device: facts.device,
+          ip: row.ip,
+          source: facts.source,
+          isCurrent: !!current && row.id === current,
+          createdAt: row.createdAt,
+          lastActiveAt: row.createdAt,
+        };
+      });
+      res.json({ sessions });
+    } catch (err) {
+      console.error('[sessions/list]', (err as Error).message);
+      res.status(500).json({ error: 'Could not list sessions' });
+    }
   });
 
-  app.delete('/api/v1/auth/sessions/:id', (req, res) => {
-    const id = sanitizeText(req.params.id, 64);
+  app.delete('/api/v1/auth/sessions/:id', async (req, res) => {
+    const id = sanitizeText(req.params.id, 128);
     const actor = getActorUser(req);
     if (!actor) return res.status(401).json({ error: 'Authentication required' });
-    const idx = db.sessions.findIndex((s) => s.id === id);
-    if (idx !== -1) {
-      const removed = db.sessions.splice(idx, 1)[0];
+    try {
+      // Ownership is enforced inside revokeUserSession (user_id predicate) —
+      // one account can never terminate another account's session.
+      const removed = await revokeUserSession(actor.id, id);
+      if (!removed) return res.status(404).json({ error: 'Session not found' });
       persistAuditLog({
         actorId: actor.id,
         actorName: actor.name,
         actorEmail: actor.email,
         action: 'SESSION_REVOKED',
         category: 'AUTH',
-        target: `Session Device: ${sanitizeText(removed.device, 120)} (${sanitizeText(removed.ip, 64)})`,
+        target: `Session: ${id.slice(0, 12)}…`,
         source: detectSource(req),
         status: 'SUCCESS',
         ipAddress: req.ip || 'unknown',
-        metadata: { deviceId: id },
+        metadata: { sessionHashPrefix: id.slice(0, 12), self: id === currentSessionHash(req) },
       });
       return res.json({ success: true, message: 'Session terminated' });
+    } catch (err) {
+      console.error('[sessions/revoke]', (err as Error).message);
+      res.status(500).json({ error: 'Could not revoke session' });
     }
-    res.status(404).json({ error: 'Session not found' });
+  });
+
+  // ---- Password rotation ----------------------------------------------------
+  // Proof = existing session + current password. After the change every OTHER
+  // session is revoked: a stolen session must not survive a credential change.
+  app.post('/api/v1/auth/password', async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
+    const current = typeof req.body?.currentPassword === 'string' ? req.body.currentPassword : '';
+    const next = typeof req.body?.newPassword === 'string' ? req.body.newPassword : '';
+    if (next.length < 8 || next.length > 128) {
+      return res.status(400).json({ error: 'Password must be between 8 and 128 characters' });
+    }
+    if (current === next) {
+      return res.status(400).json({ error: 'New password must be different from the current one' });
+    }
+    try {
+      const ok = await verifyPasswordFor(actor.id, current);
+      if (!ok) {
+        persistAuditLog({
+          actorId: actor.id,
+          actorName: actor.name,
+          actorEmail: actor.email,
+          action: 'PASSWORD_CHANGE_FAILED',
+          category: 'AUTH',
+          target: `User Account: ${actor.id}`,
+          source: detectSource(req),
+          status: 'FAILURE',
+          ipAddress: req.ip || 'unknown',
+          metadata: { reason: 'wrong_current_password' },
+        });
+        return res.status(401).json({ error: 'Current password is incorrect' });
+      }
+      await setPassword(actor.id, await hashPassword(next));
+      const keep = currentSessionHash(req);
+      const sessionsRevoked = await revokeOtherSessions(actor.id, keep);
+      persistAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorEmail: actor.email,
+        action: 'PASSWORD_CHANGED',
+        category: 'AUTH',
+        target: `User Account: ${actor.id}`,
+        source: detectSource(req),
+        status: 'SUCCESS',
+        ipAddress: req.ip || 'unknown',
+        metadata: { sessionsRevoked },
+      });
+      res.json({ success: true, sessionsRevoked });
+    } catch (err) {
+      console.error('[auth/password] change failed:', (err as Error).message);
+      res.status(500).json({ error: 'Password change failed' });
+    }
   });
 
   // API Keys List
@@ -1062,8 +1264,12 @@ export async function buildApp() {
 
   // API Keys Usage Analytics (Time-series volume, latency, status codes for recharts visualization)
   app.get('/api/v1/api-keys/usage-analytics', (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
     const period = (req.query.period as '24h' | '7d' | '30d') || '24h';
-    const data = db.getKeyUsageAnalytics(period);
+    // Admins see the fleet-wide picture; a signed-in user only ever sees the
+    // analytics of keys they own (null ownerId = no restriction).
+    const data = db.getKeyUsageAnalytics(period, actor.role === 'ADMIN' ? null : actor.id);
     res.json(data);
   });
 
@@ -1112,6 +1318,7 @@ export async function buildApp() {
       if (!actor) return res.status(401).json({ error: 'Authentication required' });
       const id = sanitizeText(req.params.id, 128);
       const result = db.rotateApiKey(id, actor);
+      dispatchWebhooks('key.rotated', { keyId: result.key.id, keyName: result.key.name, ownerId: result.key.ownerId, keyPrefix: result.key.keyPrefix });
       res.json({
         key: result.key,
         rawSecret: result.rawSecret,
@@ -1130,6 +1337,7 @@ export async function buildApp() {
       const id = sanitizeText(req.params.id, 128);
       const reason = sanitizeText(req.body?.reason, 200);
       const key = db.revokeApiKey(id, actor, reason || undefined);
+      dispatchWebhooks('key.revoked', { keyId: key.id, keyName: key.name, ownerId: key.ownerId, reason: reason || 'revoked' });
       res.json({ success: true, key });
     } catch (err: any) {
       res.status(400).json({ error: 'Revocation failed' });
@@ -1192,8 +1400,15 @@ export async function buildApp() {
     try {
       const id = sanitizeText(req.params.id, 128);
       const requestCount = req.body?.requestCount;
+      // Mutating a key's quota counters (and reading the key object back)
+      // requires being signed in AND owning that key — admins excepted.
+      const actor = getActorUser(req);
+      if (!actor) return res.status(401).json({ error: 'Authentication required' });
       const key = db.apiKeys.find((k) => k.id === id);
       if (!key) return res.status(404).json({ error: 'Key not found' });
+      if (key.ownerId !== actor.id && actor.role !== 'ADMIN') {
+        return res.status(403).json({ error: 'Not your API key' });
+      }
 
       // Increment simulated usage (capped to prevent abuse)
       const count = Math.min(Math.max(Number(requestCount) || 50, 1), 1000);
@@ -1419,7 +1634,7 @@ export async function buildApp() {
     const iso = (v: any) => (v instanceof Date ? v.toISOString() : v || '');
     return {
       id: row.id,
-      token: row.token,
+      token: decryptInviteToken(row.token),
       createdBy: row.created_by,
       createdByName: row.created_by_name,
       role: row.role === 'USER' ? 'USER' : 'ADMIN',
@@ -1438,11 +1653,60 @@ export async function buildApp() {
     return !invite.revoked && invite.uses < invite.maxUses && Date.parse(invite.expiresAt) > Date.now();
   }
 
+  // ---- invite tokens at rest -------------------------------------------------
+  // An invite token IS a credential (some grant ADMIN), so in PostgreSQL mode
+  // we never store it raw: lookup goes through sha256(token), display goes
+  // through AES-256-GCM ciphertext in the token column (`enc:v1:…`). A database
+  // dump alone can no longer be redeemed. The key derives from DATABASE_URL so
+  // every serverless instance decrypts identically. Memory mode keeps the token
+  // plainly in RAM — process-local, nothing "at rest".
+  const inviteCryptoKey = databasePool && process.env.DATABASE_URL
+    ? crypto.createHash('sha256').update(`vanitas.invite.v1|${process.env.DATABASE_URL}`).digest()
+    : null;
+
+  function sha256Hex(value: string): string {
+    return crypto.createHash('sha256').update(value).digest('hex');
+  }
+
+  function encryptInviteToken(token: string): string {
+    if (!inviteCryptoKey) return token;
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', inviteCryptoKey, iv);
+    const ct = Buffer.concat([cipher.update(token, 'utf8'), cipher.final()]);
+    return `enc:v1:${Buffer.concat([iv, cipher.getAuthTag(), ct]).toString('base64url')}`;
+  }
+
+  function decryptInviteToken(stored: string): string {
+    if (!stored || !stored.startsWith('enc:v1:')) return stored || ''; // legacy plaintext row
+    if (!inviteCryptoKey) return '';
+    try {
+      const raw = Buffer.from(stored.slice('enc:v1:'.length), 'base64url');
+      const decipher = crypto.createDecipheriv('aes-256-gcm', inviteCryptoKey, raw.subarray(0, 12));
+      decipher.setAuthTag(raw.subarray(12, 28));
+      return Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString('utf8');
+    } catch {
+      return ''; // key changed or row tampered with — unredeemable, not crashable
+    }
+  }
+
   async function findInviteByToken(token: string): Promise<AdminInvite | null> {
     if (!databasePool) return memoryInvites.find((i) => i.token === token) || null;
+    await ensureSchema(); // token_hash column may not exist on a fresh boot
     try {
-      const r = await databasePool.query('select * from public.admin_invites where token = $1', [token]);
-      return r.rows[0] ? mapInviteRow(r.rows[0]) : null;
+      const hash = sha256Hex(token);
+      let r = await databasePool.query('select * from public.admin_invites where token_hash = $1', [hash]);
+      if (r.rows[0]) return mapInviteRow(r.rows[0]);
+      // Legacy row (created before tokens were hashed at rest): find it once
+      // by raw value, migrate it in place, then serve it normally.
+      r = await databasePool.query('select * from public.admin_invites where token = $1', [token]);
+      const row = r.rows[0];
+      if (!row) return null;
+      await databasePool.query('update public.admin_invites set token_hash = $2, token = $3 where id = $1', [
+        row.id,
+        hash,
+        encryptInviteToken(token),
+      ]);
+      return mapInviteRow({ ...row, token_hash: hash, token: encryptInviteToken(token) });
     } catch (err) {
       console.error('[invites/lookup]', (err as Error).message);
       return null;
@@ -1490,13 +1754,15 @@ export async function buildApp() {
       memoryInvites.unshift(invite);
       return invite;
     }
+    await ensureSchema(); // token_hash column may not exist on a fresh boot
     const r = await databasePool.query(
       `insert into public.admin_invites
-         (id, token, created_by, created_by_name, role, verification, note, max_uses, uses, revoked, expires_at, created_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, 0, false, $9, $10) returning *`,
+         (id, token, token_hash, created_by, created_by_name, role, verification, note, max_uses, uses, revoked, expires_at, created_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, 0, false, $9, $10, $11) returning *`,
       [
         invite.id,
-        invite.token,
+        encryptInviteToken(invite.token),
+        sha256Hex(invite.token),
         invite.createdBy,
         invite.createdByName,
         invite.role,
@@ -1566,7 +1832,7 @@ export async function buildApp() {
   });
 
   // Admin User Role Update (cannot demote last admin)
-  app.patch('/api/v1/admin/users/:id/role', async (req, res) => {
+  app.patch('/api/v1/admin/users/:id/role', wrap(async (req, res) => {
     const actor = requireAdmin(req, res);
     if (!actor) return;
 
@@ -1623,11 +1889,11 @@ export async function buildApp() {
     });
 
     res.json({ success: true, user: targetUser });
-  });
+  }));
 
   // Admin: grant or revoke the verification badge shown next to a user's name.
   // Three kinds — USER (verified), DEVELOPER, ADMIN — only admins may grant.
-  app.patch('/api/v1/admin/users/:id/verification', async (req, res) => {
+  app.patch('/api/v1/admin/users/:id/verification', wrap(async (req, res) => {
     const actor = requireAdmin(req, res);
     if (!actor) return;
 
@@ -1674,7 +1940,7 @@ export async function buildApp() {
     });
 
     res.json({ success: true, user: updated });
-  });
+  }));
 
   // Admin: developer invite links — generate a URL for someone who does not
   // have an account yet; registering through it grants the configured role
@@ -1755,8 +2021,9 @@ export async function buildApp() {
   });
 
   // Public invite preview — what this link grants. Only display-safe fields:
-  // no emails, no user ids, no token of anything else.
-  app.get('/api/v1/invites/:token', async (req, res) => {
+  // no emails, no user ids, no token of anything else. Per-IP bucket: the
+  // path contains the token, so a path-keyed limiter would be worthless here.
+  app.get('/api/v1/invites/:token', invitePreviewLimiter, async (req, res) => {
     const token = sanitizeText(req.params.token, 128);
     const invalid = (reason: string) => res.json({ valid: false, reason });
     const invite = token ? await findInviteByToken(token) : null;
@@ -1776,7 +2043,9 @@ export async function buildApp() {
 
   // Public profile by @username — deliberately minimal for sharing: no email,
   // no internal ids, nothing the visitor could not already see on a profile.
-  app.get('/api/v1/profiles/:username', async (req, res) => {
+  // Per-IP bucket: username sits in the path, so bucketing per path would let
+  // username-spraying run unlimited.
+  app.get('/api/v1/profiles/:username', publicProfileLimiter, async (req, res) => {
     const username = sanitizeText(req.params.username, 40).trim().toLowerCase();
     try {
       const profile = await findPublicProfile(username);
@@ -1868,7 +2137,7 @@ export async function buildApp() {
   });
 
   // Admin Audit Logs (capped pagination, allowlisted filters)
-  app.get('/api/v1/admin/logs', async (req, res) => {
+  app.get('/api/v1/admin/logs', wrap(async (req, res) => {
     if (!requireAdmin(req, res)) return;
 
     const { limit, offset } = parsePagination(req.query);
@@ -1918,7 +2187,7 @@ export async function buildApp() {
       offset,
       logs: paged,
     });
-  });
+  }));
 
   // Admin Logs CSV Export (formula-injection hardened)
   app.get('/api/v1/admin/logs/export', async (req, res) => {
@@ -2048,10 +2317,89 @@ export async function buildApp() {
     res.json({ success: true, flag });
   });
 
-  // Webhooks — secrets NEVER returned in list; SSRF-guarded URLs
-  app.get('/api/v1/webhooks', (_req, res) => {
-    const safe = db.webhooks.map((w) => ({ ...w, secret: undefined, url: w.url }));
-    res.json({ webhooks: safe, logs: db.webhookLogs });
+  // Webhooks — secrets NEVER returned in list; SSRF-guarded URLs.
+  // Every row belongs to the account that created it: others can't see it,
+  // test it, or read its delivery logs (admins excepted).
+  function canManageWebhook(actor: User, w: { ownerId?: string }): boolean {
+    return actor.role === 'ADMIN' || w.ownerId === actor.id;
+  }
+
+  /** One REAL delivery attempt: actual network call, HMAC-signed body,
+   * redirect refused, real status/latency recorded. Shared by /test and by
+   * event dispatch — nothing here ever fabricates a delivery result. */
+  async function deliverWebhook(
+    wh: { id: string; url: string; secret: string },
+    event: string,
+    data: Record<string, unknown>,
+  ): Promise<WebhookDeliveryLog> {
+    const payload = { event, timestamp: new Date().toISOString(), data };
+    const body = JSON.stringify(payload);
+    const signature = crypto.createHmac('sha256', wh.secret).update(body).digest('hex');
+    const started = Date.now();
+    let statusCode = 0;
+    let ok = false;
+    try {
+      const response = await fetch(wh.url, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-vanitas-event': event,
+          'x-vanitas-signature': `sha256=${signature}`,
+          'user-agent': 'Vanitas-Webhooks/1.0',
+        },
+        body,
+        // Never follow redirects: a 30x bouncing to an internal host would
+        // be SSRF with extra steps.
+        redirect: 'error',
+        signal: AbortSignal.timeout(5000),
+      });
+      statusCode = response.status;
+      ok = response.ok;
+      void response.body?.cancel().catch(() => undefined);
+    } catch (err) {
+      ok = false;
+      statusCode = 0;
+      console.warn('[webhooks] delivery failed:', (err as Error).message);
+    }
+    const log: WebhookDeliveryLog = {
+      id: secureId('wh_log'),
+      webhookId: wh.id,
+      event,
+      status: ok ? 'delivered' : 'failed',
+      statusCode,
+      latencyMs: Date.now() - started,
+      timestamp: new Date().toISOString(),
+      payload,
+    };
+    db.webhookLogs.unshift(log);
+    if (db.webhookLogs.length > 200) db.webhookLogs.length = 200;
+    const live = db.webhooks.find((w) => w.id === wh.id);
+    if (live) {
+      live.lastTriggeredAt = new Date().toISOString();
+      live.failureCount = ok ? 0 : live.failureCount + 1;
+    }
+    return log;
+  }
+
+  /** Fire-and-forget event dispatch: real signed POSTs to every active
+   * endpoint subscribed to this event. Never awaited by the caller. */
+  function dispatchWebhooks(event: string, data: Record<string, unknown>): void {
+    for (const wh of db.webhooks) {
+      if (wh.status !== 'active' || !wh.events.includes(event)) continue;
+      void deliverWebhook(wh, event, data).catch((err: Error) =>
+        console.warn('[webhooks] dispatch error:', err.message),
+      );
+    }
+  }
+
+  app.get('/api/v1/webhooks', (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
+    const visible = actor.role === 'ADMIN' ? db.webhooks : db.webhooks.filter((w) => canManageWebhook(actor, w));
+    const visibleIds = new Set(visible.map((w) => w.id));
+    const safe = visible.map((w) => ({ ...w, secret: undefined }));
+    const logs = db.webhookLogs.filter((l) => visibleIds.has(l.webhookId));
+    res.json({ webhooks: safe, logs });
   });
 
   app.post('/api/v1/webhooks', (req, res) => {
@@ -2067,7 +2415,7 @@ export async function buildApp() {
     if (!url) return res.status(400).json({ error: 'Invalid or blocked webhook URL (https only, no private hosts)' });
     const cleanEvents = events.map((e: unknown) => sanitizeText(e, 48)).filter((e: string) => /^[a-z_.-]+$/.test(e));
     if (cleanEvents.length === 0) return res.status(400).json({ error: 'Invalid event names' });
-    const newWebhook = {
+    const newWebhook: WebhookEndpoint = {
       id: secureId('wh'),
       name,
       url,
@@ -2077,6 +2425,7 @@ export async function buildApp() {
       createdAt: new Date().toISOString(),
       lastTriggeredAt: null,
       failureCount: 0,
+      ownerId: actor.id,
     };
     db.webhooks.unshift(newWebhook);
     persistAuditLog({
@@ -2094,24 +2443,23 @@ export async function buildApp() {
     res.status(201).json({ webhook: newWebhook });
   });
 
-  app.post('/api/v1/webhooks/:id/test', (req, res) => {
+  app.post('/api/v1/webhooks/:id/test', async (req, res) => {
     const id = sanitizeText(req.params.id, 128);
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
     const wh = db.webhooks.find((w) => w.id === id);
     if (!wh) return res.status(404).json({ error: 'Webhook not found' });
+    if (!canManageWebhook(actor, wh)) return res.status(403).json({ error: 'Not your webhook' });
 
-    wh.lastTriggeredAt = new Date().toISOString();
-    const log = {
-      id: secureId('wh_log'),
-      webhookId: wh.id,
-      event: 'ping.test',
-      status: 'delivered' as const,
-      statusCode: 200,
-      latencyMs: 90 + crypto.randomInt(80),
-      timestamp: new Date().toISOString(),
-      payload: { event: 'ping.test', timestamp: new Date().toISOString(), message: 'Vanitas ping verification handshake' },
-    };
-    db.webhookLogs.unshift(log);
-    res.json({ success: true, log });
+    // REAL delivery: the request actually goes out, and the log records the
+    // true status code and latency — success:false when the endpoint failed.
+    try {
+      const log = await deliverWebhook(wh, 'ping.test', { message: 'Vanitas ping verification handshake' });
+      res.json({ success: log.status === 'delivered', log });
+    } catch (err) {
+      console.error('[webhooks] test failed:', (err as Error).message);
+      res.status(500).json({ error: 'Webhook test failed' });
+    }
   });
 
   // Bot Gateway Execution (validated, allowlisted platforms)
@@ -2307,7 +2655,7 @@ export async function buildApp() {
 
   // Product suggestions are intentionally separate from AI chat: users can report a bug,
   // while an administrator retains control over the review and any proposed code repair.
-  app.post('/api/v1/suggestions', async (req, res) => {
+  app.post('/api/v1/suggestions', wrap(async (req, res) => {
     const actor = getActorUser(req);
     if (!actor) return res.status(401).json({ error: 'Sign in to submit a suggestion' });
     const title = sanitizeText(req.body?.title, 140);
@@ -2324,14 +2672,14 @@ export async function buildApp() {
       source: detectSource(req), status: 'SUCCESS', ipAddress: req.ip || 'unknown', metadata: { category },
     });
     res.status(201).json({ suggestion });
-  });
+  }));
 
-  app.get('/api/v1/admin/suggestions', async (req, res) => {
+  app.get('/api/v1/admin/suggestions', wrap(async (req, res) => {
     if (!requireAdmin(req, res)) return;
     res.json({ suggestions: await listSuggestions() });
-  });
+  }));
 
-  app.patch('/api/v1/admin/suggestions/:id', async (req, res) => {
+  app.patch('/api/v1/admin/suggestions/:id', wrap(async (req, res) => {
     if (!requireAdmin(req, res)) return;
     const status = sanitizeText(req.body?.status, 16);
     const adminNote = sanitizeText(req.body?.adminNote, 2000) || undefined;
@@ -2339,7 +2687,7 @@ export async function buildApp() {
     const suggestion = await updateSuggestion(sanitizeText(req.params.id, 128), status as any, adminNote);
     if (!suggestion) return res.status(404).json({ error: 'Suggestion not found' });
     res.json({ suggestion });
-  });
+  }));
 
   app.post('/api/v1/admin/suggestions/:id/ai-fix', async (req, res) => {
     if (!requireAdmin(req, res)) return;
@@ -2442,7 +2790,10 @@ export async function buildApp() {
   // ----------------------------------------------------
   // EXTERNAL CLOUD DATABASES (SUPABASE, NEON, UPSTASH)
   // ----------------------------------------------------
-  app.get('/api/v1/databases/external', (_req, res) => {
+  // Connection metadata (names, providers, regions, masked URLs) is
+  // infrastructure detail — admins only, like the connect route below.
+  app.get('/api/v1/databases/external', (req, res) => {
+    if (!requireAdmin(req, res)) return;
     res.json({
       success: true,
       databases: db.externalDatabases,
@@ -2456,6 +2807,7 @@ export async function buildApp() {
   });
 
   app.post('/api/v1/databases/external/test', (req, res) => {
+    if (!requireAdmin(req, res)) return;
     const id = sanitizeText(req.body?.id, 128);
     if (!id) return res.status(400).json({ error: 'Database ID is required' });
     const result = db.testDatabaseConnection(id);
@@ -2476,9 +2828,33 @@ export async function buildApp() {
     if (!['supabase', 'neon', 'upstash', 'render', 'railway', 'sqlite_cloud'].includes(provider)) {
       return res.status(400).json({ error: 'Unsupported provider' });
     }
-    // Do not store obviously unsafe URLs (private hosts) — SSRF guard
-    if (!sanitizeUrl(connectionUrl) && !connectionUrl.startsWith('postgresql://') && !connectionUrl.startsWith('rediss://') && !connectionUrl.startsWith('https://')) {
-      return res.status(400).json({ error: 'Invalid connection URL' });
+    // Validate the connection URL before storing it. http(s) goes through
+    // sanitizeUrl (SSRF blocklist). postgres/redis schemes get parsed and
+    // may never point at a cloud-metadata host: the URL is only stored
+    // (masked) and never dialled by the server today, but a stored metadata
+    // address would be a loaded gun for any future connect path. RFC1918
+    // private ranges stay allowed — a self-hosted database is legitimate.
+    const scheme = (connectionUrl.match(/^([a-z][a-z0-9+.-]*):\/\//i)?.[1] || '').toLowerCase();
+    let urlOk = false;
+    if (scheme === 'http' || scheme === 'https') {
+      urlOk = !!sanitizeUrl(connectionUrl);
+    } else if (['postgresql', 'postgres', 'rediss', 'redis'].includes(scheme)) {
+      try {
+        const parsed = new URL(connectionUrl);
+        const host = parsed.hostname.toLowerCase();
+        urlOk =
+          !!host &&
+          host !== '169.254.169.254' &&
+          host !== 'metadata.google.internal' &&
+          host !== 'metadata.goog' &&
+          host !== '100.100.100.200' &&
+          !host.endsWith('.metadata.google.internal');
+      } catch {
+        urlOk = false;
+      }
+    }
+    if (!urlOk) {
+      return res.status(400).json({ error: 'Invalid connection URL (unsupported scheme or blocked host)' });
     }
 
     const created = db.addExternalDatabase({ name, provider: provider as any, connectionUrl, region: region || undefined });
@@ -2654,6 +3030,13 @@ async function startServer() {
     console.log(`Vanitas Central Server running on http://0.0.0.0:${PORT}`);
   });
 }
+
+// A rejected promise from any unwrapped async work must not take the whole
+// process down (Node ≥15 crashes on unhandled rejections by default — one
+// transient storage error would mean total downtime). Log it and keep serving.
+process.on('unhandledRejection', (reason) => {
+  console.error('[process] unhandledRejection:', reason instanceof Error ? reason.message : String(reason));
+});
 
 export default buildApp;
 

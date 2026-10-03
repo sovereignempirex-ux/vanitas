@@ -123,7 +123,9 @@ export function verifyState(provider: OAuthProvider, clientSecret: string, state
 
 /**
  * Base URL of the web app for post-callback redirects.
- * FRONTEND_URL wins; otherwise derived from the request (same-origin deploy).
+ * FRONTEND_URL wins; on Vercel the platform-provided deployment host is used
+ * (it is set by the platform, never by the client); only direct-bind dev and
+ * self-hosted setups fall back to the request's own Host header.
  */
 export function appBaseUrl(req: Request): string {
   const configured = (process.env.FRONTEND_URL || '').trim().replace(/\/+$/, '');
@@ -134,6 +136,14 @@ export function appBaseUrl(req: Request): string {
     } catch {
       // fall through to request-derived value
     }
+  }
+  // Production on Vercel: derive from platform env (VERCEL_URL is per-deploy
+  // and attacker-uncontrollable) — a client-supplied Host must never decide
+  // where the session token fragment is delivered.
+  if (process.env.VERCEL) {
+    const platformHost = (process.env.VERCEL_PROJECT_PRODUCTION_URL || process.env.VERCEL_URL || '')
+      .replace(/^https?:\/\//, '');
+    if (platformHost) return `https://${platformHost}`;
   }
   const host = String(req.headers.host || '');
   if (!/^[a-z0-9.:\-_[\]]+$/i.test(host)) return 'http://localhost:3000';

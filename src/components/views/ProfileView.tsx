@@ -127,10 +127,19 @@ export const ProfileView: React.FC = () => {
     e.preventDefault();
     setSaving(true);
     setSaveError(null);
+    // Mirror of the server's avatar rule (server is authoritative): a custom
+    // URL must be https://… — anything else is rejected here with a clear
+    // message instead of failing later or previewing a dead/wrong image.
+    const customAvatar = customAvatarUrl.trim();
+    if (customAvatar && !/^https:\/\/[^\s]{5,500}$/.test(customAvatar)) {
+      setSaving(false);
+      setSaveError('Custom avatar must be an https:// image URL.');
+      return;
+    }
     // Persisted server-side on the real account record (PostgreSQL).
     const result = await updateUserProfile({
       name,
-      avatarUrl: customAvatarUrl.trim() || selectedAvatar,
+      avatarUrl: customAvatar || selectedAvatar,
       ...(usernameDirty ? { username: usernameInput.trim().toLowerCase() } : {}),
       bio,
     });
@@ -177,7 +186,15 @@ export const ProfileView: React.FC = () => {
 
             <div className="px-6 pb-6 -mt-12 text-center">
               <div className="relative mx-auto h-24 w-24 rounded-2xl overflow-hidden border-4 border-slate-950 shadow-[0_0_30px_rgba(59,130,246,0.35)] bg-slate-900">
-                <img src={customAvatarUrl.trim() || selectedAvatar} alt={name} className="h-full w-full object-cover" />
+                <img
+                  src={(() => {
+                    const v = customAvatarUrl.trim();
+                    return /^https:\/\/[^\s]{5,500}$/.test(v) ? v : selectedAvatar;
+                  })()}
+                  alt={name}
+                  referrerPolicy="no-referrer"
+                  className="h-full w-full object-cover"
+                />
               </div>
 
               <div className="mt-3 flex items-center justify-center gap-2">

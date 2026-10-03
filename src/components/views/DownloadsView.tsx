@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext.tsx';
 import { api } from '../../lib/apiClient.ts';
 import { detectUserPlatform, PlatformInfo } from '../../lib/platformDetector.ts';
+import QRCode from 'qrcode';
 import { ClientRelease } from '../../types.ts';
 import { BRAND_ASSETS } from '../../data/assets.ts';
 import {
@@ -109,7 +110,30 @@ export const DownloadsView: React.FC = () => {
   // QR Code URL pointing to current origin APK download
   const currentOrigin = typeof window !== 'undefined' ? window.location.origin : 'https://vanitas-bot.vercel.app';
   const qrTargetUrl = `${currentOrigin}/api/v1/download/apk`;
-  const qrCodeImageSrc = `https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(qrTargetUrl)}&color=60-130-246&bgcolor=6-9-19&margin=2`;
+  // Rendered LOCALLY in the browser: a third-party QR service would learn
+  // the target URL and could return a QR encoding a different payload than
+  // the one we asked for (payload swap → wrong download on the phone).
+  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
+  const [qrFailed, setQrFailed] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    QRCode.toDataURL(qrTargetUrl, {
+      width: 240,
+      margin: 2,
+      errorCorrectionLevel: 'M',
+      color: { dark: '#3c82f6ff', light: '#060913ff' },
+    })
+      .then((url) => {
+        if (alive) setQrDataUrl(url);
+      })
+      .catch((err: unknown) => {
+        console.warn('[ui] QR generation failed:', err);
+        if (alive) setQrFailed(true);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [qrTargetUrl]);
 
   return (
     <div className="space-y-8 animate-in fade-in duration-300">
@@ -648,11 +672,20 @@ export const DownloadsView: React.FC = () => {
             </p>
 
             <div className="flex justify-center p-3 bg-[#060913] rounded-2xl border border-blue-500/20 shadow-inner">
-              <img
-                src={qrCodeImageSrc}
-                alt="Vanitas Mobile APK Download QR Code"
-                className="h-48 w-48 rounded-xl object-contain filter drop-shadow-[0_0_12px_rgba(59,130,246,0.5)]"
-              />
+              {qrDataUrl ? (
+                <img
+                  src={qrDataUrl}
+                  alt="Vanitas Mobile APK Download QR Code"
+                  className="h-48 w-48 rounded-xl object-contain filter drop-shadow-[0_0_12px_rgba(59,130,246,0.5)]"
+                />
+              ) : (
+                <div className="h-48 w-48 rounded-xl flex flex-col items-center justify-center gap-2 text-[11px] text-slate-400 text-center p-4">
+                  <QrCode className="h-7 w-7 text-slate-500" />
+                  {qrFailed
+                    ? 'QR could not be generated in this browser — use the direct download button below.'
+                    : 'Generating QR code locally…'}
+                </div>
+              )}
             </div>
 
             <div className="pt-1 flex justify-center gap-2">

@@ -65,6 +65,15 @@ alter table if exists public.users add column if not exists two_factor_secret te
 alter table if exists public.users add column if not exists verification text not null default '';
 alter table if exists public.users add column if not exists username text not null default '';
 alter table if exists public.users add column if not exists bio text not null default '';
+-- TOTP replay watermark: highest time-step already spent on a login.
+alter table if exists public.users add column if not exists totp_last_step bigint not null default 0;
+-- Invite tokens are live credentials (some grant ADMIN): look them up by
+-- sha256 hash, never by the raw value. The token column itself only ever
+-- holds either the legacy plaintext (pre-hardening rows) or the enc:v1:
+-- AES-256-GCM ciphertext of the token.
+alter table if exists public.admin_invites add column if not exists token_hash text not null default '';
+create unique index if not exists admin_invites_token_hash_idx
+  on public.admin_invites (token_hash) where token_hash <> '';
 `;
 
 let schemaReady: Promise<void> | null = null;

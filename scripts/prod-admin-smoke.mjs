@@ -6,6 +6,7 @@
 //
 // Uses only TEMPORARY accounts: register -> verify -> delete. Real user
 // accounts (including the owner's) are never modified except by read calls.
+import crypto from 'crypto';
 const BASE = 'https://vanitas-bot.vercel.app/api/v1';
 const TOKEN = process.env.ADMIN_API_TOKEN;
 
@@ -50,6 +51,33 @@ async function call(method, path, { token, body } = {}) {
 }
 
 const admin = { token: TOKEN };
+
+// ---- RFC 6238 helper (independent implementation of src/server/totp.ts) ----
+const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+function base32Decode(s) {
+  let bits = 0;
+  let value = 0;
+  const out = [];
+  for (const ch of s.toUpperCase()) {
+    const idx = B32.indexOf(ch);
+    if (idx === -1) break;
+    value = (value << 5) | idx;
+    bits += 5;
+    while (bits >= 8) {
+      out.push((value >>> (bits - 8)) & 255);
+      bits -= 8;
+    }
+  }
+  return Buffer.from(out);
+}
+function totp(secret) {
+  const msg = Buffer.alloc(8);
+  msg.writeBigUInt64BE(BigInt(Math.floor(Date.now() / 30000)));
+  const hmac = crypto.createHmac('sha1', base32Decode(secret)).update(msg).digest();
+  const off = hmac[hmac.length - 1] & 0x0f;
+  const bin = ((hmac[off] & 0x7f) << 24) | (hmac[off + 1] << 16) | (hmac[off + 2] << 8) | hmac[off + 3];
+  return String(bin % 1000000).padStart(6, '0');
+}
 
 console.log('— PG-backed admin reads —');
 const list = await call('GET', '/admin/users', admin);
@@ -217,6 +245,101 @@ check(
   'cleanup: both username probes deleted -> 200',
   delU1.status === 200 && delU2.status === 200,
   { a: delU1.status, b: delU2.status },
+);
+
+console.log('— hardened auth on PG: sessions, 2FA replay, password rotation —');
+const hEmail = `hard-probe-${ts}@example.test`;
+const hPass = 'Prod-Hard-Probe!42';
+const regH = await call('POST', '/auth/register', {
+  body: { email: hEmail, password: hPass, name: 'Hardening Probe' },
+});
+check('hardening probe registered -> 201', (regH.status === 201 || regH.status === 200) && !!regH.json?.token, regH.status);
+const hTok = regH.json?.token;
+
+// Real auth_sessions rows (PG): irreversible 64-hex token-hash ids only.
+const sessR = await call('GET', '/auth/sessions', { token: hTok });
+const sessRows = sessR.json?.sessions || [];
+check(
+  'GET /auth/sessions -> PG rows with token-hash ids',
+  sessR.status === 200 && sessRows.length >= 1 && sessRows.every((s) => /^[0-9a-f]{64}$/.test(s.id)),
+  { s: sessR.status, n: sessRows.length },
+);
+check('current session flagged', sessRows.some((s) => s.isCurrent === true), sessRows.map((s) => s.isCurrent));
+
+// Planted session must die the moment 2FA is turned on.
+const plant = await call('POST', '/auth/login', { body: { email: hEmail, password: hPass } });
+check('planted second session -> 200', plant.status === 200 && !!plant.json?.token, plant.status);
+const plantedTok = plant.json?.token;
+
+const setupH = await call('POST', '/auth/2fa/setup', { token: hTok });
+check(
+  '2FA setup -> real secret + otpauth URL',
+  setupH.status === 200 && !!setupH.json?.secret && String(setupH.json?.otpauthUrl || '').startsWith('otpauth://totp/'),
+  setupH.status,
+);
+const hSecret = setupH.json?.secret;
+const enH = await call('POST', '/auth/2fa/enable', { token: hTok, body: { code: totp(hSecret) } });
+check(
+  '2FA enable -> success + other sessions revoked',
+  enH.status === 200 && enH.json?.success === true && (enH.json?.sessionsRevoked || 0) >= 1,
+  enH.json ?? enH.status,
+);
+const plantMe = await call('GET', '/auth/me', { token: plantedTok });
+check('planted session died on 2FA enable -> 401', plantMe.status === 401, plantMe.status);
+
+const liveH = totp(hSecret);
+const lgH = await call('POST', '/auth/login', { body: { email: hEmail, password: hPass, code: liveH } });
+check('login with live TOTP -> 200 + session', lgH.status === 200 && !!lgH.json?.token, lgH.json ?? lgH.status);
+const rpH = await call('POST', '/auth/login', { body: { email: hEmail, password: hPass, code: liveH } });
+check(
+  'same TOTP code replayed -> 401 (PG totp_last_step watermark)',
+  rpH.status === 401 && rpH.json?.twoFactorRequired === true,
+  rpH.json ?? rpH.status,
+);
+
+const disH = await call('POST', '/auth/2fa/disable', { token: hTok, body: { code: totp(hSecret) } });
+check('2FA disable -> 200', disH.status === 200 && disH.json?.success === true, disH.json ?? disH.status);
+
+// Password rotation on PG: old credential dies, LOGIN_FAILURE is audited.
+const pcH = await call('POST', '/auth/password', {
+  token: hTok,
+  body: { currentPassword: hPass, newPassword: 'Prod-Hard-Rotated!77' },
+});
+check('password change -> 200 + other sessions revoked', pcH.status === 200 && pcH.json?.success === true, pcH.json ?? pcH.status);
+const oldLH = await call('POST', '/auth/login', { body: { email: hEmail, password: hPass } });
+check('old password rejected -> 401', oldLH.status === 401, oldLH.status);
+const newLH = await call('POST', '/auth/login', { body: { email: hEmail, password: 'Prod-Hard-Rotated!77' } });
+check('new password accepted -> 200', newLH.status === 200 && !!newLH.json?.token, newLH.json ?? newLH.status);
+
+const authLogs = await call('GET', '/admin/logs?limit=200&category=AUTH', admin);
+const authActions = (authLogs.json?.logs || []).map((l) => l.action);
+check('audit contains LOGIN_FAILURE', authActions.includes('LOGIN_FAILURE'), authActions.slice(0, 12));
+check('audit contains PASSWORD_CHANGED', authActions.includes('PASSWORD_CHANGED'), authActions.slice(0, 12));
+
+const delH = await call('DELETE', '/auth/account', { token: hTok });
+check('cleanup hardening probe -> 200', delH.status === 200, { s: delH.status, b: delH.json });
+
+console.log('— webhooks: owner scoping + honest delivery in production —');
+const whA = await call('POST', '/webhooks', {
+  ...admin,
+  body: { name: 'Prod probe', url: 'https://nonexistent-vanitas-test.invalid/hook', events: ['suite.noop'] },
+});
+check(
+  'admin creates webhook -> 201 + secret returned once',
+  whA.status === 201 && typeof whA.json?.webhook?.secret === 'string',
+  whA.json ?? whA.status,
+);
+const whList = await call('GET', '/webhooks', admin);
+const whRow = (whList.json?.webhooks || []).find((w) => w.id === whA.json?.webhook?.id);
+check('GET /webhooks -> 200 + row present without secret', whList.status === 200 && !!whRow && whRow.secret === undefined, {
+  s: whList.status,
+  found: !!whRow,
+});
+const whT = await call('POST', `/webhooks/${whA.json?.webhook?.id}/test`, { ...admin });
+check(
+  'test to unreachable host -> honest FAILED delivery (real network attempt)',
+  whT.status === 200 && whT.json?.success === false && whT.json?.log?.status === 'failed',
+  whT.json ?? whT.status,
 );
 
 console.log('— durable audit trail (must come from PostgreSQL) —');

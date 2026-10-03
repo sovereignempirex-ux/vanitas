@@ -244,7 +244,8 @@ var init_db = __esm({
           target: `${newKey.id} (${newKey.name})`,
           source: "WEB",
           status: "SUCCESS",
-          ipAddress: "194.230.14.88",
+          ipAddress: "unknown",
+          // db-layer call has no request context — never fake an IP
           metadata: { scopes: newKey.scopes, environment: newKey.environment, rateLimitPerMin: newKey.rateLimitPerMin }
         });
         return { key: newKey, rawSecret };
@@ -272,7 +273,8 @@ var init_db = __esm({
           target: `${key.id} (${key.name})`,
           source: "WEB",
           status: "SUCCESS",
-          ipAddress: "194.230.14.88",
+          ipAddress: "unknown",
+          // db-layer call has no request context — never fake an IP
           metadata: { newPrefix: key.keyPrefix }
         });
         return { key, rawSecret };
@@ -294,7 +296,8 @@ var init_db = __esm({
           target: `${key.id} (${key.name})`,
           source: "WEB",
           status: "SUCCESS",
-          ipAddress: "194.230.14.88",
+          ipAddress: "unknown",
+          // db-layer call has no request context — never fake an IP
           metadata: { reason: reason || "User explicit revocation" }
         });
         return key;
@@ -302,6 +305,9 @@ var init_db = __esm({
       updateApiKeyScopes(keyId, newScopes, actor) {
         const key = this.apiKeys.find((k) => k.id === keyId);
         if (!key) throw new Error("API key not found");
+        if (actor.role !== "ADMIN" && key.ownerId !== actor.id) {
+          throw new Error("Forbidden: You can only update scopes for keys you own");
+        }
         this.assertGrantableScopes(actor.role, newScopes);
         const oldScopes = [...key.scopes];
         key.scopes = newScopes;
@@ -314,7 +320,8 @@ var init_db = __esm({
           target: `${key.id} (${key.name})`,
           source: "WEB",
           status: "SUCCESS",
-          ipAddress: "194.230.14.88",
+          ipAddress: "unknown",
+          // db-layer call has no request context — never fake an IP
           metadata: { oldScopes, newScopes }
         });
         return key;
@@ -340,7 +347,8 @@ var init_db = __esm({
           target: `${key.id} (${key.name}) -> ${key.rateLimitPerMin} req/m`,
           source: "WEB",
           status: "SUCCESS",
-          ipAddress: "194.230.14.88",
+          ipAddress: "unknown",
+          // db-layer call has no request context — never fake an IP
           metadata: {
             oldLimit,
             newLimit: key.rateLimitPerMin,
@@ -462,7 +470,8 @@ var init_db = __esm({
           target: release ? `${release.name} (${release.filename})` : `Binary:${type}`,
           source: source || "WEB",
           status: "SUCCESS",
-          ipAddress: "194.230.14.88",
+          ipAddress: "unknown",
+          // db-layer call has no request context — never fake an IP
           metadata: {
             binaryType: type,
             version: release?.version || "1.4.2",
@@ -583,8 +592,8 @@ var init_db = __esm({
         if (status >= 400) ep.errorCount += 1;
         ep.avgLatencyMs = Math.round(ep.avgLatencyMs * 0.85 + latencyMs * 0.15);
       }
-      getKeyUsageAnalytics(period = "24h") {
-        const activeKeys = this.apiKeys;
+      getKeyUsageAnalytics(period = "24h", ownerId = null) {
+        const activeKeys = ownerId === null ? this.apiKeys : this.apiKeys.filter((k) => k.ownerId === ownerId);
         const now = Date.now();
         const timeSeries = [];
         const intervals = period === "24h" ? 24 : period === "7d" ? 7 : 30;
@@ -764,6 +773,15 @@ alter table if exists public.users add column if not exists two_factor_secret te
 alter table if exists public.users add column if not exists verification text not null default '';
 alter table if exists public.users add column if not exists username text not null default '';
 alter table if exists public.users add column if not exists bio text not null default '';
+-- TOTP replay watermark: highest time-step already spent on a login.
+alter table if exists public.users add column if not exists totp_last_step bigint not null default 0;
+-- Invite tokens are live credentials (some grant ADMIN): look them up by
+-- sha256 hash, never by the raw value. The token column itself only ever
+-- holds either the legacy plaintext (pre-hardening rows) or the enc:v1:
+-- AES-256-GCM ciphertext of the token.
+alter table if exists public.admin_invites add column if not exists token_hash text not null default '';
+create unique index if not exists admin_invites_token_hash_idx
+  on public.admin_invites (token_hash) where token_hash <> '';
 `;
     schemaReady = null;
   }
@@ -783,6 +801,33 @@ function sanitizeText(input, maxLen = 5e3) {
   s = s.trim().slice(0, maxLen);
   return s;
 }
+function isPrivateHost(host) {
+  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".internal") || host.endsWith(".local")) return true;
+  if (host.includes(":")) {
+    const h = host.replace(/^\[|\]$/g, "").toLowerCase();
+    if (h === "::" || h === "::1") return true;
+    if (h.startsWith("fc") || h.startsWith("fd")) return true;
+    if (/^fe[89ab]/.test(h)) return true;
+    if (h.startsWith("::ffff:")) return true;
+    return false;
+  }
+  const parts = host.split(".").map((p) => Number(p));
+  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false;
+  const [a, b] = parts;
+  if (a === 0) return true;
+  if (a === 10) return true;
+  if (a === 127) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 192 && b === 0) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  if (a === 198 && (b === 18 || b === 19)) return true;
+  if (a === 198 && b === 51) return true;
+  if (a === 203 && b === 0) return true;
+  if (a >= 224) return true;
+  return false;
+}
 function sanitizeUrl(input) {
   if (typeof input !== "string") return null;
   const s = input.trim().slice(0, 2048);
@@ -793,20 +838,14 @@ function sanitizeUrl(input) {
     return null;
   }
   if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+  if (u.username || u.password) return null;
   const host = u.hostname.toLowerCase();
-  const blocked = [
-    "localhost",
-    "127.",
-    "10.",
-    "192.168.",
-    "169.254.",
-    "0.0.0.0",
-    "::1",
-    "[::1]"
-  ];
-  if (blocked.some((b) => host === b || host.startsWith(b))) return null;
-  if (host.endsWith(".internal") || host.endsWith(".local")) return null;
-  if (process.env.NODE_ENV === "production" && u.protocol !== "https:") return null;
+  const isProd = process.env.NODE_ENV === "production";
+  const isLoopback = host === "localhost" || host.endsWith(".localhost") || host === "::1" || host.split(".").length === 4 && Number(host.split(".")[0]) === 127;
+  if (isPrivateHost(host)) {
+    if (isProd || !isLoopback) return null;
+  }
+  if (isProd && u.protocol !== "https:") return null;
   return u.toString();
 }
 function csvCell(value) {
@@ -815,10 +854,21 @@ function csvCell(value) {
   s = s.replace(/"/g, '""');
   return `"${s}"`;
 }
-function rateLimit({ windowMs = 6e4, max = 120 }) {
+function pruneHits() {
+  const now = Date.now();
+  for (const [key, arr] of hits) {
+    const kept = arr.filter((t) => now - t < maxWindowMs);
+    if (kept.length === 0) hits.delete(key);
+    else hits.set(key, kept);
+  }
+}
+function rateLimit({ windowMs = 6e4, max = 120, perIpOnly = false }) {
+  if (windowMs > maxWindowMs) maxWindowMs = windowMs;
   return (req, res, next) => {
-    const key = (req.ip || req.socket.remoteAddress || "unknown") + ":" + req.path;
+    const ip = req.ip || req.socket.remoteAddress || "unknown";
+    const key = perIpOnly ? `${ip}:*` : `${ip}:${req.path}`;
     const now = Date.now();
+    if (++sweepCounter % 1e3 === 0) pruneHits();
     const arr = (hits.get(key) || []).filter((t) => now - t < windowMs);
     if (arr.length >= max) {
       res.setHeader("Retry-After", Math.ceil(windowMs / 1e3));
@@ -902,11 +952,13 @@ function parsePagination(query) {
 function isValidScope(s) {
   return typeof s === "string" && /^[a-z.]+\.[a-z.]+$/.test(s) && s.length <= 40;
 }
-var hits;
+var hits, sweepCounter, maxWindowMs;
 var init_security = __esm({
   "src/server/security.ts"() {
     init_db();
     hits = /* @__PURE__ */ new Map();
+    sweepCounter = 0;
+    maxWindowMs = 6e4;
   }
 });
 
@@ -1135,6 +1187,29 @@ async function forgetAccount(userId) {
   }
   resolveCache.clear();
 }
+async function getTotpLastStep(userId) {
+  if (databasePool) {
+    try {
+      const result = await databasePool.query("select totp_last_step from public.users where id = $1", [userId]);
+      return Number(result.rows[0]?.totp_last_step || 0);
+    } catch (err) {
+      console.error("[auth] totp step read failed:", err.message);
+      return 0;
+    }
+  }
+  return memoryTotpStep.get(userId) || 0;
+}
+async function setTotpLastStep(userId, step) {
+  if (databasePool) {
+    try {
+      await databasePool.query("update public.users set totp_last_step = $2 where id = $1", [userId, step]);
+    } catch (err) {
+      console.error("[auth] totp step persist failed:", err.message);
+    }
+  } else {
+    memoryTotpStep.set(userId, step);
+  }
+}
 async function getTwoFactorSecret(userId) {
   if (databasePool) {
     const result = await databasePool.query("select two_factor_secret from public.users where id = $1", [userId]);
@@ -1145,12 +1220,13 @@ async function getTwoFactorSecret(userId) {
 async function setTwoFactor(userId, secret, enabled) {
   if (databasePool) {
     await databasePool.query(
-      "update public.users set two_factor_secret = $2, two_factor_enabled = $3 where id = $1",
+      "update public.users set two_factor_secret = $2, two_factor_enabled = $3, totp_last_step = 0 where id = $1",
       [userId, secret, enabled]
     );
   } else {
     if (secret) memoryTwoFactor.set(userId, secret);
     else memoryTwoFactor.delete(userId);
+    memoryTotpStep.delete(userId);
     const user = db.users.find((u) => u.id === userId);
     if (user) user.twoFactorEnabled = enabled;
   }
@@ -1219,7 +1295,7 @@ async function createSession(user, meta) {
       const now = Date.now();
       for (const [k, v] of memorySessions) if (v.expiresAt < now) memorySessions.delete(k);
     }
-    memorySessions.set(hash, { userId: user.id, expiresAt: expiresAt.getTime() });
+    memorySessions.set(hash, { userId: user.id, expiresAt: expiresAt.getTime(), ip: String(meta.ip || "").slice(0, 64), userAgent: String(meta.userAgent || "").slice(0, 200), createdAt: Date.now() });
   }
   return token;
 }
@@ -1270,6 +1346,121 @@ async function revokeSession(token) {
   } else {
     memorySessions.delete(hash);
   }
+}
+async function listUserSessions(userId) {
+  if (databasePool) {
+    try {
+      const result = await databasePool.query(
+        `select token_hash, ip, user_agent, created_at, expires_at
+           from public.auth_sessions
+          where user_id = $1 and expires_at > now()
+          order by created_at desc`,
+        [userId]
+      );
+      return result.rows.map((r) => ({
+        id: String(r.token_hash),
+        ip: String(r.ip || ""),
+        userAgent: String(r.user_agent || ""),
+        createdAt: new Date(r.created_at).toISOString(),
+        expiresAt: new Date(r.expires_at).toISOString()
+      }));
+    } catch (err) {
+      console.error("[auth] session list failed:", err.message);
+      return [];
+    }
+  }
+  const out = [];
+  const now = Date.now();
+  for (const [id, rec] of memorySessions) {
+    if (rec.userId !== userId || rec.expiresAt < now) continue;
+    out.push({
+      id,
+      ip: rec.ip || "",
+      userAgent: rec.userAgent || "",
+      createdAt: new Date(rec.createdAt || 0).toISOString(),
+      expiresAt: new Date(rec.expiresAt).toISOString()
+    });
+  }
+  return out.sort((a, b) => a.createdAt < b.createdAt ? 1 : -1);
+}
+async function revokeUserSession(userId, sessionId) {
+  if (databasePool) {
+    try {
+      const r = await databasePool.query(
+        "delete from public.auth_sessions where user_id = $1 and token_hash = $2",
+        [userId, sessionId]
+      );
+      resolveCache.delete(sessionId);
+      return Number(r.rowCount || 0) > 0;
+    } catch (err) {
+      console.error("[auth] session revoke failed:", err.message);
+      return false;
+    }
+  }
+  const rec = memorySessions.get(sessionId);
+  if (!rec || rec.userId !== userId) return false;
+  memorySessions.delete(sessionId);
+  resolveCache.delete(sessionId);
+  return true;
+}
+async function revokeOtherSessions(userId, keepSessionId) {
+  let removed = 0;
+  if (databasePool) {
+    try {
+      const r = await databasePool.query(
+        keepSessionId ? "delete from public.auth_sessions where user_id = $1 and token_hash <> $2" : "delete from public.auth_sessions where user_id = $1",
+        keepSessionId ? [userId, keepSessionId] : [userId]
+      );
+      removed = Number(r.rowCount || 0);
+    } catch (err) {
+      console.error("[auth] revoke-others failed:", err.message);
+      return 0;
+    }
+  } else {
+    for (const [id, rec] of Array.from(memorySessions)) {
+      if (rec.userId === userId && id !== keepSessionId) {
+        memorySessions.delete(id);
+        removed += 1;
+      }
+    }
+  }
+  invalidateResolveCache(userId);
+  return removed;
+}
+async function verifyPasswordFor(userId, password) {
+  if (databasePool) {
+    try {
+      const result = await databasePool.query("select password_hash from public.users where id = $1", [userId]);
+      const hash = result.rows[0]?.password_hash;
+      if (!hash) {
+        await burnPasswordTime(password);
+        return false;
+      }
+      return await verifyPassword(password, hash);
+    } catch (err) {
+      console.error("[auth] password check failed:", err.message);
+      return false;
+    }
+  }
+  for (const rec of memoryPasswords.values()) {
+    if (rec.userId === userId) return await verifyPassword(password, rec.hash);
+  }
+  await burnPasswordTime(password);
+  return false;
+}
+async function setPassword(userId, passwordHash) {
+  if (databasePool) {
+    await databasePool.query("update public.users set password_hash = $2 where id = $1", [userId, passwordHash]);
+  } else {
+    const user = db.users.find((u) => u.id === userId);
+    if (user) {
+      const clean = user.email.trim().toLowerCase();
+      const rec = memoryPasswords.get(clean);
+      if (rec) rec.hash = passwordHash;
+      else memoryPasswords.set(clean, { userId, hash: passwordHash });
+    }
+  }
+  invalidateResolveCache(userId);
 }
 function fallbackOAuthEmail(provider, providerId) {
   return `${provider}_${providerId}@oauth.vanitas.local`;
@@ -1381,7 +1572,7 @@ async function markSocialLogin(userId, provider) {
     [userId, provider]
   );
 }
-var SESSION_TTL_MS, RESOLVE_CACHE_TTL_MS, DEFAULT_AVATAR, dummyHashPromise, RESERVED_USERNAMES, memoryPasswords, memorySessions, resolveCache, memoryTwoFactor, memoryIdentities;
+var SESSION_TTL_MS, RESOLVE_CACHE_TTL_MS, DEFAULT_AVATAR, dummyHashPromise, RESERVED_USERNAMES, memoryPasswords, memorySessions, resolveCache, memoryTwoFactor, memoryTotpStep, memoryIdentities;
 var init_authStore = __esm({
   "src/server/authStore.ts"() {
     init_pg();
@@ -1432,6 +1623,7 @@ var init_authStore = __esm({
     memorySessions = /* @__PURE__ */ new Map();
     resolveCache = /* @__PURE__ */ new Map();
     memoryTwoFactor = /* @__PURE__ */ new Map();
+    memoryTotpStep = /* @__PURE__ */ new Map();
     memoryIdentities = /* @__PURE__ */ new Map();
   }
 });
@@ -1482,10 +1674,16 @@ function totpAt(secretB32, counter) {
   const bin = (hmac[offset] & 127) << 24 | hmac[offset + 1] << 16 | hmac[offset + 2] << 8 | hmac[offset + 3];
   return String(bin % 1e6).padStart(6, "0");
 }
-function verifyTotp(secretB32, code) {
-  if (!/^\d{6}$/.test(code)) return false;
+function verifyTotpStep(secretB32, code) {
+  if (!/^\d{6}$/.test(code)) return null;
   const counter = Math.floor(Date.now() / 3e4);
-  return totpAt(secretB32, counter - 1) === code || totpAt(secretB32, counter) === code || totpAt(secretB32, counter + 1) === code;
+  if (totpAt(secretB32, counter) === code) return counter;
+  if (totpAt(secretB32, counter - 1) === code) return counter - 1;
+  if (totpAt(secretB32, counter + 1) === code) return counter + 1;
+  return null;
+}
+function verifyTotp(secretB32, code) {
+  return verifyTotpStep(secretB32, code) !== null;
 }
 function totpOtpauthUrl(email, secret) {
   const label = `Vanitas:${encodeURIComponent(email)}`;
@@ -1554,6 +1752,10 @@ function appBaseUrl(req) {
       if (u.protocol === "http:" || u.protocol === "https:") return u.origin;
     } catch {
     }
+  }
+  if (process.env.VERCEL) {
+    const platformHost = (process.env.VERCEL_PROJECT_PRODUCTION_URL || process.env.VERCEL_URL || "").replace(/^https?:\/\//, "");
+    if (platformHost) return `https://${platformHost}`;
   }
   const host = String(req.headers.host || "");
   if (!/^[a-z0-9.:\-_[\]]+$/i.test(host)) return "http://localhost:3000";
@@ -3467,12 +3669,27 @@ async function clearAiChatHistory(userId) {
 async function buildApp() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3e3;
-  app.set("trust proxy", 1);
+  if (process.env.VERCEL || process.env.TRUST_PROXY === "true" || process.env.TRUST_PROXY === "1") {
+    app.set("trust proxy", 1);
+  } else {
+    app.set("trust proxy", false);
+  }
   app.disable("x-powered-by");
   app.use(express.json({ limit: "256kb" }));
   app.use(express.urlencoded({ extended: true, limit: "256kb" }));
+  if (databasePool) {
+    ensureSchema().catch((err) => console.error("[schema] boot migrate failed:", err.message));
+  }
+  function wrap(fn) {
+    return (req, res) => {
+      Promise.resolve(fn(req, res)).catch((err) => {
+        console.error("[route] handler failed:", err instanceof Error ? err.message : String(err));
+        if (!res.headersSent) res.status(500).json({ error: "Internal server error" });
+      });
+    };
+  }
   app.use((req, res, next) => {
-    const allowed = (process.env.FRONTEND_URL || "").split(",").map((s) => s.trim()).filter(Boolean);
+    const allowed = (process.env.FRONTEND_URL || "").split(",").map((s) => s.trim()).filter((s) => s && s !== "*");
     const origin = req.headers.origin;
     if (origin && (allowed.includes(origin) || allowed.includes("*"))) {
       res.setHeader("Access-Control-Allow-Origin", origin);
@@ -3491,9 +3708,14 @@ async function buildApp() {
     (req, res, next) => (req.originalUrl || req.url).startsWith("/api/v1/public/") ? publicLimiter(req, res, next) : defaultLimiter(req, res, next)
   );
   app.use("/api/v1/auth/", rateLimit({ windowMs: 6e4, max: 60 }));
-  app.use("/api/v1/ai/", rateLimit({ windowMs: 6e4, max: 60 }));
+  app.use("/api/v1/ai/", rateLimit({ windowMs: 6e4, max: 30 }));
   app.use("/api/v1/bot/", rateLimit({ windowMs: 6e4, max: 120 }));
   app.use("/api/v1/comments/", rateLimit({ windowMs: 6e4, max: 30 }));
+  app.use("/api/v1/youtube/", rateLimit({ windowMs: 6e4, max: 60 }));
+  app.use("/api/v1/search/", rateLimit({ windowMs: 6e4, max: 60 }));
+  app.use("/api/v1/semantic-search", rateLimit({ windowMs: 6e4, max: 60 }));
+  const invitePreviewLimiter = rateLimit({ windowMs: 6e4, max: 60, perIpOnly: true });
+  const publicProfileLimiter = rateLimit({ windowMs: 6e4, max: 60, perIpOnly: true });
   app.use("/api/", async (req, _res, next) => {
     try {
       const auth = req.headers.authorization || "";
@@ -3747,7 +3969,7 @@ async function buildApp() {
       });
       return res.status(201).json({ token, user: outcome.user, permissions: permissionsFor(outcome.user) });
     } catch (err) {
-      console.error("[auth] register failed:", err);
+      console.error("[auth] register failed:", err.message);
       const msg = err.message || "";
       if (msg.includes("db:migrate")) {
         return res.status(503).json({ error: "Auth storage unavailable \u2014 run npm run db:migrate first" });
@@ -3763,13 +3985,34 @@ async function buildApp() {
     }
     try {
       const outcome = await verifyAccount(email, password);
-      if (outcome.ok === false) return res.status(outcome.status).json({ error: outcome.error });
+      if (outcome.ok === false) {
+        persistAuditLog({
+          actorId: "",
+          actorName: "unknown",
+          actorEmail: email,
+          action: "LOGIN_FAILURE",
+          category: "AUTH",
+          target: `Failed login: ${email}`,
+          source: detectSource(req),
+          status: "FAILURE",
+          ipAddress: req.ip || "unknown",
+          metadata: { reason: "invalid_credentials" }
+        });
+        return res.status(outcome.status).json({ error: outcome.error });
+      }
       if (outcome.user.twoFactorEnabled) {
         const secret = await getTwoFactorSecret(outcome.user.id);
         const code = sanitizeText(req.body?.code, 16);
-        if (!secret || !verifyTotp(secret, code)) {
+        const step = secret ? verifyTotpStep(secret, code) : null;
+        if (step === null) {
           return res.status(401).json({ twoFactorRequired: true, error: "Enter the 6-digit code from your authenticator app" });
         }
+        const lastStep = await getTotpLastStep(outcome.user.id);
+        if (step <= lastStep) {
+          console.warn("[auth] TOTP replay rejected for user", outcome.user.id);
+          return res.status(401).json({ twoFactorRequired: true, error: "That code was already used \u2014 wait for the next one" });
+        }
+        await setTotpLastStep(outcome.user.id, step);
       }
       const token = await createSession(outcome.user, { ip: req.ip, userAgent: String(req.headers["user-agent"] || "") });
       persistAuditLog({
@@ -3784,9 +4027,10 @@ async function buildApp() {
         ipAddress: req.ip || "unknown",
         metadata: { role: outcome.user.role }
       });
+      dispatchWebhooks("user.login", { userId: outcome.user.id, email: outcome.user.email });
       return res.json({ token, user: outcome.user, permissions: permissionsFor(outcome.user) });
     } catch (err) {
-      console.error("[auth] login failed:", err);
+      console.error("[auth] login failed:", err.message);
       const msg = err.message || "";
       if (msg.includes("db:migrate")) {
         return res.status(503).json({ error: "Auth storage unavailable \u2014 run npm run db:migrate first" });
@@ -3843,7 +4087,13 @@ async function buildApp() {
       res.status(500).json({ error: "Account deletion failed" });
     }
   });
-  const twoFactorStateKey = crypto7.createHash("sha256").update(process.env.DATABASE_URL || process.env.ADMIN_API_TOKEN || "vanitas-local-2fa").digest();
+  const twoFactorStateKey = crypto7.createHash("sha256").update(process.env.DATABASE_URL || process.env.ADMIN_API_TOKEN || `local-${crypto7.randomBytes(32).toString("hex")}`).digest();
+  function currentSessionHash(req) {
+    const auth = req.headers.authorization || "";
+    const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+    if (!token.startsWith("vnt_sess_")) return void 0;
+    return crypto7.createHash("sha256").update(token).digest("hex");
+  }
   function makeTwoFactorState(userId) {
     const payload = Buffer.from(`${userId}.${Date.now() + 10 * 6e4}`).toString("base64url");
     const sig = crypto7.createHmac("sha256", twoFactorStateKey).update(payload).digest("base64url");
@@ -3884,6 +4134,8 @@ async function buildApp() {
       if (!secret) return res.status(400).json({ error: "Run two-factor setup first" });
       if (!verifyTotp(secret, code)) return res.status(400).json({ error: "Invalid 6-digit code" });
       await setTwoFactor(actor.id, secret, true);
+      const keep = currentSessionHash(req);
+      const sessionsRevoked = await revokeOtherSessions(actor.id, keep);
       persistAuditLog({
         actorId: actor.id,
         actorName: actor.name,
@@ -3893,9 +4145,10 @@ async function buildApp() {
         target: `User Account: ${actor.id}`,
         source: detectSource(req),
         status: "SUCCESS",
-        ipAddress: req.ip || "unknown"
+        ipAddress: req.ip || "unknown",
+        metadata: { sessionsRevoked }
       });
-      res.json({ success: true });
+      res.json({ success: true, sessionsRevoked });
     } catch (err) {
       console.error("[2fa/enable]", err.message);
       res.status(500).json({ error: "Could not enable two-factor authentication" });
@@ -3939,7 +4192,13 @@ async function buildApp() {
       if (!result) return res.status(401).json({ error: "Two-factor challenge expired \u2014 sign in again" });
       if (!result.twoFactorEnabled) return res.status(400).json({ error: "Two-factor authentication is not enabled" });
       const secret = await getTwoFactorSecret(result.id);
-      if (!secret || !verifyTotp(secret, code)) return res.status(400).json({ error: "Invalid 6-digit code" });
+      const step = secret ? verifyTotpStep(secret, code) : null;
+      if (step === null) return res.status(400).json({ error: "Invalid 6-digit code" });
+      const lastStep = await getTotpLastStep(result.id);
+      if (step <= lastStep) {
+        return res.status(401).json({ error: "That code was already used \u2014 wait for the next one" });
+      }
+      await setTotpLastStep(result.id, step);
       const token = await createSession(result, { ip: req.ip, userAgent: String(req.headers["user-agent"] || "") });
       persistAuditLog({
         actorId: result.id,
@@ -4071,33 +4330,113 @@ async function buildApp() {
       return res.redirect(`${base}/login#vnt_error=provider_failed`);
     }
   });
-  app.get("/api/v1/auth/sessions", (req, res) => {
+  function sessionFacts(ua) {
+    const l = ua.toLowerCase();
+    const browser = /edg\//.test(l) ? "Edge" : /opr\//.test(l) ? "Opera" : /chrome\//.test(l) ? "Chrome" : /firefox\//.test(l) ? "Firefox" : /safari\//.test(l) ? "Safari" : ua ? "Other" : "Unknown";
+    const os = /windows/.test(l) ? "Windows" : /android/.test(l) ? "Android" : /iphone|ipad|ipod/.test(l) ? "iOS" : /mac os|macintosh/.test(l) ? "macOS" : /linux/.test(l) ? "Linux" : "Unknown";
+    const device = /android|iphone|ipad|ipod|mobile/.test(l) ? "Mobile" : ua ? "Desktop" : "Unknown";
+    const source = /bot|crawl|spider|curl|axios|discord|wget/.test(l) ? "BOT" : /android|iphone|ipad|ipod|mobile/.test(l) ? "MOBILE" : /electron/.test(l) ? "DESKTOP" : "WEB";
+    return { browser, os, device, source };
+  }
+  app.get("/api/v1/auth/sessions", async (req, res) => {
     const actor = getActorUser(req);
     if (!actor) return res.status(401).json({ error: "Authentication required" });
-    res.json({ sessions: db.sessions });
+    try {
+      const current = currentSessionHash(req);
+      const rows = await listUserSessions(actor.id);
+      const sessions = rows.map((row) => {
+        const facts = sessionFacts(row.userAgent);
+        return {
+          id: row.id,
+          browser: facts.browser,
+          os: facts.os,
+          device: facts.device,
+          ip: row.ip,
+          source: facts.source,
+          isCurrent: !!current && row.id === current,
+          createdAt: row.createdAt,
+          lastActiveAt: row.createdAt
+        };
+      });
+      res.json({ sessions });
+    } catch (err) {
+      console.error("[sessions/list]", err.message);
+      res.status(500).json({ error: "Could not list sessions" });
+    }
   });
-  app.delete("/api/v1/auth/sessions/:id", (req, res) => {
-    const id = sanitizeText(req.params.id, 64);
+  app.delete("/api/v1/auth/sessions/:id", async (req, res) => {
+    const id = sanitizeText(req.params.id, 128);
     const actor = getActorUser(req);
     if (!actor) return res.status(401).json({ error: "Authentication required" });
-    const idx = db.sessions.findIndex((s) => s.id === id);
-    if (idx !== -1) {
-      const removed = db.sessions.splice(idx, 1)[0];
+    try {
+      const removed = await revokeUserSession(actor.id, id);
+      if (!removed) return res.status(404).json({ error: "Session not found" });
       persistAuditLog({
         actorId: actor.id,
         actorName: actor.name,
         actorEmail: actor.email,
         action: "SESSION_REVOKED",
         category: "AUTH",
-        target: `Session Device: ${sanitizeText(removed.device, 120)} (${sanitizeText(removed.ip, 64)})`,
+        target: `Session: ${id.slice(0, 12)}\u2026`,
         source: detectSource(req),
         status: "SUCCESS",
         ipAddress: req.ip || "unknown",
-        metadata: { deviceId: id }
+        metadata: { sessionHashPrefix: id.slice(0, 12), self: id === currentSessionHash(req) }
       });
       return res.json({ success: true, message: "Session terminated" });
+    } catch (err) {
+      console.error("[sessions/revoke]", err.message);
+      res.status(500).json({ error: "Could not revoke session" });
     }
-    res.status(404).json({ error: "Session not found" });
+  });
+  app.post("/api/v1/auth/password", async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
+    const current = typeof req.body?.currentPassword === "string" ? req.body.currentPassword : "";
+    const next = typeof req.body?.newPassword === "string" ? req.body.newPassword : "";
+    if (next.length < 8 || next.length > 128) {
+      return res.status(400).json({ error: "Password must be between 8 and 128 characters" });
+    }
+    if (current === next) {
+      return res.status(400).json({ error: "New password must be different from the current one" });
+    }
+    try {
+      const ok = await verifyPasswordFor(actor.id, current);
+      if (!ok) {
+        persistAuditLog({
+          actorId: actor.id,
+          actorName: actor.name,
+          actorEmail: actor.email,
+          action: "PASSWORD_CHANGE_FAILED",
+          category: "AUTH",
+          target: `User Account: ${actor.id}`,
+          source: detectSource(req),
+          status: "FAILURE",
+          ipAddress: req.ip || "unknown",
+          metadata: { reason: "wrong_current_password" }
+        });
+        return res.status(401).json({ error: "Current password is incorrect" });
+      }
+      await setPassword(actor.id, await hashPassword(next));
+      const keep = currentSessionHash(req);
+      const sessionsRevoked = await revokeOtherSessions(actor.id, keep);
+      persistAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorEmail: actor.email,
+        action: "PASSWORD_CHANGED",
+        category: "AUTH",
+        target: `User Account: ${actor.id}`,
+        source: detectSource(req),
+        status: "SUCCESS",
+        ipAddress: req.ip || "unknown",
+        metadata: { sessionsRevoked }
+      });
+      res.json({ success: true, sessionsRevoked });
+    } catch (err) {
+      console.error("[auth/password] change failed:", err.message);
+      res.status(500).json({ error: "Password change failed" });
+    }
   });
   app.get("/api/v1/api-keys", (req, res) => {
     const actor = getActorUser(req);
@@ -4109,8 +4448,10 @@ async function buildApp() {
     res.json({ keys: userKeys, allScopes: ALL_SCOPES.filter((s) => !s.adminOnly) });
   });
   app.get("/api/v1/api-keys/usage-analytics", (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
     const period = req.query.period || "24h";
-    const data = db.getKeyUsageAnalytics(period);
+    const data = db.getKeyUsageAnalytics(period, actor.role === "ADMIN" ? null : actor.id);
     res.json(data);
   });
   app.post("/api/v1/api-keys", (req, res) => {
@@ -4152,6 +4493,7 @@ async function buildApp() {
       if (!actor) return res.status(401).json({ error: "Authentication required" });
       const id = sanitizeText(req.params.id, 128);
       const result = db.rotateApiKey(id, actor);
+      dispatchWebhooks("key.rotated", { keyId: result.key.id, keyName: result.key.name, ownerId: result.key.ownerId, keyPrefix: result.key.keyPrefix });
       res.json({
         key: result.key,
         rawSecret: result.rawSecret,
@@ -4168,6 +4510,7 @@ async function buildApp() {
       const id = sanitizeText(req.params.id, 128);
       const reason = sanitizeText(req.body?.reason, 200);
       const key = db.revokeApiKey(id, actor, reason || void 0);
+      dispatchWebhooks("key.revoked", { keyId: key.id, keyName: key.name, ownerId: key.ownerId, reason: reason || "revoked" });
       res.json({ success: true, key });
     } catch (err) {
       res.status(400).json({ error: "Revocation failed" });
@@ -4224,8 +4567,13 @@ async function buildApp() {
     try {
       const id = sanitizeText(req.params.id, 128);
       const requestCount = req.body?.requestCount;
+      const actor = getActorUser(req);
+      if (!actor) return res.status(401).json({ error: "Authentication required" });
       const key = db.apiKeys.find((k) => k.id === id);
       if (!key) return res.status(404).json({ error: "Key not found" });
+      if (key.ownerId !== actor.id && actor.role !== "ADMIN") {
+        return res.status(403).json({ error: "Not your API key" });
+      }
       const count = Math.min(Math.max(Number(requestCount) || 50, 1), 1e3);
       key.usageCount += count;
       key.currentUsageThisMonth = (key.currentUsageThisMonth || 0) + count;
@@ -4412,7 +4760,7 @@ async function buildApp() {
     const iso = (v) => v instanceof Date ? v.toISOString() : v || "";
     return {
       id: row.id,
-      token: row.token,
+      token: decryptInviteToken(row.token),
       createdBy: row.created_by,
       createdByName: row.created_by_name,
       role: row.role === "USER" ? "USER" : "ADMIN",
@@ -4428,11 +4776,45 @@ async function buildApp() {
   function inviteUsable(invite) {
     return !invite.revoked && invite.uses < invite.maxUses && Date.parse(invite.expiresAt) > Date.now();
   }
+  const inviteCryptoKey = databasePool && process.env.DATABASE_URL ? crypto7.createHash("sha256").update(`vanitas.invite.v1|${process.env.DATABASE_URL}`).digest() : null;
+  function sha256Hex(value) {
+    return crypto7.createHash("sha256").update(value).digest("hex");
+  }
+  function encryptInviteToken(token) {
+    if (!inviteCryptoKey) return token;
+    const iv = crypto7.randomBytes(12);
+    const cipher = crypto7.createCipheriv("aes-256-gcm", inviteCryptoKey, iv);
+    const ct = Buffer.concat([cipher.update(token, "utf8"), cipher.final()]);
+    return `enc:v1:${Buffer.concat([iv, cipher.getAuthTag(), ct]).toString("base64url")}`;
+  }
+  function decryptInviteToken(stored) {
+    if (!stored || !stored.startsWith("enc:v1:")) return stored || "";
+    if (!inviteCryptoKey) return "";
+    try {
+      const raw = Buffer.from(stored.slice("enc:v1:".length), "base64url");
+      const decipher = crypto7.createDecipheriv("aes-256-gcm", inviteCryptoKey, raw.subarray(0, 12));
+      decipher.setAuthTag(raw.subarray(12, 28));
+      return Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString("utf8");
+    } catch {
+      return "";
+    }
+  }
   async function findInviteByToken(token) {
     if (!databasePool) return memoryInvites.find((i) => i.token === token) || null;
+    await ensureSchema();
     try {
-      const r = await databasePool.query("select * from public.admin_invites where token = $1", [token]);
-      return r.rows[0] ? mapInviteRow(r.rows[0]) : null;
+      const hash = sha256Hex(token);
+      let r = await databasePool.query("select * from public.admin_invites where token_hash = $1", [hash]);
+      if (r.rows[0]) return mapInviteRow(r.rows[0]);
+      r = await databasePool.query("select * from public.admin_invites where token = $1", [token]);
+      const row = r.rows[0];
+      if (!row) return null;
+      await databasePool.query("update public.admin_invites set token_hash = $2, token = $3 where id = $1", [
+        row.id,
+        hash,
+        encryptInviteToken(token)
+      ]);
+      return mapInviteRow({ ...row, token_hash: hash, token: encryptInviteToken(token) });
     } catch (err) {
       console.error("[invites/lookup]", err.message);
       return null;
@@ -4471,13 +4853,15 @@ async function buildApp() {
       memoryInvites.unshift(invite);
       return invite;
     }
+    await ensureSchema();
     const r = await databasePool.query(
       `insert into public.admin_invites
-         (id, token, created_by, created_by_name, role, verification, note, max_uses, uses, revoked, expires_at, created_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, 0, false, $9, $10) returning *`,
+         (id, token, token_hash, created_by, created_by_name, role, verification, note, max_uses, uses, revoked, expires_at, created_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, 0, false, $9, $10, $11) returning *`,
       [
         invite.id,
-        invite.token,
+        encryptInviteToken(invite.token),
+        sha256Hex(invite.token),
         invite.createdBy,
         invite.createdByName,
         invite.role,
@@ -4539,7 +4923,7 @@ async function buildApp() {
     }
     res.json({ users: db.users });
   });
-  app.patch("/api/v1/admin/users/:id/role", async (req, res) => {
+  app.patch("/api/v1/admin/users/:id/role", wrap(async (req, res) => {
     const actor = requireAdmin(req, res);
     if (!actor) return;
     const id = sanitizeText(req.params.id, 64);
@@ -4588,8 +4972,8 @@ async function buildApp() {
       metadata: { priorRole, newRole: role }
     });
     res.json({ success: true, user: targetUser });
-  });
-  app.patch("/api/v1/admin/users/:id/verification", async (req, res) => {
+  }));
+  app.patch("/api/v1/admin/users/:id/verification", wrap(async (req, res) => {
     const actor = requireAdmin(req, res);
     if (!actor) return;
     const id = sanitizeText(req.params.id, 64);
@@ -4630,7 +5014,7 @@ async function buildApp() {
       metadata: { verification: value || "none" }
     });
     res.json({ success: true, user: updated });
-  });
+  }));
   app.post("/api/v1/admin/invites", async (req, res) => {
     const actor = requireAdmin(req, res);
     if (!actor) return;
@@ -4701,7 +5085,7 @@ async function buildApp() {
       res.status(500).json({ error: "Failed to revoke invite" });
     }
   });
-  app.get("/api/v1/invites/:token", async (req, res) => {
+  app.get("/api/v1/invites/:token", invitePreviewLimiter, async (req, res) => {
     const token = sanitizeText(req.params.token, 128);
     const invalid = (reason) => res.json({ valid: false, reason });
     const invite = token ? await findInviteByToken(token) : null;
@@ -4718,7 +5102,7 @@ async function buildApp() {
       expiresAt: invite.expiresAt
     });
   });
-  app.get("/api/v1/profiles/:username", async (req, res) => {
+  app.get("/api/v1/profiles/:username", publicProfileLimiter, async (req, res) => {
     const username = sanitizeText(req.params.username, 40).trim().toLowerCase();
     try {
       const profile = await findPublicProfile(username);
@@ -4795,7 +5179,7 @@ async function buildApp() {
       res.status(500).json({ error: "Failed to load comments" });
     }
   });
-  app.get("/api/v1/admin/logs", async (req, res) => {
+  app.get("/api/v1/admin/logs", wrap(async (req, res) => {
     if (!requireAdmin(req, res)) return;
     const { limit, offset } = parsePagination(req.query);
     const from = sanitizeText(req.query.from, 32);
@@ -4830,7 +5214,7 @@ async function buildApp() {
       offset,
       logs: paged
     });
-  });
+  }));
   app.get("/api/v1/admin/logs/export", async (req, res) => {
     if (!requireAdmin(req, res)) return res.status(403).send("Forbidden");
     const headers = ["Timestamp", "Actor", "Action", "Category", "Target", "Source", "Status", "Request ID", "IP Address", "Metadata"];
@@ -4939,9 +5323,74 @@ async function buildApp() {
     flag.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
     res.json({ success: true, flag });
   });
-  app.get("/api/v1/webhooks", (_req, res) => {
-    const safe = db.webhooks.map((w) => ({ ...w, secret: void 0, url: w.url }));
-    res.json({ webhooks: safe, logs: db.webhookLogs });
+  function canManageWebhook(actor, w) {
+    return actor.role === "ADMIN" || w.ownerId === actor.id;
+  }
+  async function deliverWebhook(wh, event, data) {
+    const payload = { event, timestamp: (/* @__PURE__ */ new Date()).toISOString(), data };
+    const body = JSON.stringify(payload);
+    const signature = crypto7.createHmac("sha256", wh.secret).update(body).digest("hex");
+    const started = Date.now();
+    let statusCode = 0;
+    let ok = false;
+    try {
+      const response = await fetch(wh.url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-vanitas-event": event,
+          "x-vanitas-signature": `sha256=${signature}`,
+          "user-agent": "Vanitas-Webhooks/1.0"
+        },
+        body,
+        // Never follow redirects: a 30x bouncing to an internal host would
+        // be SSRF with extra steps.
+        redirect: "error",
+        signal: AbortSignal.timeout(5e3)
+      });
+      statusCode = response.status;
+      ok = response.ok;
+      void response.body?.cancel().catch(() => void 0);
+    } catch (err) {
+      ok = false;
+      statusCode = 0;
+      console.warn("[webhooks] delivery failed:", err.message);
+    }
+    const log = {
+      id: secureId("wh_log"),
+      webhookId: wh.id,
+      event,
+      status: ok ? "delivered" : "failed",
+      statusCode,
+      latencyMs: Date.now() - started,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      payload
+    };
+    db.webhookLogs.unshift(log);
+    if (db.webhookLogs.length > 200) db.webhookLogs.length = 200;
+    const live = db.webhooks.find((w) => w.id === wh.id);
+    if (live) {
+      live.lastTriggeredAt = (/* @__PURE__ */ new Date()).toISOString();
+      live.failureCount = ok ? 0 : live.failureCount + 1;
+    }
+    return log;
+  }
+  function dispatchWebhooks(event, data) {
+    for (const wh of db.webhooks) {
+      if (wh.status !== "active" || !wh.events.includes(event)) continue;
+      void deliverWebhook(wh, event, data).catch(
+        (err) => console.warn("[webhooks] dispatch error:", err.message)
+      );
+    }
+  }
+  app.get("/api/v1/webhooks", (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
+    const visible = actor.role === "ADMIN" ? db.webhooks : db.webhooks.filter((w) => canManageWebhook(actor, w));
+    const visibleIds = new Set(visible.map((w) => w.id));
+    const safe = visible.map((w) => ({ ...w, secret: void 0 }));
+    const logs = db.webhookLogs.filter((l) => visibleIds.has(l.webhookId));
+    res.json({ webhooks: safe, logs });
   });
   app.post("/api/v1/webhooks", (req, res) => {
     const actor = getActorUser(req);
@@ -4965,7 +5414,8 @@ async function buildApp() {
       status: "active",
       createdAt: (/* @__PURE__ */ new Date()).toISOString(),
       lastTriggeredAt: null,
-      failureCount: 0
+      failureCount: 0,
+      ownerId: actor.id
     };
     db.webhooks.unshift(newWebhook);
     persistAuditLog({
@@ -4981,23 +5431,20 @@ async function buildApp() {
     });
     res.status(201).json({ webhook: newWebhook });
   });
-  app.post("/api/v1/webhooks/:id/test", (req, res) => {
+  app.post("/api/v1/webhooks/:id/test", async (req, res) => {
     const id = sanitizeText(req.params.id, 128);
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
     const wh = db.webhooks.find((w) => w.id === id);
     if (!wh) return res.status(404).json({ error: "Webhook not found" });
-    wh.lastTriggeredAt = (/* @__PURE__ */ new Date()).toISOString();
-    const log = {
-      id: secureId("wh_log"),
-      webhookId: wh.id,
-      event: "ping.test",
-      status: "delivered",
-      statusCode: 200,
-      latencyMs: 90 + crypto7.randomInt(80),
-      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-      payload: { event: "ping.test", timestamp: (/* @__PURE__ */ new Date()).toISOString(), message: "Vanitas ping verification handshake" }
-    };
-    db.webhookLogs.unshift(log);
-    res.json({ success: true, log });
+    if (!canManageWebhook(actor, wh)) return res.status(403).json({ error: "Not your webhook" });
+    try {
+      const log = await deliverWebhook(wh, "ping.test", { message: "Vanitas ping verification handshake" });
+      res.json({ success: log.status === "delivered", log });
+    } catch (err) {
+      console.error("[webhooks] test failed:", err.message);
+      res.status(500).json({ error: "Webhook test failed" });
+    }
   });
   app.get("/api/v1/bot/status", (_req, res) => {
     res.json({ bots: db.bots });
@@ -5163,7 +5610,7 @@ async function buildApp() {
       res.status(500).json({ error: "Failed running code diagnosis" });
     }
   });
-  app.post("/api/v1/suggestions", async (req, res) => {
+  app.post("/api/v1/suggestions", wrap(async (req, res) => {
     const actor = getActorUser(req);
     if (!actor) return res.status(401).json({ error: "Sign in to submit a suggestion" });
     const title = sanitizeText(req.body?.title, 140);
@@ -5186,12 +5633,12 @@ async function buildApp() {
       metadata: { category }
     });
     res.status(201).json({ suggestion });
-  });
-  app.get("/api/v1/admin/suggestions", async (req, res) => {
+  }));
+  app.get("/api/v1/admin/suggestions", wrap(async (req, res) => {
     if (!requireAdmin(req, res)) return;
     res.json({ suggestions: await listSuggestions() });
-  });
-  app.patch("/api/v1/admin/suggestions/:id", async (req, res) => {
+  }));
+  app.patch("/api/v1/admin/suggestions/:id", wrap(async (req, res) => {
     if (!requireAdmin(req, res)) return;
     const status = sanitizeText(req.body?.status, 16);
     const adminNote = sanitizeText(req.body?.adminNote, 2e3) || void 0;
@@ -5199,7 +5646,7 @@ async function buildApp() {
     const suggestion = await updateSuggestion(sanitizeText(req.params.id, 128), status, adminNote);
     if (!suggestion) return res.status(404).json({ error: "Suggestion not found" });
     res.json({ suggestion });
-  });
+  }));
   app.post("/api/v1/admin/suggestions/:id/ai-fix", async (req, res) => {
     if (!requireAdmin(req, res)) return;
     const suggestion = await findSuggestion(sanitizeText(req.params.id, 128));
@@ -5285,7 +5732,8 @@ async function buildApp() {
       res.status(500).json({ error: "Failed searching YouTube videos" });
     }
   });
-  app.get("/api/v1/databases/external", (_req, res) => {
+  app.get("/api/v1/databases/external", (req, res) => {
+    if (!requireAdmin(req, res)) return;
     res.json({
       success: true,
       databases: db.externalDatabases,
@@ -5298,6 +5746,7 @@ async function buildApp() {
     });
   });
   app.post("/api/v1/databases/external/test", (req, res) => {
+    if (!requireAdmin(req, res)) return;
     const id = sanitizeText(req.body?.id, 128);
     if (!id) return res.status(400).json({ error: "Database ID is required" });
     const result = db.testDatabaseConnection(id);
@@ -5316,8 +5765,21 @@ async function buildApp() {
     if (!["supabase", "neon", "upstash", "render", "railway", "sqlite_cloud"].includes(provider)) {
       return res.status(400).json({ error: "Unsupported provider" });
     }
-    if (!sanitizeUrl(connectionUrl) && !connectionUrl.startsWith("postgresql://") && !connectionUrl.startsWith("rediss://") && !connectionUrl.startsWith("https://")) {
-      return res.status(400).json({ error: "Invalid connection URL" });
+    const scheme = (connectionUrl.match(/^([a-z][a-z0-9+.-]*):\/\//i)?.[1] || "").toLowerCase();
+    let urlOk = false;
+    if (scheme === "http" || scheme === "https") {
+      urlOk = !!sanitizeUrl(connectionUrl);
+    } else if (["postgresql", "postgres", "rediss", "redis"].includes(scheme)) {
+      try {
+        const parsed = new URL(connectionUrl);
+        const host = parsed.hostname.toLowerCase();
+        urlOk = !!host && host !== "169.254.169.254" && host !== "metadata.google.internal" && host !== "metadata.goog" && host !== "100.100.100.200" && !host.endsWith(".metadata.google.internal");
+      } catch {
+        urlOk = false;
+      }
+    }
+    if (!urlOk) {
+      return res.status(400).json({ error: "Invalid connection URL (unsupported scheme or blocked host)" });
     }
     const created = db.addExternalDatabase({ name, provider, connectionUrl, region: region || void 0 });
     persistAuditLog({
@@ -5470,6 +5932,9 @@ var init_server = __esm({
     memoryAiChat = [];
     AI_HISTORY_PAGE = 100;
     AI_HISTORY_RETAIN = 400;
+    process.on("unhandledRejection", (reason) => {
+      console.error("[process] unhandledRejection:", reason instanceof Error ? reason.message : String(reason));
+    });
     server_default = buildApp;
     if (!process.env.VERCEL && (process.argv[1]?.endsWith("server.ts") || process.argv[1]?.endsWith("server.cjs"))) {
       startServer();
@@ -5501,7 +5966,7 @@ function loadApp() {
   return appPromise;
 }
 function fail(res, stage, err) {
-  const payload = {
+  const detail = {
     error: "function_error",
     stage,
     message: String(err?.message || err),
@@ -5511,14 +5976,16 @@ function fail(res, stage, err) {
     nodeEnv: process.env.NODE_ENV || "",
     time: (/* @__PURE__ */ new Date()).toISOString()
   };
-  console.error("[vanitas]", JSON.stringify(payload));
+  console.error("[vanitas]", JSON.stringify(detail));
   if (!res) return;
+  const clientPayload = { error: "function_error", stage };
+  if (process.env.NODE_ENV !== "production") clientPayload.message = detail.message;
   try {
     if (!res.headersSent) {
       res.statusCode = 500;
       res.setHeader("content-type", "application/json; charset=utf-8");
     }
-    res.end(JSON.stringify(payload, null, 2));
+    res.end(JSON.stringify(clientPayload, null, 2));
   } catch {
   }
 }

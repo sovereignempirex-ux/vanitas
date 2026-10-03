@@ -156,7 +156,11 @@ function setCanonical(href: string) {
 /** Apply a page's title/description across title, description, OG, Twitter and canonical. */
 export function setPageSeo({ title, description }: SeoEntry) {
   const fullTitle = `${title} | Vanitas`;
-  const url = `${SITE_URL}${window.location.pathname === '/' ? '/' : window.location.pathname}`;
+  // Invite links carry a LIVE credential in their path. They must never be
+  // published as canonical/og:url — that would leak the token into crawler
+  // logs, caches and social unfurls. Metadata points at the generic landing.
+  const secretPath = window.location.pathname.startsWith('/invite/');
+  const url = `${SITE_URL}${secretPath ? '/register' : window.location.pathname === '/' ? '/' : window.location.pathname}`;
 
   document.title = fullTitle;
   setMeta('name', 'description', description);

@@ -108,6 +108,47 @@ await must('update last_login_at + role', async () => {
   await db.query(`update public.users set role = 'ADMIN' where id = $1`, [id]);
 });
 
+await must('users.totp_last_step watermark round-trips (bigint)', async () => {
+  await db.query('update public.users set totp_last_step = $2 where id = $1', [id, 123456]);
+  const r = await db.query('select totp_last_step from public.users where id = $1', [id]);
+  if (Number(r.rows[0]?.totp_last_step) !== 123456) throw new Error('TOTP watermark lost');
+  await db.query('update public.users set totp_last_step = 0 where id = $1', [id]);
+});
+
+await must('admin_invites.token_hash unique partial index (lookup by hash)', async () => {
+  const exp = new Date(Date.now() + 60_000);
+  await db.query(
+    `insert into public.admin_invites (id, token, created_by, token_hash, expires_at)
+     values ($1, $2, $3, $4, $5)`,
+    ['inv_h1', 'enc:v1:ciphertext-one', id, 'hash_one', exp],
+  );
+  await db.query(
+    `insert into public.admin_invites (id, token, created_by, token_hash, expires_at)
+     values ($1, $2, $3, $4, $5)`,
+    ['inv_h2', 'enc:v1:ciphertext-two', id, 'hash_two', exp],
+  );
+  // Duplicate hash must be rejected: two invites can never resolve to the
+  // same lookup key (this is what findInviteByToken queries).
+  try {
+    await db.query(
+      `insert into public.admin_invites (id, token, created_by, token_hash, expires_at)
+       values ($1, $2, $3, $4, $5)`,
+      ['inv_h3', 'enc:v1:ciphertext-three', id, 'hash_one', exp],
+    );
+    throw new Error('duplicate token_hash was accepted');
+  } catch (err) {
+    if (err.code !== '23505') throw err;
+  }
+  // Legacy rows ('' hash) are exempt from the partial index.
+  await db.query(
+    `insert into public.admin_invites (id, token, created_by, token_hash, expires_at)
+     values ($1, $2, $3, '', $4)`,
+    ['inv_legacy', 'legacy-plaintext-token', id, exp],
+  );
+  const r = await db.query(`delete from public.admin_invites where created_by = $1`, [id]);
+  if (r.rowCount !== 3) throw new Error(`expected 3 invite rows, deleted ${r.rowCount}`);
+});
+
 await must('create session + resolve via join', async () => {
   await db.query('insert into public.auth_sessions (token_hash, user_id, ip, user_agent, expires_at) values ($1,$2,$3,$4,$5)', [
     'hash_abc',

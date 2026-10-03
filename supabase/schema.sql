@@ -72,6 +72,9 @@ create index if not exists audit_logs_category_idx on public.audit_logs (categor
 create table if not exists public.admin_invites (
   id text primary key,
   token text not null unique,
+  -- sha256(token): invite lookup goes through this hash (invite tokens are
+  -- live credentials — some grant ADMIN), never through the raw value.
+  token_hash text not null default '',
   created_by text not null,
   created_by_name text not null default '',
   role text not null default 'ADMIN' check (role in ('USER', 'ADMIN')),
@@ -84,6 +87,7 @@ create table if not exists public.admin_invites (
   created_at timestamptz not null default now()
 );
 create index if not exists admin_invites_created_idx on public.admin_invites (created_at desc);
+create unique index if not exists admin_invites_token_hash_idx on public.admin_invites (token_hash) where token_hash <> '';
 
 -- ---------------------------------------------------------------------------
 -- Webhooks
@@ -161,6 +165,8 @@ create table if not exists public.users (
   verification text not null default '',
   password_hash text not null,
   two_factor_enabled boolean not null default false,
+  two_factor_secret text not null default '',
+  totp_last_step bigint not null default 0,
   connected_accounts jsonb not null default '{"google":false,"github":false,"discord":false}',
   created_at timestamptz not null default now(),
   last_login_at timestamptz

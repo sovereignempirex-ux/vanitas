@@ -29,6 +29,11 @@ export const SecurityView: React.FC = () => {
   const [busy, setBusy] = useState(false);
   const [formMsg, setFormMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
+  // Password rotation form.
+  const [pwCurrent, setPwCurrent] = useState('');
+  const [pwNext, setPwNext] = useState('');
+  const [pwBusy, setPwBusy] = useState(false);
+  const [pwMsg, setPwMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
 
   const loadSessions = async () => {
     try {
@@ -118,6 +123,40 @@ export const SecurityView: React.FC = () => {
     navigator.clipboard.writeText(text);
     setCopied(what);
     setTimeout(() => setCopied(null), 2000);
+  };
+
+  /** Password rotation — proof = current password; the server then revokes
+   * every OTHER session so a stolen session dies together with the old
+   * credential. */
+  const handleChangePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (pwNext.length < 8 || pwNext.length > 128) {
+      setPwMsg({ kind: 'err', text: 'New password must be between 8 and 128 characters.' });
+      return;
+    }
+    if (pwCurrent === pwNext) {
+      setPwMsg({ kind: 'err', text: 'New password must be different from the current one.' });
+      return;
+    }
+    setPwBusy(true);
+    setPwMsg(null);
+    try {
+      const res = await api.changePassword(pwCurrent, pwNext);
+      setPwCurrent('');
+      setPwNext('');
+      setPwMsg({
+        kind: 'ok',
+        text:
+          res.sessionsRevoked > 0
+            ? `Password updated — ${res.sessionsRevoked} other session${res.sessionsRevoked === 1 ? '' : 's'} signed out.`
+            : 'Password updated.',
+      });
+      void loadSessions(); // revoked sessions disappear from the list
+    } catch (err: any) {
+      setPwMsg({ kind: 'err', text: err?.message || 'Password change failed' });
+    } finally {
+      setPwBusy(false);
+    }
   };
 
   return (
@@ -295,6 +334,59 @@ export const SecurityView: React.FC = () => {
         )}
       </div>
 
+      {/* Password rotation — proof = current password; every OTHER session is
+          revoked with it so a stolen session dies when the credential moves. */}
+      <div className="rounded-3xl border border-white/10 bg-slate-950/60 backdrop-blur-xl overflow-hidden shadow-2xl">
+        <div className="p-4 sm:p-6 border-b border-white/10 flex items-center gap-2">
+          <Key className="h-5 w-5 text-amber-400" />
+          <div>
+            <h2 className="text-sm font-bold text-white">Account Password</h2>
+            <p className="text-[11px] text-slate-400">
+              Changing the password signs out every other device automatically.
+            </p>
+          </div>
+        </div>
+        <form onSubmit={handleChangePassword} className="p-4 sm:p-6 grid grid-cols-1 sm:grid-cols-[1fr_1fr_auto] gap-3 items-end">
+          <label className="block">
+            <span className="block text-[11px] font-medium text-slate-400 mb-1">Current password</span>
+            <input
+              type="password"
+              autoComplete="current-password"
+              value={pwCurrent}
+              onChange={(e) => setPwCurrent(e.target.value)}
+              className="w-full rounded-xl border border-white/10 bg-slate-900 px-3.5 py-2 text-xs text-white placeholder:text-slate-600 focus:border-amber-500/60 focus:outline-none"
+              placeholder="••••••••"
+            />
+          </label>
+          <label className="block">
+            <span className="block text-[11px] font-medium text-slate-400 mb-1">New password</span>
+            <input
+              type="password"
+              autoComplete="new-password"
+              value={pwNext}
+              onChange={(e) => setPwNext(e.target.value)}
+              className="w-full rounded-xl border border-white/10 bg-slate-900 px-3.5 py-2 text-xs text-white placeholder:text-slate-600 focus:border-amber-500/60 focus:outline-none"
+              placeholder="8–128 characters"
+            />
+          </label>
+          <button
+            type="submit"
+            disabled={pwBusy || !pwCurrent || !pwNext}
+            className="rounded-xl bg-amber-600 px-5 py-2 text-xs font-semibold text-white shadow-lg shadow-amber-600/25 hover:bg-amber-500 transition-all disabled:opacity-50"
+          >
+            {pwBusy ? 'Updating…' : 'Update password'}
+          </button>
+          {pwMsg && (
+            <p
+              className={`sm:col-span-3 text-xs font-medium ${pwMsg.kind === 'ok' ? 'text-emerald-400' : 'text-rose-400'}`}
+            >
+              {pwMsg.kind === 'ok' ? '✓ ' : '✕ '}
+              {pwMsg.text}
+            </p>
+          )}
+        </form>
+      </div>
+
       {/* Active Device Sessions Manager */}
       <div className="rounded-3xl border border-white/10 bg-slate-950/60 backdrop-blur-xl overflow-hidden shadow-2xl">
         <div className="p-4 sm:p-6 border-b border-white/10 flex items-center justify-between">
@@ -313,7 +405,7 @@ export const SecurityView: React.FC = () => {
               <div key={sess.id} className="p-4 sm:p-5 flex items-center justify-between hover:bg-white/[0.02] transition-colors">
                 <div className="flex items-center gap-4">
                   <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/[0.04] border border-white/10 text-slate-300">
-                    {sess.device.toLowerCase().includes('phone') || sess.device.toLowerCase().includes('ios') ? (
+                    {/phone|mobile|ios|android/i.test(`${sess.device} ${sess.os}`) ? (
                       <Smartphone className="h-5 w-5 text-purple-400" />
                     ) : (
                       <Laptop className="h-5 w-5 text-cyan-400" />
@@ -321,15 +413,21 @@ export const SecurityView: React.FC = () => {
                   </div>
                   <div>
                     <div className="flex items-center gap-2">
-                      <p className="text-xs font-semibold text-white">{sess.device}</p>
+                      <p className="text-xs font-semibold text-white">
+                        {sess.browser} <span className="text-slate-500">on</span> {sess.os}
+                      </p>
                       {sess.isCurrent && (
                         <span className="rounded bg-blue-500/20 px-2 py-0.5 font-mono text-[9px] font-bold text-blue-300">
                           CURRENT DEVICE
                         </span>
                       )}
                     </div>
+                    {/* Real session row facts: IP, client source, sign-in time.
+                        There is no geo-IP or activity tracking — nothing about
+                        location or "last active" is invented here. */}
                     <p className="text-[11px] text-slate-400">
-                      IP: <span className="font-mono text-slate-300">{sess.ip}</span> • Location: {sess.location} • Last active: {new Date(sess.lastActive).toLocaleTimeString()}
+                      IP: <span className="font-mono text-slate-300">{sess.ip || 'unknown'}</span> • Source:{' '}
+                      {sess.source} • Signed in: {new Date(sess.createdAt).toLocaleString()}
                     </p>
                   </div>
                 </div>

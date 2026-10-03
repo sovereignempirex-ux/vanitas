@@ -64,15 +64,24 @@ export function currentTotp(secretB32: string): string {
   return totpAt(secretB32, Math.floor(Date.now() / 30_000));
 }
 
+/**
+ * Verify a user-supplied 6-digit code (±1 time step drift) and return the
+ * time-step the code belongs to (or null when it doesn't verify). Callers
+ * that create sessions use the step for replay prevention: a code may only
+ * be accepted once — see `step > lastUsedStep` checks in server.ts.
+ */
+export function verifyTotpStep(secretB32: string, code: string): number | null {
+  if (!/^\d{6}$/.test(code)) return null;
+  const counter = Math.floor(Date.now() / 30_000);
+  if (totpAt(secretB32, counter) === code) return counter;
+  if (totpAt(secretB32, counter - 1) === code) return counter - 1;
+  if (totpAt(secretB32, counter + 1) === code) return counter + 1;
+  return null;
+}
+
 /** Verify a user-supplied 6-digit code (±1 time step drift). */
 export function verifyTotp(secretB32: string, code: string): boolean {
-  if (!/^\d{6}$/.test(code)) return false;
-  const counter = Math.floor(Date.now() / 30_000);
-  return (
-    totpAt(secretB32, counter - 1) === code ||
-    totpAt(secretB32, counter) === code ||
-    totpAt(secretB32, counter + 1) === code
-  );
+  return verifyTotpStep(secretB32, code) !== null;
 }
 
 /** otpauth:// URL so authenticator apps can add the account (scan or manual key). */
