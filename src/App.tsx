@@ -7,7 +7,8 @@ import { AuthPage } from './pages/AuthPage.tsx';
 import { InvitePage } from './pages/InvitePage.tsx';
 import { ProfilePage } from './pages/ProfilePage.tsx';
 import { AuthModal } from './components/AuthModal.tsx';
-import { VIEW_SEO, seoForAuthPage, seoForInvitePage, setPageSeo } from './lib/seo.ts';
+import { LandingPage } from './pages/LandingPage.tsx';
+import { VIEW_SEO, seoForAuthPage, seoForInvitePage, seoForLandingPage, setPageSeo } from './lib/seo.ts';
 
 // Views
 import { OverviewView } from './components/views/OverviewView.tsx';
@@ -53,7 +54,12 @@ const AppContent: React.FC = () => {
     }
     if (authLoading) return;
     if (!user) {
-      setPageSeo(seoForAuthPage(path === '/register' ? 'register' : 'login'));
+      // Signed-out root = marketing landing; other auth paths = auth pages.
+      setPageSeo(
+        path === '/'
+          ? seoForLandingPage()
+          : seoForAuthPage(path === '/register' ? 'register' : 'login'),
+      );
       return;
     }
     setPageSeo(VIEW_SEO[activeView] || VIEW_SEO.overview);
@@ -122,6 +128,9 @@ const AppContent: React.FC = () => {
   }
 
   if (!user) {
+    // Signed-out visitors at "/" get the public homepage (features, security,
+    // quick start) — auth stays one click away via /login and /register.
+    if (path === '/') return <LandingPage />;
     return <AuthPage mode={path === '/register' ? 'register' : 'login'} />;
   }
 

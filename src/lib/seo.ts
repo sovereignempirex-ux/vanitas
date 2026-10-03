@@ -99,6 +99,16 @@ export const VIEW_SEO: Record<string, SeoEntry> = {
   },
 };
 
+/** Metadata for the public landing page at "/" (signed-out visitors). */
+export function seoForLandingPage(): SeoEntry {
+  return {
+    // No "Vanitas" prefix here — setPageSeo appends the "| Vanitas" suffix.
+    title: 'Centralized API & Developer Platform',
+    description:
+      'One secure gateway for web, bots, mobile and desktop: scoped API keys, signed webhooks, audit logs, verification badges and a site-aware AI copilot with Arabic support.',
+  };
+}
+
 /** Metadata for the standalone /login and /register pages. */
 export function seoForAuthPage(mode: 'login' | 'register'): SeoEntry {
   return mode === 'register'

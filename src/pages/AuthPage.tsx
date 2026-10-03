@@ -239,7 +239,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({ mode, invite }) => {
           <span className="font-display font-bold tracking-widest text-sm text-white group-hover:text-cyan-300 transition-colors">VANITAS</span>
         </a>
         <a href="/" className="text-xs text-slate-400 hover:text-cyan-300 transition-colors flex items-center gap-1">
-          Back to console <ArrowRight className="h-3 w-3 rotate-180" />
+          <ArrowRight className="h-3 w-3 rotate-180" /> Home <span dir="rtl">الرئيسية</span>
         </a>
       </header>
 
