@@ -224,6 +224,9 @@ export const Header: React.FC<HeaderProps> = ({ onOpenCommandPalette }) => {
                       <VerifiedBadge type={user.verification} />
                     </p>
                     <p className="text-[11px] font-mono text-slate-400 truncate">{user.email}</p>
+                    {user.username && (
+                      <p className="text-[11px] font-mono text-cyan-400/90 truncate">@{user.username}</p>
+                    )}
                     <div className="mt-1 flex items-center gap-1.5">
                       <span
                         className={`h-1.5 w-1.5 rounded-full ${user.twoFactorEnabled ? 'bg-emerald-400' : 'bg-slate-500'}`}

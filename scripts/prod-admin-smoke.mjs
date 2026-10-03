@@ -167,6 +167,58 @@ check('revoked preview -> valid:false revoked', pv2.json?.valid === false && pv2
 const delI = await call('DELETE', `/admin/users/${regI.json?.user?.id}`, admin);
 check('cleanup: invitee account deleted -> 200', delI.status === 200, { s: delI.status });
 
+console.log('— @username system on real PostgreSQL —');
+const unA = await call('POST', '/auth/register', {
+  body: { email: `uname-dupe-${ts}@example.test`, password: 'Prod-Admin-Probe!42', name: 'Username Probe A' },
+});
+const unB = await call('POST', '/auth/register', {
+  body: { email: `uname-dupe-${ts}@other.test`, password: 'Prod-Admin-Probe!42', name: 'Username Probe B' },
+});
+check(
+  'same local-part emails registered',
+  (unA.status === 201 || unA.status === 200) && (unB.status === 201 || unB.status === 200),
+  { a: unA.status, b: unB.status },
+);
+check(
+  '-> distinct usernames (PG uniqueness fix)',
+  !!unA.json?.user?.username && !!unB.json?.user?.username && unA.json.user.username !== unB.json.user.username,
+  { a: unA.json?.user?.username, b: unB.json?.user?.username },
+);
+const availSelf = await call('GET', `/auth/username-available?username=${encodeURIComponent(unA.json?.user?.username || '')}`, {
+  token: unA.json?.token,
+});
+check('availability: own username -> available', availSelf.json?.available === true, availSelf.json);
+const claimed = `prod_u_${ts}`;
+const claimR = await call('PATCH', '/auth/profile', {
+  token: unA.json?.token,
+  body: { name: 'Username Probe A', avatarUrl: '', username: claimed, bio: 'prod username smoke' },
+});
+check(
+  'claim @username + bio -> 200',
+  claimR.status === 200 && claimR.json?.user?.username === claimed && claimR.json?.user?.bio === 'prod username smoke',
+  { s: claimR.status, u: claimR.json?.user?.username },
+);
+const dupR = await call('PATCH', '/auth/profile', {
+  token: unB.json?.token,
+  body: { name: 'Username Probe B', avatarUrl: '', username: claimed },
+});
+check('second claim of same name -> 409', dupR.status === 409, dupR.status);
+const pubU = await call('GET', `/profiles/${claimed}`);
+check(
+  'public profile -> 200 + bio, no email',
+  pubU.status === 200 &&
+    pubU.json?.profile?.bio === 'prod username smoke' &&
+    !('email' in (pubU.json?.profile || {})),
+  { s: pubU.status, p: pubU.json?.profile },
+);
+const delU1 = await call('DELETE', `/admin/users/${unA.json?.user?.id}`, admin);
+const delU2 = await call('DELETE', `/admin/users/${unB.json?.user?.id}`, admin);
+check(
+  'cleanup: both username probes deleted -> 200',
+  delU1.status === 200 && delU2.status === 200,
+  { a: delU1.status, b: delU2.status },
+);
+
 console.log('— durable audit trail (must come from PostgreSQL) —');
 const logs = await call('GET', '/admin/logs?limit=200', admin);
 const actions = (logs.json?.logs || []).map((l) => l.action);
@@ -178,6 +230,7 @@ check(
   actions.includes('INVITE_CREATED') && actions.includes('INVITE_USED'),
   actions.slice(0, 10),
 );
+check('audit contains USERNAME_CHANGED', actions.includes('USERNAME_CHANGED'), actions.slice(0, 15));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

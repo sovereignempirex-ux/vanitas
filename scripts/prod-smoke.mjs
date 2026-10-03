@@ -122,6 +122,10 @@ check(
   r.status === 200 && r.json?.valid === false,
   r.status,
 );
+r = await call('GET', '/auth/username-available?username=probe_name');
+check('GET /auth/username-available without session → 401', r.status === 401, r.status);
+r = await call('GET', '/profiles/definitely_missing_user_xyz');
+check('public profile for unknown username → 404', r.status === 404, r.status);
 
 console.log('— bundled real images —');
 for (const img of ['auth-bg.jpg', 'overview-hero.jpg', 'docs-banner.jpg', 'logo.svg', 'avatar-default.svg']) {

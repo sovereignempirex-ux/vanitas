@@ -166,6 +166,7 @@ create table if not exists public.users (
   last_login_at timestamptz
 );
 create unique index if not exists users_email_uniq on public.users (lower(email));
+create unique index if not exists users_username_unique_idx on public.users (lower(username)) where username <> '';
 create index if not exists users_role_idx on public.users (role);
 
 -- ---------------------------------------------------------------------------

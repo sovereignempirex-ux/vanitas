@@ -3,7 +3,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { db, ALL_SCOPES } from './src/server/db.ts';
 import { databasePool, ensureSchema } from './src/server/pg.ts';
-import { createAccount, verifyAccount, createSession, resolveSession, revokeSession, upsertOAuthUser, updateProfile, forgetAccount, getTwoFactorSecret, setTwoFactor, findUserById, invalidateResolveCache, rowToUser } from './src/server/authStore.ts';
+import { createAccount, verifyAccount, createSession, resolveSession, revokeSession, upsertOAuthUser, updateProfile, forgetAccount, getTwoFactorSecret, setTwoFactor, findUserById, invalidateResolveCache, rowToUser, usernameValidationError, isUsernameTaken, findPublicProfile } from './src/server/authStore.ts';
 import { generateTotpSecret, verifyTotp, totpOtpauthUrl } from './src/server/totp.ts';
 import {
   getProviderConfig,
@@ -446,7 +446,8 @@ export async function buildApp() {
     });
   });
 
-  // Profile update — persists name/avatar to the real account (PostgreSQL).
+  // Profile update — persists identity edits to the real account record:
+  // display name + avatar (as before), plus the claimable @username and bio.
   // Avatar accepts an https URL (<=500 chars) or an uploaded image data URL (<=300KB).
   app.patch('/api/v1/auth/profile', async (req, res) => {
     const actor = getActorUser(req);
@@ -460,17 +461,87 @@ export async function buildApp() {
     const isHttpsUrl = avatarUrl === '' || /^https:\/\/[^\s]{5,500}$/.test(avatarUrl);
     const isUploadedImage =
       avatarUrl.length <= 300_000 && /^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$/.test(avatarUrl);
-    if (!isHttpsUrl && !isUploadedImage) {
-      return res.status(400).json({ error: 'Avatar must be an https URL or an uploaded image up to 300KB' });
+    // Bundled same-origin art is a legitimate avatar (the default
+    // /images/avatar-default.svg ships with every account). Strict shape:
+    // exactly /images/<name>.<ext> — no protocol-relative (//host) or
+    // traversal tricks, and never a javascript: URL.
+    const isBundledAsset = /^\/images\/[A-Za-z0-9_\-/]+\.(svg|png|jpe?g|webp|gif)$/.test(avatarUrl);
+    if (!isHttpsUrl && !isUploadedImage && !isBundledAsset) {
+      return res
+        .status(400)
+        .json({ error: 'Avatar must be an https URL, a bundled /images/ asset, or an uploaded image up to 300KB' });
+    }
+
+    // Optional @username — only validated when actually being changed, so
+    // re-saving an older over-long username stays a harmless no-op.
+    let username: string | undefined;
+    if (typeof req.body?.username === 'string') {
+      const candidate = req.body.username.trim().toLowerCase();
+      if (candidate !== (actor.username || '').toLowerCase()) {
+        const uerr = usernameValidationError(candidate);
+        if (uerr) return res.status(400).json({ error: uerr });
+        try {
+          if (await isUsernameTaken(candidate, actor.id)) {
+            return res.status(409).json({ error: 'That username is already taken' });
+          }
+        } catch (err) {
+          console.error('[auth/profile/username]', (err as Error).message);
+          return res.status(500).json({ error: 'Username check failed' });
+        }
+        username = candidate;
+      }
+    }
+
+    // Optional bio (≤200 chars, may be empty to clear).
+    let bio: string | undefined;
+    if (typeof req.body?.bio === 'string') {
+      const value = req.body.bio.trim();
+      if (value.length > 200) {
+        return res.status(400).json({ error: 'Bio must be 200 characters or fewer' });
+      }
+      bio = value;
     }
 
     try {
-      const updated = await updateProfile(actor.id, { name, avatarUrl });
+      const updated = await updateProfile(actor.id, { name, avatarUrl, username, bio });
       if (!updated) return res.status(404).json({ error: 'Account not found' });
+      if (username) {
+        persistAuditLog({
+          actorId: actor.id,
+          actorName: updated.name,
+          actorEmail: updated.email,
+          action: 'USERNAME_CHANGED',
+          category: 'AUTH',
+          target: `${actor.username || 'none'} -> ${username}`,
+          source: detectSource(req),
+          status: 'SUCCESS',
+          ipAddress: req.ip || 'unknown',
+          metadata: { username },
+        });
+      }
       res.json({ user: updated, permissions: permissionsFor(updated) });
     } catch (err) {
       console.error('[auth/profile]', (err as Error).message);
       res.status(500).json({ error: 'Profile update failed' });
+    }
+  });
+
+  // Live availability for the profile's @username field (authenticated).
+  app.get('/api/v1/auth/username-available', async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
+    const username = sanitizeText(req.query?.username, 40).trim().toLowerCase();
+    if (username === (actor.username || '').toLowerCase()) {
+      return res.json({ available: true, current: true });
+    }
+    const uerr = usernameValidationError(username);
+    if (uerr) return res.json({ available: false, reason: uerr });
+    try {
+      const taken = await isUsernameTaken(username, actor.id);
+      res.json(taken ? { available: false, reason: 'That username is already taken' } : { available: true });
+    } catch (err) {
+      console.error('[username-available]', (err as Error).message);
+      res.status(500).json({ error: 'Availability check failed' });
     }
   });
 
@@ -1701,6 +1772,20 @@ export async function buildApp() {
       note: invite.note,
       expiresAt: invite.expiresAt,
     });
+  });
+
+  // Public profile by @username — deliberately minimal for sharing: no email,
+  // no internal ids, nothing the visitor could not already see on a profile.
+  app.get('/api/v1/profiles/:username', async (req, res) => {
+    const username = sanitizeText(req.params.username, 40).trim().toLowerCase();
+    try {
+      const profile = await findPublicProfile(username);
+      if (!profile) return res.status(404).json({ error: 'Profile not found' });
+      res.json({ profile });
+    } catch (err) {
+      console.error('[profiles]', (err as Error).message);
+      res.status(500).json({ error: 'Profile lookup failed' });
+    }
   });
 
   // Admin: permanently delete an account. Your own account is off-limits and

@@ -123,6 +123,16 @@ export function seoForInvitePage(): SeoEntry {
   };
 }
 
+/** Metadata for a public /u/<username> profile page (safe to index). */
+export function seoForPublicProfile(username: string, bio?: string): SeoEntry {
+  return {
+    title: `@${username} — developer profile`,
+    description: bio
+      ? `${bio.slice(0, 140)} — public developer profile of @${username} on Vanitas.`
+      : `Public developer profile of @${username} on Vanitas — roles, verification and account facts.`,
+  };
+}
+
 function setMeta(kind: 'name' | 'property', key: string, content: string) {
   let el = document.head.querySelector<HTMLMetaElement>(`meta[${kind}="${key}"]`);
   if (!el) {

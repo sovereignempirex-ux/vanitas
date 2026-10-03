@@ -5,6 +5,7 @@ import { Sidebar } from './components/Sidebar.tsx';
 import { CommandPalette } from './components/CommandPalette.tsx';
 import { AuthPage } from './pages/AuthPage.tsx';
 import { InvitePage } from './pages/InvitePage.tsx';
+import { ProfilePage } from './pages/ProfilePage.tsx';
 import { AuthModal } from './components/AuthModal.tsx';
 import { VIEW_SEO, seoForAuthPage, seoForInvitePage, setPageSeo } from './lib/seo.ts';
 
@@ -33,10 +34,15 @@ const AppContent: React.FC = () => {
   const authPage: 'login' | 'register' | null = path === '/login' ? 'login' : path === '/register' ? 'register' : null;
   // Developer invite landing page: /invite/<token> (public, no shell).
   const inviteToken = path.startsWith('/invite/') ? path.slice('/invite/'.length) : null;
+  // Public profile: /u/<username> (shareable @username page, no shell).
+  const publicProfileName = path.startsWith('/u/') ? path.slice('/u/'.length) : null;
 
   // Per-view SEO: keep title/description/canonical/OG in sync with what is on
   // screen (auth pages first, then the signed-in dashboard view).
   useEffect(() => {
+    if (publicProfileName) {
+      return; // ProfilePage owns its metadata (needs the fetched bio/name)
+    }
     if (inviteToken) {
       setPageSeo(seoForInvitePage());
       return;
@@ -51,7 +57,7 @@ const AppContent: React.FC = () => {
       return;
     }
     setPageSeo(VIEW_SEO[activeView] || VIEW_SEO.overview);
-  }, [authPage, authLoading, user, activeView, path, inviteToken]);
+  }, [authPage, authLoading, user, activeView, path, inviteToken, publicProfileName]);
 
   const renderActiveView = () => {
     switch (activeView) {
@@ -97,6 +103,11 @@ const AppContent: React.FC = () => {
   // Developer invite landing — standalone public page (like /register).
   if (inviteToken) {
     return <InvitePage token={inviteToken} />;
+  }
+
+  // Public profile — standalone page, no shell (like /invite/<token>).
+  if (publicProfileName !== null) {
+    return <ProfilePage username={publicProfileName} />;
   }
 
   // REAL ACCOUNTS ONLY: the dashboard is gated behind server-verified auth.

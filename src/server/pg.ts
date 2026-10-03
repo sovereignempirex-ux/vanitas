@@ -63,6 +63,8 @@ create index if not exists admin_invites_created_idx on public.admin_invites (cr
 alter table public.admin_invites enable row level security;
 alter table if exists public.users add column if not exists two_factor_secret text not null default '';
 alter table if exists public.users add column if not exists verification text not null default '';
+alter table if exists public.users add column if not exists username text not null default '';
+alter table if exists public.users add column if not exists bio text not null default '';
 `;
 
 let schemaReady: Promise<void> | null = null;
@@ -72,6 +74,19 @@ export function ensureSchema(): Promise<void> {
   if (!schemaReady) {
     schemaReady = databasePool
       .query(SCHEMA_DDL)
+      .then(() =>
+        // Best effort: usernames are unique from now on, but a database that
+        // already contains historical duplicates must keep serving traffic —
+        // application-level checks (register + PATCH) still enforce uniqueness.
+        databasePool!
+          .query(
+            `create unique index if not exists users_username_unique_idx
+               on public.users (lower(username)) where username <> ''`,
+          )
+          .catch((err: Error) => {
+            console.warn('[schema] username unique index skipped (fix duplicates first):', err.message);
+          }),
+      )
       .then(() => undefined)
       .catch((err: Error) => {
         console.error('[schema] ensure failed:', err.message);

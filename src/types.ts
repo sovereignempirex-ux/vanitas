@@ -48,6 +48,21 @@ export interface User {
   };
 }
 
+/**
+ * Public, shareable profile for /u/<username> — what anyone with the link can
+ * see. Never includes email or internal ids.
+ */
+export interface PublicProfile {
+  name: string;
+  username: string;
+  avatarUrl: string;
+  bio: string;
+  role: UserRole;
+  verification: VerificationType;
+  createdAt: string;
+  connectedAccounts: User['connectedAccounts'];
+}
+
 export type PermissionScope =
   | 'users.read'
   | 'users.write'

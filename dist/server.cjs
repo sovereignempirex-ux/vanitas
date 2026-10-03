@@ -760,12 +760,26 @@ create index if not exists admin_invites_created_idx on public.admin_invites (cr
 alter table public.admin_invites enable row level security;
 alter table if exists public.users add column if not exists two_factor_secret text not null default '';
 alter table if exists public.users add column if not exists verification text not null default '';
+alter table if exists public.users add column if not exists username text not null default '';
+alter table if exists public.users add column if not exists bio text not null default '';
 `;
 var schemaReady = null;
 function ensureSchema() {
   if (!databasePool) return Promise.resolve();
   if (!schemaReady) {
-    schemaReady = databasePool.query(SCHEMA_DDL).then(() => void 0).catch((err) => {
+    schemaReady = databasePool.query(SCHEMA_DDL).then(
+      () => (
+        // Best effort: usernames are unique from now on, but a database that
+        // already contains historical duplicates must keep serving traffic —
+        // application-level checks (register + PATCH) still enforce uniqueness.
+        databasePool.query(
+          `create unique index if not exists users_username_unique_idx
+               on public.users (lower(username)) where username <> ''`
+        ).catch((err) => {
+          console.warn("[schema] username unique index skipped (fix duplicates first):", err.message);
+        })
+      )
+    ).then(() => void 0).catch((err) => {
       console.error("[schema] ensure failed:", err.message);
       schemaReady = null;
       throw err;
@@ -969,14 +983,83 @@ function isAdminEmail(email) {
   const list = (process.env.ADMIN_EMAILS || "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
   return list.includes(email.toLowerCase());
 }
+var RESERVED_USERNAMES = /* @__PURE__ */ new Set([
+  "admin",
+  "administrator",
+  "root",
+  "moderator",
+  "mod",
+  "staff",
+  "system",
+  "official",
+  "vanitas",
+  "api",
+  "bot",
+  "support",
+  "help",
+  "me",
+  "settings",
+  "login",
+  "register",
+  "invite",
+  "auth",
+  "dashboard",
+  "profile",
+  "profiles",
+  "user",
+  "null",
+  "undefined",
+  "security",
+  "billing",
+  "legal",
+  "tos",
+  "privacy",
+  "docs",
+  "playground",
+  "console",
+  "home",
+  "you"
+]);
+function usernameValidationError(raw) {
+  const u = raw.trim().toLowerCase();
+  if (u.length < 3 || u.length > 24) return "Username must be between 3 and 24 characters";
+  if (!/^[a-z0-9_]+$/.test(u)) return "Username may only contain letters, numbers and underscores";
+  if (RESERVED_USERNAMES.has(u)) return "That username is reserved";
+  return null;
+}
+function usernameBaseFromEmail(email) {
+  return (email.split("@")[0] || "user").toLowerCase().replace(/[^a-z0-9_]/g, "_").slice(0, 22) || "user";
+}
 function usernameFromEmail(email, isTaken) {
-  const base = (email.split("@")[0] || "user").toLowerCase().replace(/[^a-z0-9_]/g, "_").slice(0, 32) || "user";
+  const base = usernameBaseFromEmail(email);
   let candidate = base;
   let i = 1;
-  while (isTaken(candidate)) {
-    candidate = `${base.slice(0, 28)}${++i}`;
+  while (isTaken(candidate) || RESERVED_USERNAMES.has(candidate)) {
+    candidate = `${base.slice(0, 21)}${++i}`;
   }
   return candidate;
+}
+async function uniqueUsernameFromEmailPg(email) {
+  const base = usernameBaseFromEmail(email);
+  let candidate = base;
+  let i = 1;
+  while (i < 60) {
+    const hit = await databasePool.query("select 1 from public.users where lower(username) = $1", [candidate]);
+    if (!hit.rowCount && !RESERVED_USERNAMES.has(candidate)) return candidate;
+    candidate = `${base.slice(0, 21)}${++i}`;
+  }
+  return `${base.slice(0, 14)}_${Date.now().toString(36)}`;
+}
+async function isUsernameTaken(username, exceptUserId) {
+  const u = username.trim().toLowerCase();
+  if (databasePool) {
+    const r = await databasePool.query(
+      "select 1 from public.users where lower(username) = $1 and id <> $2",
+      [u, exceptUserId || ""]
+    );
+    return !!r.rowCount;
+  }
+  return db.users.some((x) => (x.username || "").toLowerCase() === u && x.id !== exceptUserId);
 }
 function rowToUser(row) {
   const iso = (v) => v instanceof Date ? v.toISOString() : v || void 0;
@@ -1007,7 +1090,7 @@ async function createAccount(params) {
       const existing = await databasePool.query("select 1 from public.users where lower(email) = $1", [email]);
       if (existing.rowCount) return { ok: false, status: 409, error: "An account with this email already exists" };
       const id = secureId("usr");
-      const username = usernameFromEmail(email, () => false);
+      const username = await uniqueUsernameFromEmailPg(email);
       const result = await databasePool.query(
         `insert into public.users (id, email, name, username, avatar_url, role, password_hash, created_at, last_login_at)
          values ($1, lower($2), $3, $4, $5, $6, $7, now(), now())
@@ -1051,8 +1134,14 @@ function invalidateResolveCache(userId) {
 async function updateProfile(userId, updates) {
   if (databasePool) {
     const result = await databasePool.query(
-      "update public.users set name = $2, avatar_url = $3 where id = $1 returning *",
-      [userId, updates.name, updates.avatarUrl]
+      `update public.users
+          set name = $2,
+              avatar_url = $3,
+              username = coalesce($4, username),
+              bio = coalesce($5, bio)
+        where id = $1
+        returning *`,
+      [userId, updates.name, updates.avatarUrl, updates.username ?? null, updates.bio ?? null]
     );
     const user2 = result.rows[0] ? rowToUser(result.rows[0]) : null;
     if (user2) invalidateResolveCache(userId);
@@ -1062,8 +1151,31 @@ async function updateProfile(userId, updates) {
   if (!user) return null;
   user.name = updates.name;
   user.avatarUrl = updates.avatarUrl || DEFAULT_AVATAR;
+  if (updates.username !== void 0) user.username = updates.username;
+  if (updates.bio !== void 0) user.bio = updates.bio || void 0;
   invalidateResolveCache(userId);
   return user;
+}
+async function findPublicProfile(username) {
+  const u = username.trim().toLowerCase();
+  let user = null;
+  if (databasePool) {
+    const r = await databasePool.query("select * from public.users where lower(username) = $1", [u]);
+    user = r.rows[0] ? rowToUser(r.rows[0]) : null;
+  } else {
+    user = db.users.find((x) => (x.username || "").toLowerCase() === u) || null;
+  }
+  if (!user) return null;
+  return {
+    name: user.name,
+    username: user.username,
+    avatarUrl: user.avatarUrl,
+    bio: user.bio || "",
+    role: user.role,
+    verification: user.verification,
+    createdAt: user.createdAt,
+    connectedAccounts: user.connectedAccounts
+  };
 }
 async function forgetAccount(userId) {
   if (databasePool) {
@@ -1265,7 +1377,7 @@ async function upsertOAuthUser(p) {
       }
       const finalRole = await pickInitialRole(email || "oauth@unknown");
       const id = secureId("usr");
-      const username = usernameFromEmail(email || `${provider}${providerId}`, () => false);
+      const username = await uniqueUsernameFromEmailPg(email || `${provider}${providerId}`);
       await databasePool.query(
         `with new_user as (
            insert into public.users (id, email, name, username, avatar_url, role, password_hash, created_at, last_login_at)
@@ -3485,16 +3597,73 @@ async function buildApp() {
     }
     const isHttpsUrl = avatarUrl === "" || /^https:\/\/[^\s]{5,500}$/.test(avatarUrl);
     const isUploadedImage = avatarUrl.length <= 3e5 && /^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$/.test(avatarUrl);
-    if (!isHttpsUrl && !isUploadedImage) {
-      return res.status(400).json({ error: "Avatar must be an https URL or an uploaded image up to 300KB" });
+    const isBundledAsset = /^\/images\/[A-Za-z0-9_\-/]+\.(svg|png|jpe?g|webp|gif)$/.test(avatarUrl);
+    if (!isHttpsUrl && !isUploadedImage && !isBundledAsset) {
+      return res.status(400).json({ error: "Avatar must be an https URL, a bundled /images/ asset, or an uploaded image up to 300KB" });
+    }
+    let username;
+    if (typeof req.body?.username === "string") {
+      const candidate = req.body.username.trim().toLowerCase();
+      if (candidate !== (actor.username || "").toLowerCase()) {
+        const uerr = usernameValidationError(candidate);
+        if (uerr) return res.status(400).json({ error: uerr });
+        try {
+          if (await isUsernameTaken(candidate, actor.id)) {
+            return res.status(409).json({ error: "That username is already taken" });
+          }
+        } catch (err) {
+          console.error("[auth/profile/username]", err.message);
+          return res.status(500).json({ error: "Username check failed" });
+        }
+        username = candidate;
+      }
+    }
+    let bio;
+    if (typeof req.body?.bio === "string") {
+      const value = req.body.bio.trim();
+      if (value.length > 200) {
+        return res.status(400).json({ error: "Bio must be 200 characters or fewer" });
+      }
+      bio = value;
     }
     try {
-      const updated = await updateProfile(actor.id, { name, avatarUrl });
+      const updated = await updateProfile(actor.id, { name, avatarUrl, username, bio });
       if (!updated) return res.status(404).json({ error: "Account not found" });
+      if (username) {
+        persistAuditLog({
+          actorId: actor.id,
+          actorName: updated.name,
+          actorEmail: updated.email,
+          action: "USERNAME_CHANGED",
+          category: "AUTH",
+          target: `${actor.username || "none"} -> ${username}`,
+          source: detectSource(req),
+          status: "SUCCESS",
+          ipAddress: req.ip || "unknown",
+          metadata: { username }
+        });
+      }
       res.json({ user: updated, permissions: permissionsFor(updated) });
     } catch (err) {
       console.error("[auth/profile]", err.message);
       res.status(500).json({ error: "Profile update failed" });
+    }
+  });
+  app.get("/api/v1/auth/username-available", async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
+    const username = sanitizeText(req.query?.username, 40).trim().toLowerCase();
+    if (username === (actor.username || "").toLowerCase()) {
+      return res.json({ available: true, current: true });
+    }
+    const uerr = usernameValidationError(username);
+    if (uerr) return res.json({ available: false, reason: uerr });
+    try {
+      const taken = await isUsernameTaken(username, actor.id);
+      res.json(taken ? { available: false, reason: "That username is already taken" } : { available: true });
+    } catch (err) {
+      console.error("[username-available]", err.message);
+      res.status(500).json({ error: "Availability check failed" });
     }
   });
   app.post("/api/v1/auth/register", async (req, res) => {
@@ -4530,6 +4699,17 @@ async function buildApp() {
       note: invite.note,
       expiresAt: invite.expiresAt
     });
+  });
+  app.get("/api/v1/profiles/:username", async (req, res) => {
+    const username = sanitizeText(req.params.username, 40).trim().toLowerCase();
+    try {
+      const profile = await findPublicProfile(username);
+      if (!profile) return res.status(404).json({ error: "Profile not found" });
+      res.json({ profile });
+    } catch (err) {
+      console.error("[profiles]", err.message);
+      res.status(500).json({ error: "Profile lookup failed" });
+    }
   });
   app.delete("/api/v1/admin/users/:id", async (req, res) => {
     const actor = requireAdmin(req, res);

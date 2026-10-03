@@ -13,7 +13,8 @@
     { "source": "/api/(.*)", "destination": "/api/index" },
     { "source": "/register", "destination": "/index.html" },
     { "source": "/login", "destination": "/index.html" },
-    { "source": "/invite/(.*)", "destination": "/index.html" }
+    { "source": "/invite/(.*)", "destination": "/index.html" },
+    { "source": "/u/(.*)", "destination": "/index.html" }
   ],
   "headers": [
     {

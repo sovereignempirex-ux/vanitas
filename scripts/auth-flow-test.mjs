@@ -142,11 +142,91 @@ r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'X',
 check('short display name → 400', r.status === 400, r);
 r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'Bad Avatar', avatarUrl: 'javascript:alert(1)' } });
 check('non-https avatar URL → 400', r.status === 400, r);
+r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'Default Avatar', avatarUrl: '/images/avatar-default.svg' } });
+check('bundled /images/ default avatar → 200 (save works for default avatar)', r.status === 200, r);
 const tinyPng = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'Upload Tester', avatarUrl: tinyPng } });
 check('uploaded image data-URL avatar → 200', r.status === 200 && String(r.json?.user?.avatarUrl || '').startsWith('data:image/png'), r.json?.user);
 r = await call('PATCH', '/auth/profile', { body: { name: 'Anonymous', avatarUrl: '' } });
 check('PATCH profile without token → 401', r.status === 401, r);
+
+console.log('— @username + bio (claim, availability, public profile) —');
+r = await call('GET', '/auth/username-available?username=freshhandle99', { token: loginToken });
+check('availability: free username → available', r.status === 200 && r.json?.available === true, r.json);
+r = await call('GET', '/auth/username-available?username=freshhandle99');
+check('availability without session → 401', r.status === 401, r);
+
+r = await call('PATCH', '/auth/profile', {
+  token: loginToken,
+  body: { name: 'Renamed Tester', avatarUrl: '', username: 'renamed_tester', bio: 'Builds bots and API gateways.' },
+});
+check(
+  'claim @username + bio → 200',
+  r.status === 200 && r.json?.user?.username === 'renamed_tester' && r.json?.user?.bio === 'Builds bots and API gateways.',
+  r.json,
+);
+r = await call('GET', '/auth/me', { token: loginToken });
+check(
+  'username + bio persist server-side',
+  r.json?.user?.username === 'renamed_tester' && r.json?.user?.bio === 'Builds bots and API gateways.',
+  r.json?.user,
+);
+r = await call('GET', '/auth/username-available?username=renamed_tester', { token: loginToken });
+check('own username reports available/current', r.json?.available === true, r.json);
+
+r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'Renamed Tester', avatarUrl: '', username: 'ab' } });
+check('too-short username → 400', r.status === 400, r);
+r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'Renamed Tester', avatarUrl: '', username: 'admin' } });
+check('reserved username → 400', r.status === 400, r);
+r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'Renamed Tester', avatarUrl: '', username: 'has space' } });
+check('invalid username characters → 400', r.status === 400, r);
+r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'Renamed Tester', avatarUrl: '', bio: 'x'.repeat(201) } });
+check('bio over 200 chars → 400', r.status === 400, r);
+r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'Renamed Tester', avatarUrl: '', username: 'renamed_tester' } });
+check('re-saving own username → 200 (no-op)', r.status === 200, r);
+
+const secondToken = (await call('POST', '/auth/register', { body: { email: `second_${Date.now()}@example.com`, password, name: 'Second Account' } })).json?.token;
+check('second account registered', typeof secondToken === 'string', secondToken);
+const me2 = await call('GET', '/auth/me', { token: secondToken });
+check('signup auto-generated a username', typeof me2.json?.user?.username === 'string' && me2.json.user.username.length >= 3, me2.json?.user);
+r = await call('PATCH', '/auth/profile', { token: secondToken, body: { name: 'Second Account', avatarUrl: '', username: 'renamed_tester' } });
+check('taken username → 409', r.status === 409, r);
+r = await call('GET', '/auth/username-available?username=renamed_tester', { token: secondToken });
+check('availability reports taken → false', r.status === 200 && r.json?.available === false, r.json);
+
+// Same email local part, different domain → usernames must not collide.
+const stamp2 = Date.now();
+const dupA = await call('POST', '/auth/register', { body: { email: `sameshot_${stamp2}@example.com`, password, name: 'Same Local A' } });
+const dupB = await call('POST', '/auth/register', { body: { email: `sameshot_${stamp2}@other.org`, password, name: 'Same Local B' } });
+check(
+  'same local part → distinct usernames',
+  dupA.status === 201 && dupB.status === 201 && !!dupA.json?.user?.username && dupA.json.user.username !== dupB.json?.user?.username,
+  { a: dupA.json?.user?.username, b: dupB.json?.user?.username },
+);
+
+// Public, shareable profile by @username — public-safe fields only.
+r = await call('GET', '/profiles/renamed_tester');
+check(
+  'public profile → 200 + bio, no email/id leak',
+  r.status === 200 &&
+    r.json?.profile?.name === 'Renamed Tester' &&
+    r.json?.profile?.bio === 'Builds bots and API gateways.' &&
+    !('email' in (r.json?.profile || {})) &&
+    !('id' in (r.json?.profile || {})),
+  r.json,
+);
+r = await call('GET', '/profiles/definitely_missing_user');
+check('unknown public profile → 404', r.status === 404, r);
+
+// Cleanup: remove the extra accounts so the suite still ends with an empty DB.
+const cl1 = await call('DELETE', '/auth/account', { token: secondToken });
+const cl2 = await call('DELETE', '/auth/account', { token: dupA.json?.token });
+const cl3 = await call('DELETE', '/auth/account', { token: dupB.json?.token });
+check(
+  'cleanup: extra accounts deleted → 200',
+  cl1.status === 200 && cl2.status === 200 && cl3.status === 200,
+  [cl1.status, cl2.status, cl3.status],
+);
 
 console.log('— social login providers —');
 r = await call('GET', '/auth/providers');

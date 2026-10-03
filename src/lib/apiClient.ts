@@ -26,6 +26,7 @@ import {
   DocComment,
   AiChatHistoryMessage,
   AdminInvite,
+  PublicProfile,
 } from '../types.ts';
 
 class ApiClient {
@@ -142,12 +143,24 @@ class ApiClient {
     }
   }
 
-  /** Persist profile edits (display name + avatar) to the real account. */
-  async updateProfile(params: { name: string; avatarUrl: string }) {
+  /** Persist profile edits. `username`/`bio` are optional — omit = unchanged. */
+  async updateProfile(params: { name: string; avatarUrl: string; username?: string; bio?: string }) {
     return this.request<{ user: User; permissions: PermissionScope[] }>('/auth/profile', {
       method: 'PATCH',
       body: JSON.stringify(params),
     });
+  }
+
+  /** Live @username availability for the signed-in account. */
+  async getUsernameAvailability(username: string) {
+    return this.request<{ available: boolean; reason?: string; current?: boolean }>(
+      `/auth/username-available?username=${encodeURIComponent(username)}`,
+    );
+  }
+
+  /** Public, shareable profile for /u/<username>. */
+  async getPublicProfile(username: string) {
+    return this.request<{ profile: PublicProfile }>(`/profiles/${encodeURIComponent(username)}`);
   }
 
   // Real two-factor authentication (RFC 6238 TOTP).

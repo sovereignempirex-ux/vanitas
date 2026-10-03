@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import { databasePool } from './pg.ts';
 import { db } from './db.ts';
 import { secureId } from './security.ts';
-import type { User, UserRole } from '../types.ts';
+import type { User, UserRole, PublicProfile } from '../types.ts';
 
 // ---------------------------------------------------------------------------
 // Real account authentication.
@@ -92,14 +92,71 @@ function isAdminEmail(email: string): boolean {
   return list.includes(email.toLowerCase());
 }
 
+// ---------------------------------------------------------------------------
+// Public @username identity — lowercase, [a-z0-9_]{3,24}, never a route or
+// impersonation word. Auto-generated at signup and claimable/editable later
+// from the profile (PATCH /auth/profile).
+// ---------------------------------------------------------------------------
+export const RESERVED_USERNAMES = new Set([
+  'admin', 'administrator', 'root', 'moderator', 'mod', 'staff', 'system',
+  'official', 'vanitas', 'api', 'bot', 'support', 'help', 'me', 'settings',
+  'login', 'register', 'invite', 'auth', 'dashboard', 'profile', 'profiles',
+  'user', 'null', 'undefined', 'security', 'billing', 'legal', 'tos',
+  'privacy', 'docs', 'playground', 'console', 'home', 'you',
+]);
+
+/** Returns a human-readable reason the username cannot be used, or null. */
+export function usernameValidationError(raw: string): string | null {
+  const u = raw.trim().toLowerCase();
+  if (u.length < 3 || u.length > 24) return 'Username must be between 3 and 24 characters';
+  if (!/^[a-z0-9_]+$/.test(u)) return 'Username may only contain letters, numbers and underscores';
+  if (RESERVED_USERNAMES.has(u)) return 'That username is reserved';
+  return null;
+}
+
+function usernameBaseFromEmail(email: string): string {
+  return (email.split('@')[0] || 'user').toLowerCase().replace(/[^a-z0-9_]/g, '_').slice(0, 22) || 'user';
+}
+
 function usernameFromEmail(email: string, isTaken: (u: string) => boolean): string {
-  const base = (email.split('@')[0] || 'user').toLowerCase().replace(/[^a-z0-9_]/g, '_').slice(0, 32) || 'user';
+  const base = usernameBaseFromEmail(email);
   let candidate = base;
   let i = 1;
-  while (isTaken(candidate)) {
-    candidate = `${base.slice(0, 28)}${++i}`;
+  while (isTaken(candidate) || RESERVED_USERNAMES.has(candidate)) {
+    candidate = `${base.slice(0, 21)}${++i}`;
   }
   return candidate;
+}
+
+/**
+ * PostgreSQL signup path: the synchronous in-memory uniqueness check cannot
+ * see existing rows, so pick a username that is actually free (same algorithm
+ * as usernameFromEmail: base, then base2, base3…). Fixes duplicate usernames
+ * when two accounts share an email local part (a@x.com vs a@y.com).
+ */
+async function uniqueUsernameFromEmailPg(email: string): Promise<string> {
+  const base = usernameBaseFromEmail(email);
+  let candidate = base;
+  let i = 1;
+  while (i < 60) {
+    const hit = await databasePool!.query('select 1 from public.users where lower(username) = $1', [candidate]);
+    if (!hit.rowCount && !RESERVED_USERNAMES.has(candidate)) return candidate;
+    candidate = `${base.slice(0, 21)}${++i}`;
+  }
+  return `${base.slice(0, 14)}_${Date.now().toString(36)}`;
+}
+
+/** Case-insensitive uniqueness check (optionally ignoring one account). */
+export async function isUsernameTaken(username: string, exceptUserId?: string): Promise<boolean> {
+  const u = username.trim().toLowerCase();
+  if (databasePool) {
+    const r = await databasePool.query(
+      'select 1 from public.users where lower(username) = $1 and id <> $2',
+      [u, exceptUserId || ''],
+    );
+    return !!r.rowCount;
+  }
+  return db.users.some((x) => (x.username || '').toLowerCase() === u && x.id !== exceptUserId);
 }
 
 export function rowToUser(row: Record<string, any>): User {
@@ -139,7 +196,7 @@ export async function createAccount(params: { email: string; password: string; n
       if (existing.rowCount) return { ok: false, status: 409, error: 'An account with this email already exists' };
 
       const id = secureId('usr');
-      const username = usernameFromEmail(email, () => false);
+      const username = await uniqueUsernameFromEmailPg(email);
       const result = await databasePool.query(
         `insert into public.users (id, email, name, username, avatar_url, role, password_hash, created_at, last_login_at)
          values ($1, lower($2), $3, $4, $5, $6, $7, now(), now())
@@ -186,15 +243,22 @@ export function invalidateResolveCache(userId: string): void {
   }
 }
 
-// Persist real profile edits (display name + avatar) to the account record.
+// Persist real profile edits to the account record: display name + avatar,
+// plus the claimable @username and bio when provided (undefined = unchanged).
 export async function updateProfile(
   userId: string,
-  updates: { name: string; avatarUrl: string },
+  updates: { name: string; avatarUrl: string; username?: string; bio?: string },
 ): Promise<User | null> {
   if (databasePool) {
     const result = await databasePool.query(
-      'update public.users set name = $2, avatar_url = $3 where id = $1 returning *',
-      [userId, updates.name, updates.avatarUrl],
+      `update public.users
+          set name = $2,
+              avatar_url = $3,
+              username = coalesce($4, username),
+              bio = coalesce($5, bio)
+        where id = $1
+        returning *`,
+      [userId, updates.name, updates.avatarUrl, updates.username ?? null, updates.bio ?? null],
     );
     const user = result.rows[0] ? rowToUser(result.rows[0]) : null;
     if (user) invalidateResolveCache(userId); // /auth/me must reflect fresh edits
@@ -205,8 +269,33 @@ export async function updateProfile(
   if (!user) return null;
   user.name = updates.name;
   user.avatarUrl = updates.avatarUrl || DEFAULT_AVATAR;
+  if (updates.username !== undefined) user.username = updates.username;
+  if (updates.bio !== undefined) user.bio = updates.bio || undefined;
   invalidateResolveCache(userId);
   return user;
+}
+
+/** Public, shareable profile for /u/<username> — no email, no internal ids. */
+export async function findPublicProfile(username: string): Promise<PublicProfile | null> {
+  const u = username.trim().toLowerCase();
+  let user: User | null = null;
+  if (databasePool) {
+    const r = await databasePool.query('select * from public.users where lower(username) = $1', [u]);
+    user = r.rows[0] ? rowToUser(r.rows[0]) : null;
+  } else {
+    user = db.users.find((x) => (x.username || '').toLowerCase() === u) || null;
+  }
+  if (!user) return null;
+  return {
+    name: user.name,
+    username: user.username,
+    avatarUrl: user.avatarUrl,
+    bio: user.bio || '',
+    role: user.role,
+    verification: user.verification,
+    createdAt: user.createdAt,
+    connectedAccounts: user.connectedAccounts,
+  };
 }
 
 /**
@@ -468,7 +557,7 @@ export async function upsertOAuthUser(p: OAuthIdentityParams): Promise<User> {
       // 3) Brand new account + identity, created atomically (CTE).
       const finalRole = await pickInitialRole(email || 'oauth@unknown');
       const id = secureId('usr');
-      const username = usernameFromEmail(email || `${provider}${providerId}`, () => false);
+      const username = await uniqueUsernameFromEmailPg(email || `${provider}${providerId}`);
       await databasePool.query(
         `with new_user as (
            insert into public.users (id, email, name, username, avatar_url, role, password_hash, created_at, last_login_at)
