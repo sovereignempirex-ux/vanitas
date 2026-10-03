@@ -30,6 +30,7 @@ import {
   ExternalLink,
   Layers,
   HelpCircle,
+  MessageSquare,
 } from 'lucide-react';
 
 interface CommandPaletteProps {
@@ -116,6 +117,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({ isOpen, onClose 
     ...(role === 'ADMIN'
       ? [
           { id: 'admin-center', label: 'Manage Users & RBAC Matrix', category: 'Admin Center', icon: Users, view: 'admin-center' },
+          { id: 'admin-moderation', label: 'Review Comments & Product Suggestions', category: 'Admin Center', icon: MessageSquare, view: 'admin-moderation' },
           { id: 'admin-logs', label: 'Inspect Audit Logs & Export CSV', category: 'Admin Center', icon: ScrollText, view: 'admin-logs' },
           { id: 'admin-permissions', label: 'System Permissions Matrix', category: 'Admin Center', icon: Lock, view: 'admin-permissions' },
           { id: 'admin-flags', label: 'Toggle Feature Flags', category: 'Admin Center', icon: Sliders, view: 'admin-flags' },

@@ -3192,6 +3192,16 @@ async function listComments(docId) {
   );
   return result.rows.map(mapComment);
 }
+async function listAllComments(limit = 200) {
+  if (!databasePool) return [...memoryComments].reverse().slice(0, limit);
+  await ensureSchema();
+  const size = Math.min(Math.max(limit, 1), 500);
+  const result = await databasePool.query(
+    "select * from public.comments order by created_at desc limit $1",
+    [size]
+  );
+  return result.rows.map(mapComment);
+}
 async function createComment(params) {
   const id = secureId("cmt");
   if (!databasePool) {
@@ -4187,6 +4197,16 @@ async function buildApp() {
     } catch (err) {
       console.error("[admin/users] delete failed:", err.message);
       res.status(500).json({ error: "Account deletion failed" });
+    }
+  });
+  app.get("/api/v1/admin/comments", async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const comments = await listAllComments();
+      res.json({ comments, total: comments.length });
+    } catch (err) {
+      console.error("[admin/comments]", err.message);
+      res.status(500).json({ error: "Failed to load comments" });
     }
   });
   app.get("/api/v1/admin/logs", (req, res) => {

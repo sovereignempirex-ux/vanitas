@@ -317,6 +317,10 @@ class ApiClient {
     return this.request<{ success: boolean; user: { id: string; name: string } }>(`/admin/users/${id}`, { method: 'DELETE' });
   }
 
+  async listAdminComments() {
+    return this.request<{ comments: DocComment[]; total: number }>('/admin/comments');
+  }
+
   async getAdminStatistics() {
     return this.request<{ stats: SystemStats; threats: SecurityThreat[] }>('/admin/statistics');
   }

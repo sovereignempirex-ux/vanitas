@@ -182,6 +182,49 @@ check('malformed user id -> 400', badId.status === 400, badId.status);
 const missing = await call('DELETE', '/admin/users/usr_does_not_exist', { token: tokenA });
 check('unknown user id -> 404', missing.status === 404, missing.status);
 
+console.log('— moderation: comments across all docs —');
+const anonMod = await call('GET', '/admin/comments');
+check('anon GET /admin/comments -> 401', anonMod.status === 401, anonMod.status);
+const bMod = await call('GET', '/admin/comments', { token: tokenB });
+check('B GET /admin/comments -> 403', bMod.status === 403, bMod.status);
+const modPost = await call('POST', '/comments/getting-started', { token: tokenB, body: { body: 'Moderation target comment for the admin suite.' } });
+check('B posts a moderation comment -> 201', modPost.status === 201, modPost.status);
+const mod1 = await call('GET', '/admin/comments', { token: tokenA });
+const target = (mod1.json?.comments || []).find((x) => String(x.body || '').includes('Moderation target'));
+check('A GET /admin/comments -> 200 + sees B comment', mod1.status === 200 && !!target, { status: mod1.status, total: mod1.json?.total });
+const modDel = target ? await call('DELETE', `/comments/${target.id}`, { token: tokenA }) : { status: 0 };
+check('A deletes B comment (admin override) -> 200', modDel.status === 200, modDel.status);
+const mod2 = await call('GET', '/admin/comments', { token: tokenA });
+check(
+  'deleted comment gone from moderation list',
+  mod2.status === 200 && !(mod2.json?.comments || []).some((x) => String(x.body || '').includes('Moderation target')),
+  { status: mod2.status, total: mod2.json?.total },
+);
+
+console.log('— moderation: product suggestion review queue —');
+const anonSug = await call('GET', '/admin/suggestions');
+check('anon GET /admin/suggestions -> 401', anonSug.status === 401, anonSug.status);
+const bSug = await call('GET', '/admin/suggestions', { token: tokenB });
+check('B GET /admin/suggestions -> 403', bSug.status === 403, bSug.status);
+const sug = await call('POST', '/suggestions', {
+  token: tokenB,
+  body: { title: 'Moderation queue test', details: 'Details for the admin review queue test.', category: 'feature' },
+});
+check('B submits a suggestion -> 201', sug.status === 201 && !!sug.json?.suggestion, sug.json ?? sug.status);
+const sugId = sug.json?.suggestion?.id;
+const sugList = await call('GET', '/admin/suggestions', { token: tokenA });
+check(
+  'A sees the suggestion in the queue',
+  sugList.status === 200 && (sugList.json?.suggestions || []).some((s) => s.id === sugId),
+  { status: sugList.status, count: sugList.json?.suggestions?.length },
+);
+const sugPatch = await call('PATCH', `/admin/suggestions/${sugId}`, { token: tokenA, body: { status: 'reviewing' } });
+check('A moves suggestion to reviewing -> 200', sugPatch.status === 200 && sugPatch.json?.suggestion?.status === 'reviewing', sugPatch.json);
+const sugResolve = await call('PATCH', `/admin/suggestions/${sugId}`, { token: tokenA, body: { status: 'resolved' } });
+check('A resolves suggestion -> 200', sugResolve.status === 200 && sugResolve.json?.suggestion?.status === 'resolved', sugResolve.json);
+const sugBad = await call('PATCH', `/admin/suggestions/${sugId}`, { token: tokenA, body: { status: 'nonsense' } });
+check('invalid suggestion status -> 400', sugBad.status === 400, sugBad.status);
+
 console.log('— B writes content, admin deletes the account fully —');
 const c = await call('POST', '/comments/getting-started', { token: tokenB, body: { body: 'Temporary comment from the admin suite.' } });
 check('B posts a comment -> 201', c.status === 201, c.status);

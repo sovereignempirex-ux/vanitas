@@ -62,6 +62,7 @@ const AppContent: React.FC = () => {
       case 'admin-permissions':
       case 'admin-flags':
       case 'admin-emergency':
+      case 'admin-moderation':
         return <AdminCenterView />;
       case 'admin-logs':
         return <AuditLogsView />;

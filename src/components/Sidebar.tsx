@@ -16,6 +16,7 @@ import {
   Lock,
   Sliders,
   AlertOctagon,
+  MessageSquare,
   ChevronRight,
   Radio,
   Globe,
@@ -68,6 +69,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen, setIsMobileOpen 
     title: 'ADMIN CONTROL CENTER',
     items: [
       { id: 'admin-center', label: 'Overview & Users', icon: Users, badge: 'RBAC' },
+      { id: 'admin-moderation', label: 'Moderation & Suggestions', icon: MessageSquare, badge: 'Live' },
       { id: 'admin-logs', label: 'Audit Logs & CSV', icon: ScrollText, badge: '500+' },
       { id: 'admin-permissions', label: 'Permissions Matrix', icon: Lock, badge: null },
       { id: 'admin-flags', label: 'Feature Flags', icon: Sliders, badge: null },

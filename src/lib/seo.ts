@@ -56,6 +56,11 @@ export const VIEW_SEO: Record<string, SeoEntry> = {
     title: 'Emergency Controls',
     description: 'Maintenance mode and emergency controls for the Vanitas platform (administrators only).',
   },
+  'admin-moderation': {
+    title: 'Moderation & Suggestions',
+    description:
+      'Review every user comment across the docs and triage product suggestions on Vanitas (administrators only).',
+  },
   'admin-logs': {
     title: 'Audit Logs',
     description: 'Search and export the immutable audit trail of authentication, key and gateway events on Vanitas.',

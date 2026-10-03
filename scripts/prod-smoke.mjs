@@ -108,6 +108,10 @@ r = await call('GET', '/admin/feature-flags');
 check('GET /admin/feature-flags without session → 401', r.status === 401, r);
 r = await call('GET', '/admin/statistics');
 check('GET /admin/statistics without session → 401', r.status === 401, r);
+r = await call('GET', '/admin/comments');
+check('GET /admin/comments without session → 401', r.status === 401, r);
+r = await call('GET', '/admin/suggestions');
+check('GET /admin/suggestions without session → 401', r.status === 401, r);
 
 console.log('— bundled real images —');
 for (const img of ['auth-bg.jpg', 'overview-hero.jpg', 'docs-banner.jpg', 'logo.svg', 'avatar-default.svg']) {
