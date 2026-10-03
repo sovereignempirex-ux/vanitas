@@ -28,7 +28,7 @@ interface HeaderProps {
 }
 
 export const Header: React.FC<HeaderProps> = ({ onOpenCommandPalette }) => {
-  const { user, role, toggleRole, logout, setActiveView, isAuthModalOpen, setIsAuthModalOpen, clientSource, setClientSource } = useAuth();
+  const { user, role, logout, setActiveView, isAuthModalOpen, setIsAuthModalOpen, clientSource, setClientSource } = useAuth();
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
   const [isNotifOpen, setIsNotifOpen] = useState(false);
   const [isSourceMenuOpen, setIsSourceMenuOpen] = useState(false);
@@ -152,19 +152,18 @@ export const Header: React.FC<HeaderProps> = ({ onOpenCommandPalette }) => {
             )}
           </div>
 
-          {/* Quick RBAC Role Switcher with Server-Side Guard Trigger */}
-          <button
-            onClick={toggleRole}
-            className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold tracking-wider transition-all border ${
+          {/* Real RBAC role — synced from the server via /auth/me, never toggled client-side. */}
+          <div
+            className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold tracking-wider border ${
               role === 'ADMIN'
-                ? 'bg-amber-500/10 text-amber-300 border-amber-500/30 hover:bg-amber-500/20 shadow-[0_0_15px_rgba(245,158,11,0.15)]'
-                : 'bg-blue-500/10 text-blue-300 border-blue-500/30 hover:bg-blue-500/20 shadow-[0_0_15px_rgba(59,130,246,0.15)]'
+                ? 'bg-amber-500/10 text-amber-300 border-amber-500/30 shadow-[0_0_15px_rgba(245,158,11,0.15)]'
+                : 'bg-blue-500/10 text-blue-300 border-blue-500/30 shadow-[0_0_15px_rgba(59,130,246,0.15)]'
             }`}
-            title="Toggle RBAC context between USER and ADMIN to test server-side authorization guards"
+            title="Role resolved from your server session"
           >
             <Shield className="h-3.5 w-3.5" />
             <span className="font-mono">{role}</span>
-          </button>
+          </div>
 
           {/* Notifications Dropdown */}
           <div className="relative">

@@ -178,7 +178,7 @@ export async function createAccount(params: { email: string; password: string; n
 
 // A session's cached user must not outlive profile edits made to the
 // account — drop every cached resolution that points at this user.
-function invalidateResolveCache(userId: string): void {
+export function invalidateResolveCache(userId: string): void {
   for (const [key, rec] of resolveCache) {
     if (rec.user?.id === userId) resolveCache.delete(key);
   }

@@ -4118,6 +4118,7 @@ async function buildApp() {
     }
     const priorRole = targetUser.role;
     targetUser.role = role;
+    invalidateResolveCache(targetUser.id);
     db.recordAuditLog({
       actorId: actor.id,
       actorName: actor.name,
@@ -4131,6 +4132,62 @@ async function buildApp() {
       metadata: { priorRole, newRole: role }
     });
     res.json({ success: true, user: targetUser });
+  });
+  app.delete("/api/v1/admin/users/:id", async (req, res) => {
+    const actor = requireAdmin(req, res);
+    if (!actor) return;
+    const id = sanitizeText(req.params.id, 64);
+    if (!/^usr_[A-Za-z0-9_]+$/.test(id)) return res.status(400).json({ error: "Invalid user id" });
+    if (id === actor.id) return res.status(400).json({ error: "You cannot delete your own account" });
+    let target = null;
+    if (databasePool) {
+      const found = await databasePool.query("select id, name, email, role from public.users where id = $1", [id]);
+      target = found.rows[0] || null;
+    } else {
+      const u = db.users.find((x) => x.id === id);
+      target = u ? { id: u.id, name: u.name, email: u.email, role: u.role } : null;
+    }
+    if (!target) return res.status(404).json({ error: "User not found" });
+    if (target.role === "ADMIN") {
+      let otherAdmins;
+      if (databasePool) {
+        const cnt = await databasePool.query(
+          `select count(*)::int as n from public.users where role = 'ADMIN' and id <> $1`,
+          [id]
+        );
+        otherAdmins = cnt.rows[0].n;
+      } else {
+        otherAdmins = db.users.filter((u) => u.role === "ADMIN" && u.id !== id).length;
+      }
+      if (otherAdmins === 0) return res.status(400).json({ error: "Cannot delete the last administrator" });
+    }
+    try {
+      if (databasePool) {
+        await databasePool.query("delete from public.comments where user_id = $1", [id]);
+      } else {
+        for (let i = memoryComments.length - 1; i >= 0; i--) {
+          if (memoryComments[i].userId === id) memoryComments.splice(i, 1);
+        }
+      }
+      await clearAiChatHistory(id);
+      await forgetAccount(id);
+      db.recordAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorEmail: actor.email,
+        action: "USER_DELETED",
+        category: "ADMIN",
+        target: `${target.name} (${target.email})`,
+        source: detectSource(req),
+        status: "WARNING",
+        ipAddress: req.ip || "unknown",
+        metadata: { userId: id, role: target.role }
+      });
+      res.json({ success: true, user: { id: target.id, name: target.name } });
+    } catch (err) {
+      console.error("[admin/users] delete failed:", err.message);
+      res.status(500).json({ error: "Account deletion failed" });
+    }
   });
   app.get("/api/v1/admin/logs", (req, res) => {
     if (!requireAdmin(req, res)) return;
@@ -4262,7 +4319,8 @@ async function buildApp() {
     }
     res.status(400).json({ error: "Unrecognized emergency action" });
   });
-  app.get("/api/v1/admin/feature-flags", (_req, res) => {
+  app.get("/api/v1/admin/feature-flags", (req, res) => {
+    if (!requireAdmin(req, res)) return;
     res.json({ featureFlags: db.featureFlags });
   });
   app.patch("/api/v1/admin/feature-flags/:id", (req, res) => {

@@ -313,6 +313,10 @@ class ApiClient {
     return `${this.baseUrl}/admin/logs/export`;
   }
 
+  async deleteAdminUser(id: string) {
+    return this.request<{ success: boolean; user: { id: string; name: string } }>(`/admin/users/${id}`, { method: 'DELETE' });
+  }
+
   async getAdminStatistics() {
     return this.request<{ stats: SystemStats; threats: SecurityThreat[] }>('/admin/statistics');
   }

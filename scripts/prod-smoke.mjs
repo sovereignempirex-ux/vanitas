@@ -101,6 +101,14 @@ check(
 r = await call('GET', '/auth/me');
 check('/auth/me without session → 401 (no fake persona)', r.status === 401, r);
 
+// Admin surfaces reject anonymous callers — full permissions for admins only.
+r = await call('GET', '/admin/users');
+check('GET /admin/users without session → 401', r.status === 401, r);
+r = await call('GET', '/admin/feature-flags');
+check('GET /admin/feature-flags without session → 401', r.status === 401, r);
+r = await call('GET', '/admin/statistics');
+check('GET /admin/statistics without session → 401', r.status === 401, r);
+
 console.log('— bundled real images —');
 for (const img of ['auth-bg.jpg', 'overview-hero.jpg', 'docs-banner.jpg', 'logo.svg', 'avatar-default.svg']) {
   const s = await head(`${SITE}/images/${img}`);

@@ -38,7 +38,7 @@ interface CommandPaletteProps {
 }
 
 export const CommandPalette: React.FC<CommandPaletteProps> = ({ isOpen, onClose }) => {
-  const { setActiveView, role, toggleRole } = useAuth();
+  const { setActiveView, role } = useAuth();
   const [search, setSearch] = useState('');
   const [semanticMode, setSemanticMode] = useState(true);
   const [isSearching, setIsSearching] = useState(false);
@@ -380,15 +380,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({ isOpen, onClose 
 
           <div className="flex items-center gap-2">
             <span className="text-slate-500">Role:</span>
-            <button
-              onClick={() => {
-                toggleRole();
-                onClose();
-              }}
-              className="rounded-md border border-white/10 bg-white/5 px-2.5 py-0.5 font-mono text-[10px] text-blue-300 hover:bg-white/10 transition-colors"
-            >
-              Switch to {role === 'ADMIN' ? 'USER' : 'ADMIN'}
-            </button>
+            <span className="rounded-md border border-white/10 bg-white/5 px-2.5 py-0.5 font-mono text-[10px] text-blue-300">{role}</span>
           </div>
         </div>
       </div>

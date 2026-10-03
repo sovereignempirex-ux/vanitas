@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext.tsx';
 import { api } from '../../lib/apiClient.ts';
-import { User, UserRole, FeatureFlag, SecurityThreat } from '../../types.ts';
+import { User, UserRole, FeatureFlag, SecurityThreat, SystemStats } from '../../types.ts';
 import {
   Users,
   Shield,
@@ -19,10 +19,11 @@ import {
 } from 'lucide-react';
 
 export const AdminCenterView: React.FC = () => {
-  const { role, toggleRole } = useAuth();
+  const { role, user } = useAuth();
   const [users, setUsers] = useState<User[]>([]);
   const [flags, setFlags] = useState<FeatureFlag[]>([]);
   const [threats, setThreats] = useState<SecurityThreat[]>([]);
+  const [stats, setStats] = useState<SystemStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
@@ -42,6 +43,7 @@ export const AdminCenterView: React.FC = () => {
       setUsers(usersData.users);
       setFlags(flagsData.featureFlags);
       setThreats(statsData.threats);
+      setStats(statsData.stats);
     } catch (err: any) {
       setError(err.message || 'Failed loading admin control center');
     } finally {
@@ -60,6 +62,19 @@ export const AdminCenterView: React.FC = () => {
       setError(null);
       await api.updateUserRole(userId, newRole);
       setSuccessMsg(`User role updated to ${newRole}`);
+      setTimeout(() => setSuccessMsg(null), 3000);
+      loadAdminData();
+    } catch (err: any) {
+      setError(err.message);
+    }
+  };
+
+  const handleDeleteUser = async (u: User) => {
+    if (!confirm(`Permanently delete ${u.name}? Their account, API keys, chat history and comments will be removed.`)) return;
+    try {
+      setError(null);
+      await api.deleteAdminUser(u.id);
+      setSuccessMsg(`Account ${u.name} deleted.`);
       setTimeout(() => setSuccessMsg(null), 3000);
       loadAdminData();
     } catch (err: any) {
@@ -102,16 +117,9 @@ export const AdminCenterView: React.FC = () => {
         <p className="mt-2 text-xs sm:text-sm text-slate-400 max-w-md mx-auto">
           The Vanitas Central API has rejected this view because your current token context does not hold the <code className="font-mono text-rose-300 font-bold">admin.users</code> or <code className="font-mono text-rose-300 font-bold">admin.emergency</code> scopes.
         </p>
-
-        <div className="mt-6 flex justify-center">
-          <button
-            onClick={toggleRole}
-            className="flex items-center gap-2 rounded-xl bg-amber-600 px-5 py-2.5 text-xs font-semibold text-white shadow-lg shadow-amber-600/30 hover:bg-amber-500 transition-all"
-          >
-            <Shield className="h-4 w-4" />
-            <span>Elevate Role to ADMIN (Preview)</span>
-          </button>
-        </div>
+        <p className="mt-4 text-[11px] text-slate-500">
+          Roles are decided by the server, never by the client — sign in with a real ADMIN account to open this center.
+        </p>
       </div>
     );
   }
@@ -202,7 +210,14 @@ export const AdminCenterView: React.FC = () => {
                     <div className="flex items-center gap-3">
                       <img src={u.avatarUrl} alt={u.name} className="h-8 w-8 rounded-lg object-cover border border-blue-500/30" />
                       <div>
-                        <p className="font-semibold text-white">{u.name}</p>
+                        <p className="font-semibold text-white">
+                          {u.name}
+                          {u.id === user?.id && (
+                            <span className="ml-2 rounded bg-emerald-500/15 px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase text-emerald-300">
+                              you
+                            </span>
+                          )}
+                        </p>
                         <p className="font-mono text-[11px] text-slate-400">{u.email}</p>
                       </div>
                     </div>
@@ -230,26 +245,98 @@ export const AdminCenterView: React.FC = () => {
                     </span>
                   </td>
                   <td className="py-3.5 px-4 text-right">
-                    {u.role === 'USER' ? (
-                      <button
-                        onClick={() => handleRoleChange(u.id, 'ADMIN')}
-                        className="rounded-lg border border-amber-500/30 bg-amber-950/20 px-2.5 py-1 text-[11px] font-semibold text-amber-300 hover:bg-amber-900/30 transition-all"
-                      >
-                        Promote to Admin
-                      </button>
-                    ) : (
-                      <button
-                        onClick={() => handleRoleChange(u.id, 'USER')}
-                        className="rounded-lg border border-white/10 bg-slate-900 px-2.5 py-1 text-[11px] font-medium text-slate-400 hover:text-white transition-all"
-                      >
-                        Demote to User
-                      </button>
-                    )}
+                    <div className="flex items-center justify-end gap-2">
+                      {u.id === user?.id ? (
+                        <span className="rounded-lg border border-emerald-500/30 bg-emerald-950/20 px-2.5 py-1 text-[11px] font-semibold text-emerald-300">
+                          You
+                        </span>
+                      ) : (
+                        <>
+                          {u.role === 'USER' ? (
+                            <button
+                              onClick={() => handleRoleChange(u.id, 'ADMIN')}
+                              className="rounded-lg border border-amber-500/30 bg-amber-950/20 px-2.5 py-1 text-[11px] font-semibold text-amber-300 hover:bg-amber-900/30 transition-all"
+                            >
+                              Promote to Admin
+                            </button>
+                          ) : (
+                            <button
+                              onClick={() => handleRoleChange(u.id, 'USER')}
+                              className="rounded-lg border border-white/10 bg-slate-900 px-2.5 py-1 text-[11px] font-medium text-slate-400 hover:text-white transition-all"
+                            >
+                              Demote to User
+                            </button>
+                          )}
+                          <button
+                            onClick={() => handleDeleteUser(u)}
+                            className="rounded-lg border border-rose-500/30 bg-rose-950/20 px-2.5 py-1 text-[11px] font-semibold text-rose-300 hover:bg-rose-900/30 transition-all"
+                          >
+                            Delete
+                          </button>
+                        </>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
+        </div>
+      </div>
+
+      {/* Live Platform Statistics — real numbers from GET /admin/statistics */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+        {[
+          { label: 'Total Users', value: stats ? String(stats.totalUsers) : '—' },
+          { label: 'Active (7d)', value: stats ? String(stats.activeUsers) : '—' },
+          { label: 'Active API Keys', value: stats ? String(stats.activeApiKeys) : '—' },
+          { label: 'Requests Today', value: stats ? String(stats.apiRequestsToday) : '—' },
+          { label: 'Error Rate', value: stats ? `${(stats.errorRate * 100).toFixed(1)}%` : '—' },
+        ].map((s) => (
+          <div key={s.label} className="rounded-2xl border border-white/10 bg-slate-950/60 p-4 backdrop-blur-xl">
+            <p className="text-[10px] font-mono uppercase tracking-wider text-slate-500">{s.label}</p>
+            <p className="mt-1 text-lg font-bold text-white">{s.value}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* Security Threat Feed — live entries from the statistics endpoint */}
+      <div className="rounded-3xl border border-white/10 bg-slate-950/60 p-6 backdrop-blur-xl">
+        <div className="flex items-center gap-2 pb-4 border-b border-white/10">
+          <AlertTriangle className="h-4 w-4 text-amber-400" />
+          <h3 className="text-sm font-bold text-white">Security Threat Feed</h3>
+          <span className="ml-auto rounded bg-white/[0.06] px-2 py-0.5 font-mono text-[10px] text-slate-400">
+            {threats.length} {threats.length === 1 ? 'entry' : 'entries'}
+          </span>
+        </div>
+        <div className="mt-3 space-y-2">
+          {threats.length === 0 && (
+            <p className="text-xs text-slate-500">No security threats recorded — the platform is clean.</p>
+          )}
+          {threats.map((t) => (
+            <div key={t.id} className="flex items-start justify-between gap-3 rounded-2xl border border-white/5 bg-white/[0.02] p-3">
+              <div>
+                <p className="text-xs font-semibold text-white">{t.title}</p>
+                <p className="text-[11px] text-slate-400">{t.description}</p>
+                <p className="mt-1 font-mono text-[10px] text-slate-500">
+                  {t.source} · {t.ip} · {new Date(t.timestamp).toLocaleString()}
+                </p>
+              </div>
+              <span
+                className={`shrink-0 rounded px-2 py-0.5 font-mono text-[10px] font-bold uppercase border ${
+                  t.level === 'CRITICAL'
+                    ? 'bg-rose-500/10 text-rose-300 border-rose-500/30'
+                    : t.level === 'HIGH'
+                    ? 'bg-orange-500/10 text-orange-300 border-orange-500/30'
+                    : t.level === 'MEDIUM'
+                    ? 'bg-amber-500/10 text-amber-300 border-amber-500/30'
+                    : 'bg-blue-500/10 text-blue-300 border-blue-500/30'
+                }`}
+              >
+                {t.level}
+              </span>
+            </div>
+          ))}
         </div>
       </div>
 

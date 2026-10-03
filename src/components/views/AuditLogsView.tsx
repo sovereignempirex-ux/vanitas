@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 
 export const AuditLogsView: React.FC = () => {
-  const { role, toggleRole } = useAuth();
+  const { role } = useAuth();
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -77,17 +77,8 @@ export const AuditLogsView: React.FC = () => {
         </div>
         <h2 className="mt-4 font-display text-2xl font-bold text-white">403 Forbidden: Audit Logs Protected</h2>
         <p className="mt-2 text-xs sm:text-sm text-slate-400 max-w-md mx-auto">
-          Audit logs contain security telemetry and are restricted to users with <code className="font-mono text-rose-300 font-bold">logs.read</code> and <code className="font-mono text-rose-300 font-bold">ADMIN</code> privileges.
+          Audit logs contain security telemetry and are restricted to users with <code className="font-mono text-rose-300 font-bold">logs.read</code> and <code className="font-mono text-rose-300 font-bold">ADMIN</code> privileges. Roles are resolved server-side — sign in with an administrator account to unlock this view.
         </p>
-        <div className="mt-6 flex justify-center">
-          <button
-            onClick={toggleRole}
-            className="flex items-center gap-2 rounded-xl bg-amber-600 px-5 py-2.5 text-xs font-semibold text-white hover:bg-amber-500 transition-all"
-          >
-            <Shield className="h-4 w-4" />
-            <span>Switch to ADMIN Role</span>
-          </button>
-        </div>
       </div>
     );
   }

@@ -12,8 +12,6 @@ interface AuthContextType {
   permissions: PermissionScope[];
   activeView: string;
   setActiveView: (view: string) => void;
-  setRole: (role: UserRole) => void;
-  toggleRole: () => void;
   loginOAuth: (provider: string) => Promise<void>;
   loginWithEmail: (
     email: string,
@@ -194,25 +192,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     refreshUser();
   }, [clientSource]);
 
-  const setRole = (newRole: UserRole) => {
-    // SECURITY: client-side role switch is UI-only preview. Real promotion
-    // must happen via PATCH /api/v1/admin/users/:id/role with ADMIN_API_TOKEN.
-    // We keep local state but refresh from server on next refreshUser().
-    setRoleState(newRole);
-    if (user) {
-      const updated = { ...user, role: newRole };
-      setUser(updated);
-      localStorage.setItem('vanitas_active_user', JSON.stringify(updated));
-    }
-    refreshUser();
-  };
-
-  const toggleRole = () => {
-    console.warn('toggleRole is UI-only and does not grant server privileges.');
-    const nextRole: UserRole = role === 'ADMIN' ? 'USER' : 'ADMIN';
-    setRole(nextRole);
-  };
-
   const setClientSource = (src: ClientSource) => {
     setClientSourceState(src);
     api.setClientSource(src);
@@ -360,8 +339,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         permissions,
         activeView,
         setActiveView,
-        setRole,
-        toggleRole,
         loginOAuth,
         completeOAuthLogin,
         completeTwoFactorLogin,
