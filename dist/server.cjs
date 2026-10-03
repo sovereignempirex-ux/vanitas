@@ -4839,7 +4839,7 @@ async function buildApp() {
     const r = await databasePool.query(
       `insert into public.admin_invites
          (id, token, token_hash, created_by, created_by_name, role, verification, note, max_uses, uses, revoked, expires_at, created_at)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, 0, false, $9, $10, $11) returning *`,
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, false, $10, $11) returning *`,
       [
         invite.id,
         encryptInviteToken(invite.token),

@@ -149,6 +149,36 @@ await must('admin_invites.token_hash unique partial index (lookup by hash)', asy
   if (r.rowCount !== 3) throw new Error(`expected 3 invite rows, deleted ${r.rowCount}`);
 });
 
+await must('createInvite INSERT mapping (server.ts exact query + params)', async () => {
+  // Mirrors server.ts createInvite byte-for-byte: a column/value misalignment
+  // here previously put `0` into max_uses (check 1-20) and `false` into uses.
+  const params = [
+    'inv_map_1',
+    'enc:v1:ivtagct',
+    'hash_map_1',
+    id,
+    'Mapper',
+    'ADMIN',
+    'DEVELOPER',
+    'note',
+    3, // max_uses must land in max_uses (1..20), not in `uses`
+    new Date(Date.now() + 86_400_000).toISOString(),
+    new Date().toISOString(),
+  ];
+  const r = await db.query(
+    `insert into public.admin_invites
+       (id, token, token_hash, created_by, created_by_name, role, verification, note, max_uses, uses, revoked, expires_at, created_at)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, false, $10, $11) returning *`,
+    params,
+  );
+  const row = r.rows[0];
+  if (Number(row.max_uses) !== 3) throw new Error(`max_uses mapped to ${row.max_uses}`);
+  if (Number(row.uses) !== 0) throw new Error(`uses mapped to ${row.uses}`);
+  if (row.revoked !== false) throw new Error(`revoked mapped to ${row.revoked}`);
+  if (row.role !== 'ADMIN' || row.verification !== 'DEVELOPER') throw new Error('role/verification mismatch');
+  await db.query(`delete from public.admin_invites where id = $1`, ['inv_map_1']);
+});
+
 await must('create session + resolve via join', async () => {
   await db.query('insert into public.auth_sessions (token_hash, user_id, ip, user_agent, expires_at) values ($1,$2,$3,$4,$5)', [
     'hash_abc',
