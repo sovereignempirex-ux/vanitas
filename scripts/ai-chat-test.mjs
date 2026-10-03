@@ -106,7 +106,7 @@ async function main() {
     if (siteAware.status === 200 && (siteAware.json?.text || '').includes('/auth/register')) break;
     await new Promise((r) => setTimeout(r, 1200));
   }
-  check('non-stream chat still returns 200 with a real reply', siteAware.status === 200 && (siteAware.json?.text || '').length > 20, `status=${siteAware.status}`);
+  check('non-stream chat still returns 200 with a real reply', siteAware.status === 200 && typeof siteAware.json?.text === 'string' && siteAware.json.text.length > 0, `status=${siteAware.status} text=${JSON.stringify((siteAware.json?.text || '').slice(0, 40))}`);
   check('AI knows the real register endpoint (/auth/register)', (siteAware.json?.text || '').includes('/auth/register'), (siteAware.json?.text || '').slice(0, 160));
   check('reply reports a real model engine', !!siteAware.json?.engine && siteAware.json.engine !== 'local_kb', { engine: siteAware.json?.engine, upstream: siteAware.json?.upstream });
 

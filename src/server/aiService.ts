@@ -66,27 +66,57 @@ async function queryOllama(systemInstruction: string, prompt: string): Promise<s
 // A 402 means "outside the window" — wait it out instead of hammering it.
 // ---------------------------------------------------------------------------
 const POLLI_WINDOW_MS = (process.env.POLLINATIONS_TOKEN ? 5 : 15) * 1000;
+// Model rotation: `openai` (best quality) first while healthy, `openai-fast`
+// (the only model GET /models currently advertises anonymously) as the safety
+// net when `openai` hits their recurring ENOSPC incident. Override via
+// POLLINATIONS_MODEL=comma,separated,models.
+const POLLI_MODELS = (process.env.POLLINATIONS_MODEL || 'openai,openai-fast')
+  .split(',')
+  .map((m) => m.trim())
+  .filter(Boolean);
+
+// Circuit breakers for Pollinations' recurring ENOSPC incident: `openai`
+// answers 500 and the stream path hangs — remember briefly so the next
+// requests take the already-known-cheap path instead of re-paying discovery.
+// Self-heals: markers expire and successes clear them.
+let streamSkipUntil = 0;
+const modelSickUntil = new Map<string, number>();
+
+function pickModel(preferFirst: boolean): string {
+  const now = Date.now();
+  const healthy = POLLI_MODELS.filter((m) => (modelSickUntil.get(m) ?? 0) < now);
+  const pool = healthy.length > 0 ? healthy : POLLI_MODELS;
+  return preferFirst ? pool[0] : pool[pool.length - 1];
+}
+
+function markModelSick(model: string, status: number): void {
+  // 5xx (ENOSPC) or 404 (model gone) → stop using it for 5 minutes.
+  if (status >= 500 || status === 404) modelSickUntil.set(model, Date.now() + 300_000);
+}
+
+function markModelWell(model: string): void {
+  modelSickUntil.delete(model);
+}
 // Whole-request budget: Vercel kills the function at 30s — leave room for
 // streamed attempt → window wait → retry → disclosed local-KB fallback.
 const POLLI_BUDGET_MS = 26_000;
 
 /**
- * Backoff schedule for Pollinations' flaky free tier: a fast 2s retry catches
- * node-inconsistent rate slots, a longer wait to firstAttempt+window catches
- * the strict 15s (anonymous) / 5s (token) window. Returns false when the
- * remaining budget wouldn't leave room for a meaningful retry.
+ * Backoff schedule for Pollinations' flaky free tier: attempt 0 gets a quick
+ * 2s lottery probe (402s sometimes clear instantly across their nodes), then
+ * the wait anchors on the LAST attempt's send time — their window reopens
+ * `window` after the most recent request, not the first. Returns false when
+ * the remaining budget wouldn't leave room for a meaningful retry.
  */
 async function pollinationsRetryDelay(
   attempt: number,
-  firstAttemptAt: number,
+  lastAttemptAt: number,
   budgetUntil: number,
 ): Promise<boolean> {
   const wait =
     attempt === 0
-      ? POLLI_WINDOW_MS > 5_000
-        ? 2_000 // cheap probe of the next slot — 402s sometimes clear instantly
-        : 5_500
-      : firstAttemptAt + POLLI_WINDOW_MS + 1_500 - Date.now();
+      ? 2_000 // cheap probe of the next slot
+      : lastAttemptAt + POLLI_WINDOW_MS + 1_500 - Date.now();
   if (Date.now() + Math.max(wait, 0) + 4_000 > budgetUntil) return false;
   if (wait > 0) await new Promise((r) => setTimeout(r, wait));
   return true;
@@ -97,36 +127,36 @@ async function queryPollinations(
   prompt: string,
   budgetUntil = Date.now() + POLLI_BUDGET_MS,
 ): Promise<string | null> {
-  const firstAttemptAt = Date.now();
   for (let attempt = 0; attempt < 3; attempt++) {
     if (budgetUntil - Date.now() < 4_000) return null;
+    const model = pickModel(attempt === 0);
     try {
+      const sentAt = Date.now();
       const response = await fetch('https://text.pollinations.ai/openai', {
         method: 'POST',
         headers: pollinationsHeaders({ 'Content-Type': 'application/json', Accept: 'application/json' }),
         signal: AbortSignal.timeout(Math.min(20_000, budgetUntil - Date.now())),
         body: JSON.stringify({
-          model: 'openai',
-          messages: [
-            { role: 'system', content: systemInstruction },
-            { role: 'user', content: prompt },
-          ],
+          model,
+          messages: pollinationsMessages(model, systemInstruction, prompt),
         }),
       });
       if (!response.ok) {
         lastAiUpstream = `pollinations_http_${response.status}`;
+        markModelSick(model, response.status);
         console.warn(`Pollinations HTTP ${response.status} (attempt ${attempt + 1});`);
-        if (await pollinationsRetryDelay(attempt, firstAttemptAt, budgetUntil)) continue;
+        if (await pollinationsRetryDelay(attempt, sentAt, budgetUntil)) continue;
         return null;
       }
       const data = await response.json() as { choices?: { message?: { content?: string } }[] };
       const text = data.choices?.[0]?.message?.content?.trim();
       if (text) {
         lastAiUpstream = null;
+        markModelWell(model);
         return text;
       }
       lastAiUpstream = 'pollinations_empty_reply';
-      if (await pollinationsRetryDelay(attempt, firstAttemptAt, budgetUntil)) continue;
+      if (await pollinationsRetryDelay(attempt, sentAt, budgetUntil)) continue;
       return null;
     } catch (error) {
       lastAiUpstream = `pollinations_${(error as Error)?.name || 'network_error'}`;
@@ -149,36 +179,52 @@ async function queryPollinationsStream(
   onDelta: (chunk: string) => void,
   budgetUntil = Date.now() + POLLI_BUDGET_MS,
 ): Promise<string | null> {
-  const firstAttemptAt = Date.now();
+  // Stream path recently hung → skip straight to the full query (the client's
+  // reveal buffer animates a single-chunk answer identically).
+  if (Date.now() < streamSkipUntil) return null;
   for (let attempt = 0; attempt < 2; attempt++) {
     if (budgetUntil - Date.now() < 4_000) return null;
+    const model = pickModel(attempt === 0);
     let response: Response;
+    // Two-phase abort: response HEADERS must arrive within 5s (a hung backend
+    // must not eat the budget), then the exchange may run until 8s before the
+    // deadline so the full-query fallback still fits. A partial stream already
+    // emitted is re-synced by the caller's authoritative `done.text`.
+    const controller = new AbortController();
+    const headerTimer = setTimeout(() => controller.abort(), 5_000);
+    let totalTimer: ReturnType<typeof setTimeout> | undefined;
+    let sentAt = Date.now();
     try {
       response = await fetch('https://text.pollinations.ai/openai', {
         method: 'POST',
         headers: pollinationsHeaders({ 'Content-Type': 'application/json', Accept: 'text/event-stream' }),
-        // 12s cap: a hung attempt must leave room for the full-query fallback;
-        // a partial stream already emitted is re-synced by the caller's
-        // authoritative `done.text`, so restarting here costs nothing visible.
-        signal: AbortSignal.timeout(Math.min(12_000, budgetUntil - Date.now())),
+        signal: controller.signal,
         body: JSON.stringify({
-          model: 'openai',
+          model,
           stream: true,
-          messages: [
-            { role: 'system', content: systemInstruction },
-            { role: 'user', content: prompt },
-          ],
+          messages: pollinationsMessages(model, systemInstruction, prompt),
         }),
       });
+      clearTimeout(headerTimer);
+      totalTimer = setTimeout(() => controller.abort(), Math.max(1_000, budgetUntil - Date.now() - 8_000));
     } catch (error) {
-      console.warn('Pollinations stream unavailable; using a full response instead.', error instanceof Error ? error.message : error);
+      clearTimeout(headerTimer);
+      if ((error as Error)?.name === 'AbortError') {
+        // Headers never arrived — their stream backend is hanging right now.
+        streamSkipUntil = Date.now() + 180_000;
+        console.warn('Pollinations stream hung (no headers in 5s); skipping streams for 3 minutes.');
+      } else {
+        console.warn('Pollinations stream unavailable; using a full response instead.', error instanceof Error ? error.message : error);
+      }
       return null;
     }
 
     if (!response.ok || !response.body) {
+      clearTimeout(totalTimer);
       lastAiUpstream = `pollinations_stream_http_${response.status}`;
+      markModelSick(model, response.status);
       console.warn(`Pollinations stream HTTP ${response.status} (attempt ${attempt + 1});`);
-      if (attempt + 1 < 2 && (await pollinationsRetryDelay(attempt, firstAttemptAt, budgetUntil))) continue;
+      if (attempt + 1 < 2 && (await pollinationsRetryDelay(attempt, sentAt, budgetUntil))) continue;
       return null;
     }
 
@@ -186,6 +232,7 @@ async function queryPollinationsStream(
     // emit it as a single delta so the UI path stays identical.
     const contentType = response.headers.get('content-type') || '';
     if (!contentType.includes('event-stream')) {
+      clearTimeout(totalTimer);
       const raw = (await response.text()).trim();
       if (!raw) return null;
       let text = raw;
@@ -195,6 +242,7 @@ async function queryPollinationsStream(
         if (content) text = content;
       } catch { /* plain-text body */ }
       lastAiUpstream = null;
+      markModelWell(model);
       onDelta(text);
       return text;
     }
@@ -225,15 +273,25 @@ async function queryPollinationsStream(
           } catch { /* keep partial frames for the next line */ }
         }
       }
+      clearTimeout(totalTimer);
       if (full.trim()) {
         lastAiUpstream = null;
+        markModelWell(model);
+        streamSkipUntil = 0;
         return full.trim();
       }
       lastAiUpstream = 'pollinations_stream_empty_reply';
       return null;
     } catch (error) {
+      clearTimeout(totalTimer);
       lastAiUpstream = `pollinations_stream_${(error as Error)?.name || 'network_error'}`;
-      console.warn('Pollinations stream aborted; using a full response instead.', error instanceof Error ? error.message : error);
+      if ((error as Error)?.name === 'AbortError') {
+        // Started but stalled mid-stream — same incident signal as a hang.
+        streamSkipUntil = Date.now() + 180_000;
+        console.warn('Pollinations stream stalled; skipping streams for 3 minutes.');
+      } else {
+        console.warn('Pollinations stream aborted; using a full response instead.', error instanceof Error ? error.message : error);
+      }
       return null;
     }
   }
@@ -250,21 +308,20 @@ async function queryPollinationsLegacy(
   budgetUntil = Date.now() + POLLI_BUDGET_MS,
 ): Promise<string | null> {
   if (budgetUntil - Date.now() < 3_000) return null;
+  const model = pickModel(false);
   try {
     const response = await fetch('https://text.pollinations.ai/', {
       method: 'POST',
       headers: pollinationsHeaders({ 'Content-Type': 'application/json' }),
       signal: AbortSignal.timeout(Math.min(20_000, budgetUntil - Date.now())),
       body: JSON.stringify({
-        model: 'openai',
-        messages: [
-          { role: 'system', content: systemInstruction },
-          { role: 'user', content: prompt },
-        ],
+        model, // safety-net model at this tier
+        messages: pollinationsMessages(model, systemInstruction, prompt),
       }),
     });
     if (!response.ok) {
       lastAiUpstream = `pollinations_legacy_http_${response.status}`;
+      markModelSick(model, response.status);
       console.warn(`Pollinations legacy HTTP ${response.status};`);
       return null;
     }
@@ -283,6 +340,7 @@ async function queryPollinationsLegacy(
       } catch { /* the model legitimately answered JSON */ }
     }
     lastAiUpstream = null;
+    markModelWell(model);
     return text;
   } catch (error) {
     lastAiUpstream = `pollinations_legacy_${(error as Error)?.name || 'network_error'}`;
@@ -432,6 +490,16 @@ function pollinationsHeaders(extra: Record<string, string> = {}): Record<string,
   const token = process.env.POLLINATIONS_TOKEN;
   if (token) headers.authorization = `Bearer ${token}`;
   return headers;
+}
+
+function pollinationsMessages(model: string, systemInstruction: string, prompt: string) {
+  if (model === 'openai-fast') {
+    return [{ role: 'user', content: `${systemInstruction}\n\n${prompt}` }];
+  }
+  return [
+    { role: 'system', content: systemInstruction },
+    { role: 'user', content: prompt },
+  ];
 }
 
 interface PreparedQuery {

@@ -1606,41 +1606,60 @@ async function queryOllama(systemInstruction, prompt) {
     return null;
   }
 }
-async function queryPollinations(systemInstruction, prompt) {
-  for (let attempt = 0; attempt < 2; attempt++) {
+var POLLI_WINDOW_MS = (process.env.POLLINATIONS_TOKEN ? 5 : 15) * 1e3;
+var POLLI_MODELS = (process.env.POLLINATIONS_MODEL || "openai,openai-fast").split(",").map((m) => m.trim()).filter(Boolean);
+var streamSkipUntil = 0;
+var modelSickUntil = /* @__PURE__ */ new Map();
+function pickModel(preferFirst) {
+  const now = Date.now();
+  const healthy = POLLI_MODELS.filter((m) => (modelSickUntil.get(m) ?? 0) < now);
+  const pool = healthy.length > 0 ? healthy : POLLI_MODELS;
+  return preferFirst ? pool[0] : pool[pool.length - 1];
+}
+function markModelSick(model, status) {
+  if (status >= 500 || status === 404) modelSickUntil.set(model, Date.now() + 3e5);
+}
+function markModelWell(model) {
+  modelSickUntil.delete(model);
+}
+var POLLI_BUDGET_MS = 26e3;
+async function pollinationsRetryDelay(attempt, lastAttemptAt, budgetUntil) {
+  const wait = attempt === 0 ? 2e3 : lastAttemptAt + POLLI_WINDOW_MS + 1500 - Date.now();
+  if (Date.now() + Math.max(wait, 0) + 4e3 > budgetUntil) return false;
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  return true;
+}
+async function queryPollinations(systemInstruction, prompt, budgetUntil = Date.now() + POLLI_BUDGET_MS) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (budgetUntil - Date.now() < 4e3) return null;
+    const model = pickModel(attempt === 0);
     try {
+      const sentAt = Date.now();
       const response = await fetch("https://text.pollinations.ai/openai", {
         method: "POST",
         headers: pollinationsHeaders({ "Content-Type": "application/json", Accept: "application/json" }),
-        signal: AbortSignal.timeout(2e4),
+        signal: AbortSignal.timeout(Math.min(2e4, budgetUntil - Date.now())),
         body: JSON.stringify({
-          model: "openai",
-          messages: [
-            { role: "system", content: systemInstruction },
-            { role: "user", content: prompt }
-          ]
+          model,
+          messages: pollinationsMessages(model, systemInstruction, prompt)
         })
       });
       if (!response.ok) {
         lastAiUpstream = `pollinations_http_${response.status}`;
+        markModelSick(model, response.status);
         console.warn(`Pollinations HTTP ${response.status} (attempt ${attempt + 1});`);
-        if (attempt === 0) {
-          await new Promise((r) => setTimeout(r, 600));
-          continue;
-        }
+        if (await pollinationsRetryDelay(attempt, sentAt, budgetUntil)) continue;
         return null;
       }
       const data = await response.json();
       const text = data.choices?.[0]?.message?.content?.trim();
       if (text) {
         lastAiUpstream = null;
+        markModelWell(model);
         return text;
       }
       lastAiUpstream = "pollinations_empty_reply";
-      if (attempt === 0) {
-        await new Promise((r) => setTimeout(r, 600));
-        continue;
-      }
+      if (await pollinationsRetryDelay(attempt, sentAt, budgetUntil)) continue;
       return null;
     } catch (error) {
       lastAiUpstream = `pollinations_${error?.name || "network_error"}`;
@@ -1650,38 +1669,50 @@ async function queryPollinations(systemInstruction, prompt) {
   }
   return null;
 }
-async function queryPollinationsStream(systemInstruction, prompt, onDelta) {
+async function queryPollinationsStream(systemInstruction, prompt, onDelta, budgetUntil = Date.now() + POLLI_BUDGET_MS) {
+  if (Date.now() < streamSkipUntil) return null;
   for (let attempt = 0; attempt < 2; attempt++) {
+    if (budgetUntil - Date.now() < 4e3) return null;
+    const model = pickModel(attempt === 0);
     let response;
+    const controller = new AbortController();
+    const headerTimer = setTimeout(() => controller.abort(), 5e3);
+    let totalTimer;
+    let sentAt = Date.now();
     try {
       response = await fetch("https://text.pollinations.ai/openai", {
         method: "POST",
         headers: pollinationsHeaders({ "Content-Type": "application/json", Accept: "text/event-stream" }),
-        signal: AbortSignal.timeout(24e3),
+        signal: controller.signal,
         body: JSON.stringify({
-          model: "openai",
+          model,
           stream: true,
-          messages: [
-            { role: "system", content: systemInstruction },
-            { role: "user", content: prompt }
-          ]
+          messages: pollinationsMessages(model, systemInstruction, prompt)
         })
       });
+      clearTimeout(headerTimer);
+      totalTimer = setTimeout(() => controller.abort(), Math.max(1e3, budgetUntil - Date.now() - 8e3));
     } catch (error) {
-      console.warn("Pollinations stream unavailable; using a full response instead.", error instanceof Error ? error.message : error);
+      clearTimeout(headerTimer);
+      if (error?.name === "AbortError") {
+        streamSkipUntil = Date.now() + 18e4;
+        console.warn("Pollinations stream hung (no headers in 5s); skipping streams for 3 minutes.");
+      } else {
+        console.warn("Pollinations stream unavailable; using a full response instead.", error instanceof Error ? error.message : error);
+      }
       return null;
     }
     if (!response.ok || !response.body) {
+      clearTimeout(totalTimer);
       lastAiUpstream = `pollinations_stream_http_${response.status}`;
+      markModelSick(model, response.status);
       console.warn(`Pollinations stream HTTP ${response.status} (attempt ${attempt + 1});`);
-      if (attempt === 0) {
-        await new Promise((r) => setTimeout(r, 600));
-        continue;
-      }
+      if (attempt + 1 < 2 && await pollinationsRetryDelay(attempt, sentAt, budgetUntil)) continue;
       return null;
     }
     const contentType = response.headers.get("content-type") || "";
     if (!contentType.includes("event-stream")) {
+      clearTimeout(totalTimer);
       const raw = (await response.text()).trim();
       if (!raw) return null;
       let text = raw;
@@ -1692,6 +1723,7 @@ async function queryPollinationsStream(systemInstruction, prompt, onDelta) {
       } catch {
       }
       lastAiUpstream = null;
+      markModelWell(model);
       onDelta(text);
       return text;
     }
@@ -1722,36 +1754,47 @@ async function queryPollinationsStream(systemInstruction, prompt, onDelta) {
           }
         }
       }
+      clearTimeout(totalTimer);
       if (full.trim()) {
         lastAiUpstream = null;
+        markModelWell(model);
+        streamSkipUntil = 0;
         return full.trim();
       }
       lastAiUpstream = "pollinations_stream_empty_reply";
       return null;
     } catch (error) {
+      clearTimeout(totalTimer);
       lastAiUpstream = `pollinations_stream_${error?.name || "network_error"}`;
-      console.warn("Pollinations stream aborted; using a full response instead.", error instanceof Error ? error.message : error);
+      if (error?.name === "AbortError") {
+        streamSkipUntil = Date.now() + 18e4;
+        console.warn("Pollinations stream stalled; skipping streams for 3 minutes.");
+      } else {
+        console.warn("Pollinations stream aborted; using a full response instead.", error instanceof Error ? error.message : error);
+      }
       return null;
     }
   }
   return null;
 }
-async function queryPollinationsLegacy(systemInstruction, prompt) {
+async function queryPollinationsLegacy(systemInstruction, prompt, budgetUntil = Date.now() + POLLI_BUDGET_MS) {
+  if (budgetUntil - Date.now() < 3e3) return null;
+  const model = pickModel(false);
   try {
     const response = await fetch("https://text.pollinations.ai/", {
       method: "POST",
       headers: pollinationsHeaders({ "Content-Type": "application/json" }),
-      signal: AbortSignal.timeout(2e4),
+      signal: AbortSignal.timeout(Math.min(2e4, budgetUntil - Date.now())),
       body: JSON.stringify({
-        model: "openai",
-        messages: [
-          { role: "system", content: systemInstruction },
-          { role: "user", content: prompt }
-        ]
+        model,
+        // safety-net model at this tier
+        messages: pollinationsMessages(model, systemInstruction, prompt)
       })
     });
     if (!response.ok) {
       lastAiUpstream = `pollinations_legacy_http_${response.status}`;
+      markModelSick(model, response.status);
+      console.warn(`Pollinations legacy HTTP ${response.status};`);
       return null;
     }
     const text = (await response.text()).trim();
@@ -1770,6 +1813,7 @@ async function queryPollinationsLegacy(systemInstruction, prompt) {
       }
     }
     lastAiUpstream = null;
+    markModelWell(model);
     return text;
   } catch (error) {
     lastAiUpstream = `pollinations_legacy_${error?.name || "network_error"}`;
@@ -1878,6 +1922,17 @@ function pollinationsHeaders(extra = {}) {
   if (token) headers.authorization = `Bearer ${token}`;
   return headers;
 }
+function pollinationsMessages(model, systemInstruction, prompt) {
+  if (model === "openai-fast") {
+    return [{ role: "user", content: `${systemInstruction}
+
+${prompt}` }];
+  }
+  return [
+    { role: "system", content: systemInstruction },
+    { role: "user", content: prompt }
+  ];
+}
 async function prepareAiQuery(options) {
   const { persona, toneStyle = "developer", prompt, enableVideoSearch } = options;
   const isVideoQuery = enableVideoSearch || persona === "video" || /\b(video|videos|tutorial|tutorials|youtube|watch|walkthrough|screencast|guide|setup|course|learn)\b/i.test(prompt) || /[\u0600-\u06FF]/.test(prompt) && /(فيديو|فيديوهات|شرح|مرئي|يوتيوب|دروس|دورة|تطبيق|مشاهدة)/i.test(prompt);
@@ -1921,7 +1976,7 @@ Note: ${retrievedVideos.length} educational YouTube video tutorials have been re
   }
   return { instruction: selectedInstruction, videos: retrievedVideos, videoQuery: videoQueryStr };
 }
-async function runFullQuery(options, prep) {
+async function runFullQuery(options, prep, budgetUntil = Date.now() + POLLI_BUDGET_MS) {
   const { persona, toneStyle = "developer", prompt, context, enableWebSearch } = options;
   const selectedInstruction = prep.instruction;
   const retrievedVideos = prep.videos;
@@ -1975,11 +2030,11 @@ async function runFullQuery(options, prep) {
       }
     }
   }
-  const freeText = await queryPollinations(selectedInstruction, prompt);
+  const freeText = await queryPollinations(selectedInstruction, prompt, budgetUntil);
   if (freeText) {
     return { text: freeText, engine: "pollinations", videos: retrievedVideos, videoQuery: videoQueryStr };
   }
-  const legacyText = await queryPollinationsLegacy(selectedInstruction, prompt);
+  const legacyText = await queryPollinationsLegacy(selectedInstruction, prompt, budgetUntil);
   if (legacyText) {
     return { text: legacyText, engine: "pollinations_legacy", videos: retrievedVideos, videoQuery: videoQueryStr };
   }
@@ -1999,6 +2054,7 @@ async function processAiQuery(options) {
   return runFullQuery(options, prep);
 }
 async function processAiQueryStream(options, onDelta) {
+  const budgetUntil = Date.now() + POLLI_BUDGET_MS;
   const prep = await prepareAiQuery(options);
   let emitted = false;
   const emit = (chunk) => {
@@ -2012,13 +2068,13 @@ async function processAiQueryStream(options, onDelta) {
       return { text: ollamaStreamed, engine: "ollama", videos: prep.videos, videoQuery: prep.videoQuery };
     }
     if (!emitted) {
-      const polliStreamed = await queryPollinationsStream(prep.instruction, options.prompt, emit);
+      const polliStreamed = await queryPollinationsStream(prep.instruction, options.prompt, emit, budgetUntil);
       if (polliStreamed !== null) {
         return { text: polliStreamed, engine: "pollinations", videos: prep.videos, videoQuery: prep.videoQuery };
       }
     }
   }
-  const full = await runFullQuery(options, prep);
+  const full = await runFullQuery(options, prep, budgetUntil);
   if (full.text && !emitted) onDelta(full.text);
   return full;
 }
