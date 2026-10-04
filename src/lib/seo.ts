@@ -5,6 +5,8 @@
 // tags live in index.html; this module only updates them at runtime.
 // ---------------------------------------------------------------------------
 
+import { stripMarkdown } from './markdown.ts';
+
 const SITE_URL = 'https://vanitas-bot.vercel.app';
 
 export interface SeoEntry {
@@ -135,10 +137,13 @@ export function seoForInvitePage(): SeoEntry {
 
 /** Metadata for a public /u/<username> profile page (safe to index). */
 export function seoForPublicProfile(username: string, bio?: string): SeoEntry {
+  // Bios are Markdown — flatten to plain text so markers ("**", "```") never
+  // leak into the meta description crawlers read.
+  const plainBio = bio ? stripMarkdown(bio).slice(0, 140) : '';
   return {
     title: `@${username} — developer profile`,
-    description: bio
-      ? `${bio.slice(0, 140)} — public developer profile of @${username} on Vanitas.`
+    description: plainBio
+      ? `${plainBio} — public developer profile of @${username} on Vanitas.`
       : `Public developer profile of @${username} on Vanitas — roles, verification and account facts.`,
   };
 }

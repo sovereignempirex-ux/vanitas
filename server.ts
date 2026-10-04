@@ -613,12 +613,15 @@ export async function buildApp() {
       }
     }
 
-    // Optional bio (≤200 chars, may be empty to clear).
+    // Optional bio (≤500 chars, may be empty to clear). Markdown syntax is
+    // allowed and rendered by the XSS-safe client renderer — control
+    // characters are stripped here while newlines/tabs are kept (code blocks
+    // and lists need them).
     let bio: string | undefined;
     if (typeof req.body?.bio === 'string') {
-      const value = req.body.bio.trim();
-      if (value.length > 200) {
-        return res.status(400).json({ error: 'Bio must be 200 characters or fewer' });
+      const value = sanitizeText(req.body.bio, 4000);
+      if (value.length > 500) {
+        return res.status(400).json({ error: 'Bio must be 500 characters or fewer' });
       }
       bio = value;
     }

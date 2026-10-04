@@ -4,6 +4,7 @@ import { api } from '../lib/apiClient.ts';
 import { BRAND_ASSETS } from '../data/assets.ts';
 import { seoForPublicProfile, setPageSeo } from '../lib/seo.ts';
 import { VerifiedBadge } from '../components/VerifiedBadge.tsx';
+import { Markdown } from '../components/Markdown.tsx';
 import { PublicProfile } from '../types.ts';
 import { Shield, CalendarDays, AtSign, UserSearch, Loader2, ArrowRight, Link2 } from 'lucide-react';
 
@@ -133,7 +134,9 @@ export const ProfilePage: React.FC<{ username: string }> = ({ username }) => {
           </div>
 
           {p.bio ? (
-            <p className="mt-4 text-xs leading-relaxed text-slate-300">{p.bio}</p>
+            <div className="mt-4 text-left">
+              <Markdown text={p.bio} className="text-xs" />
+            </div>
           ) : (
             <p className="mt-4 text-[11px] italic text-slate-500">This developer hasn't written a bio yet.</p>
           )}

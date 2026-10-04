@@ -180,10 +180,30 @@ r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'Ren
 check('reserved username → 400', r.status === 400, r);
 r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'Renamed Tester', avatarUrl: '', username: 'has space' } });
 check('invalid username characters → 400', r.status === 400, r);
-r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'Renamed Tester', avatarUrl: '', bio: 'x'.repeat(201) } });
-check('bio over 200 chars → 400', r.status === 400, r);
+r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'Renamed Tester', avatarUrl: '', bio: 'x'.repeat(501) } });
+check('bio over 500 chars → 400', r.status === 400, r);
 r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'Renamed Tester', avatarUrl: '', username: 'renamed_tester' } });
 check('re-saving own username → 200 (no-op)', r.status === 200, r);
+
+// Markdown bios: stored verbatim (newlines preserved for code blocks and
+// lists), control characters stripped server-side, capped at 500 chars.
+const mdBio =
+  '### What I build\n\n**Bots** & *APIs*\n\n```ts\nconst ok: boolean = true;\n```\n- [Vanitas](https://vanitas-bot.vercel.app)';
+r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'Renamed Tester', avatarUrl: '', bio: mdBio } });
+check(
+  'markdown bio (heading, code block, list, link) → 200 + stored verbatim',
+  r.status === 200 && r.json?.user?.bio === mdBio,
+  r.json?.user?.bio,
+);
+r = await call('GET', '/auth/me', { token: loginToken });
+check('markdown bio round-trips (newlines intact)', r.json?.user?.bio === mdBio, JSON.stringify(r.json?.user?.bio));
+r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'Renamed Tester', avatarUrl: '', bio: 'clean\u0007bio\u001ftext' } });
+check('control characters stripped from bio', r.status === 200 && r.json?.user?.bio === 'cleanbiotext', JSON.stringify(r.json?.user?.bio));
+r = await call('GET', '/profiles/renamed_tester');
+check('public profile serves the markdown bio', r.status === 200 && r.json?.profile?.bio === 'cleanbiotext', r.json?.profile?.bio);
+// Restore the plain bio the public-profile assertions below rely on.
+r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'Renamed Tester', avatarUrl: '', bio: 'Builds bots and API gateways.' } });
+check('bio restored → 200', r.status === 200 && r.json?.user?.bio === 'Builds bots and API gateways.', r.json?.user?.bio);
 
 const secondToken = (await call('POST', '/auth/register', { body: { email: `second_${Date.now()}@example.com`, password, name: 'Second Account' } })).json?.token;
 check('second account registered', typeof secondToken === 'string', secondToken);

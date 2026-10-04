@@ -3,6 +3,7 @@ import { useAuth } from '../../context/AuthContext.tsx';
 import { CHARACTER_AVATARS } from '../../data/assets.ts';
 import { api } from '../../lib/apiClient.ts';
 import { VerifiedBadge } from '../VerifiedBadge.tsx';
+import { Markdown } from '../Markdown.tsx';
 import {
   User,
   Shield,
@@ -18,15 +19,28 @@ import {
   Copy,
   Loader2,
   X,
+  ExternalLink,
 } from 'lucide-react';
 
 // ---------------------------------------------------------------------------
-// Profile & identity: hero card (name, @username, badges, bio, real account
-// facts) + editor (claim your @username with live availability, bio, avatar)
-// + read-only account details + the existing character preset gallery.
+// Profile & identity: hero card (name, @username, badges, Markdown bio, real
+// account facts) + editor (claim your @username with live availability, a
+// Markdown bio with toolbar + live preview, avatar) + read-only account
+// details + the existing character preset gallery.
 // ---------------------------------------------------------------------------
 
 type AvailState = { checking: boolean; available: boolean; reason?: string } | null;
+
+const BIO_LIMIT = 500;
+
+// Markdown toolbar chips — wrap the selection (or placeholder) at the caret.
+const BIO_CHIPS: { label: string; title: string; before: string; after: string; placeholder: string }[] = [
+  { label: 'B', title: 'Bold', before: '**', after: '**', placeholder: 'bold text' },
+  { label: 'I', title: 'Italic', before: '*', after: '*', placeholder: 'italic text' },
+  { label: '</>', title: 'Inline code', before: '`', after: '`', placeholder: 'code' },
+  { label: '[..](..)', title: 'Link', before: '[', after: '](https://)', placeholder: 'label' },
+  { label: '```', title: 'Code block', before: '\n```ts\n', after: '\n```\n', placeholder: 'code here' },
+];
 
 const VERIFICATION_LABEL: Record<string, string> = {
   '': 'Unverified',
@@ -50,7 +64,11 @@ export const ProfileView: React.FC = () => {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [avail, setAvail] = useState<AvailState>(null);
+  // Bio editor: write vs. live preview (the preview is the exact renderer
+  // used on the public /u/<name> page, so what you see is what ships).
+  const [bioTab, setBioTab] = useState<'write' | 'preview'>('write');
   const usernameRef = useRef<HTMLInputElement>(null);
+  const bioRef = useRef<HTMLTextAreaElement>(null);
 
   const currentUsername = (user?.username || '').toLowerCase();
   const usernameDirty = usernameInput.trim().toLowerCase() !== currentUsername;
@@ -159,6 +177,23 @@ export const ProfileView: React.FC = () => {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  // Wrap the current selection (or a placeholder) with Markdown syntax at the
+  // caret — then put the caret after the inserted block so typing continues
+  // in the right place.
+  const insertBio = (chip: (typeof BIO_CHIPS)[number]) => {
+    const ta = bioRef.current;
+    const start = ta?.selectionStart ?? bio.length;
+    const end = ta?.selectionEnd ?? bio.length;
+    const selected = bio.slice(start, end) || chip.placeholder;
+    const next = (bio.slice(0, start) + chip.before + selected + chip.after + bio.slice(end)).slice(0, BIO_LIMIT);
+    setBio(next);
+    const caret = start + chip.before.length + selected.length + chip.after.length;
+    requestAnimationFrame(() => {
+      ta?.focus();
+      ta?.setSelectionRange(Math.min(caret, next.length), Math.min(caret, next.length));
+    });
+  };
+
   const saveBlocked = saving || (usernameDirty && (!avail || avail.checking || !avail.available));
 
   return (
@@ -218,7 +253,9 @@ export const ProfileView: React.FC = () => {
               </div>
 
               {user?.bio ? (
-                <p className="mt-3 text-xs leading-relaxed text-slate-300">{user.bio}</p>
+                <div className="mt-3 text-left">
+                  <Markdown text={user.bio} className="text-xs" />
+                </div>
               ) : (
                 <p className="mt-3 text-[11px] italic text-slate-500">No bio yet — tell people what you build.</p>
               )}
@@ -257,14 +294,26 @@ export const ProfileView: React.FC = () => {
 
               {/* Shareable public profile link (only real once a username exists) */}
               {user?.username ? (
-                <button
-                  type="button"
-                  onClick={copyProfileLink}
-                  className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl border border-cyan-500/30 bg-cyan-500/10 py-2 text-xs font-semibold text-cyan-200 transition-all hover:bg-cyan-500/20"
-                >
-                  {copied ? <Check className="h-3.5 w-3.5 text-emerald-300" /> : <Copy className="h-3.5 w-3.5" />}
-                  {copied ? 'Link copied!' : `Copy public profile link`}
-                </button>
+                <div className="mt-4 flex gap-2">
+                  <a
+                    href={`/u/${user.username}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-xs font-semibold text-cyan-200 transition-all hover:bg-cyan-500/20"
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" />
+                    View public page
+                  </a>
+                  <button
+                    type="button"
+                    onClick={copyProfileLink}
+                    className="flex items-center justify-center gap-2 rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-3.5 py-2 text-xs font-semibold text-cyan-200 transition-all hover:bg-cyan-500/20"
+                    title="Copy profile link"
+                  >
+                    {copied ? <Check className="h-3.5 w-3.5 text-emerald-300" /> : <Copy className="h-3.5 w-3.5" />}
+                    {copied ? 'Copied!' : 'Copy link'}
+                  </button>
+                </div>
               ) : (
                 <button
                   type="button"
@@ -348,20 +397,74 @@ export const ProfileView: React.FC = () => {
               </div>
 
               <div>
-                <div className="flex items-center justify-between">
-                  <label className="block text-xs font-medium text-slate-300">Bio</label>
-                  <span className={`font-mono text-[10px] ${bio.length > 180 ? 'text-amber-300' : 'text-slate-500'}`}>
-                    {bio.length}/200
-                  </span>
+                <div className="flex items-center justify-between gap-2">
+                  <label className="block text-xs font-medium text-slate-300">Bio (Markdown)</label>
+                  <div className="flex items-center gap-2">
+                    <div className="flex overflow-hidden rounded-lg border border-white/10 text-[10px] font-semibold">
+                      <button
+                        type="button"
+                        onClick={() => setBioTab('write')}
+                        className={`px-2 py-0.5 transition-colors ${
+                          bioTab === 'write' ? 'bg-blue-600 text-white' : 'bg-slate-900 text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        Write
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setBioTab('preview')}
+                        className={`px-2 py-0.5 transition-colors ${
+                          bioTab === 'preview' ? 'bg-blue-600 text-white' : 'bg-slate-900 text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        Preview
+                      </button>
+                    </div>
+                    <span className={`font-mono text-[10px] ${bio.length > 450 ? 'text-amber-300' : 'text-slate-500'}`}>
+                      {bio.length}/{BIO_LIMIT}
+                    </span>
+                  </div>
                 </div>
-                <textarea
-                  value={bio}
-                  maxLength={200}
-                  rows={3}
-                  onChange={(e) => setBio(e.target.value)}
-                  placeholder="What do you build? (bots, APIs, games…)"
-                  className="mt-1 w-full resize-none rounded-xl border border-white/10 bg-slate-900 px-3.5 py-2 text-xs leading-relaxed text-white placeholder:text-slate-600 focus:border-blue-500 focus:outline-none"
-                />
+
+                {bioTab === 'write' ? (
+                  <>
+                    {/* Markdown toolbar — wraps the selection at the caret */}
+                    <div className="mt-1.5 flex flex-wrap gap-1">
+                      {BIO_CHIPS.map((chip) => (
+                        <button
+                          key={chip.label}
+                          type="button"
+                          title={chip.title}
+                          onClick={() => insertBio(chip)}
+                          className="rounded-md border border-white/10 bg-slate-900 px-2 py-1 font-mono text-[10px] text-slate-300 transition-colors hover:border-blue-500/50 hover:text-blue-300"
+                        >
+                          {chip.label}
+                        </button>
+                      ))}
+                    </div>
+                    <textarea
+                      ref={bioRef}
+                      value={bio}
+                      maxLength={BIO_LIMIT}
+                      rows={4}
+                      onChange={(e) => setBio(e.target.value)}
+                      placeholder={'What do you build? (bots, APIs, games…)\n\n### Stack\n```ts\nconst api = await fetch("/api/v1/status");\n```'}
+                      className="mt-1.5 w-full resize-none rounded-xl border border-white/10 bg-slate-900 px-3.5 py-2 text-xs leading-relaxed text-white placeholder:text-slate-600 focus:border-blue-500 focus:outline-none"
+                    />
+                    <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
+                      Markdown supported: **bold**, *italic*, `inline code`, fenced code blocks and [links](https://…) —
+                      rendered by the same XSS-safe renderer that shows it on your public page.
+                    </p>
+                  </>
+                ) : (
+                  <div className="mt-1.5 min-h-[96px] rounded-xl border border-white/10 bg-slate-900 px-3.5 py-2.5 text-left">
+                    {bio.trim() ? (
+                      <Markdown text={bio} className="text-xs" />
+                    ) : (
+                      <span className="text-[11px] italic text-slate-500">Nothing to preview yet — write something first.</span>
+                    )}
+                  </div>
+                )}
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">

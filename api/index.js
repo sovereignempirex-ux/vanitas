@@ -4106,9 +4106,9 @@ async function buildApp() {
     }
     let bio;
     if (typeof req.body?.bio === "string") {
-      const value = req.body.bio.trim();
-      if (value.length > 200) {
-        return res.status(400).json({ error: "Bio must be 200 characters or fewer" });
+      const value = sanitizeText(req.body.bio, 4e3);
+      if (value.length > 500) {
+        return res.status(400).json({ error: "Bio must be 500 characters or fewer" });
       }
       bio = value;
     }

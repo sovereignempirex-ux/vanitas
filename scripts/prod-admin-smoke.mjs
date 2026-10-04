@@ -254,6 +254,24 @@ check(
     !('email' in (pubU.json?.profile || {})),
   { s: pubU.status, p: pubU.json?.profile },
 );
+// Markdown bios round-trip on PostgreSQL — newlines (code blocks, lists)
+// must survive the save/load cycle byte for byte.
+const mdBio = '### Prod md bio\n\n```ts\nconst ok = true;\n```\n- [Vanitas](https://vanitas-bot.vercel.app)';
+const mdR = await call('PATCH', '/auth/profile', {
+  token: unA.json?.token,
+  body: { name: 'Username Probe A', avatarUrl: '', username: claimed, bio: mdBio },
+});
+check(
+  'markdown bio persists on PG (verbatim, newlines intact)',
+  mdR.status === 200 && mdR.json?.user?.bio === mdBio,
+  { s: mdR.status, bio: mdR.json?.user?.bio },
+);
+const mdPub = await call('GET', `/profiles/${claimed}`);
+check(
+  'public profile serves markdown bio',
+  mdPub.status === 200 && mdPub.json?.profile?.bio === mdBio,
+  { s: mdPub.status, bio: mdPub.json?.profile?.bio },
+);
 const delU1 = await call('DELETE', `/admin/users/${unA.json?.user?.id}`, admin);
 const delU2 = await call('DELETE', `/admin/users/${unB.json?.user?.id}`, admin);
 check(
