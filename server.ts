@@ -3012,75 +3012,137 @@ export async function buildApp() {
   // ----------------------------------------------------
   // CLIENT DOWNLOADS & RELEASE ARTIFACTS
   // ----------------------------------------------------
+  // ---------------------------------------------------------------------------
+  // Client release downloads. What a user downloads per platform today is a
+  // SIGNED BUILD MANIFEST (text) — native binaries are not published yet and
+  // the UI discloses that. Integrity is real: the served bytes, the metadata
+  // sha256/sizeBytes and the page verifier all describe the same file.
+  //   • Console button → session-authenticated fetch (real success/failure)
+  //   • QR on another device → short-lived signed link minted by a session
+  // Counts move ONLY when bytes are actually served.
+  // ---------------------------------------------------------------------------
+  const DOWNLOAD_LINK_TTL_MS = 10 * 60 * 1000;
+  // Signed with a key derived from DATABASE_URL so any serverless instance
+  // can verify a link minted by another one (same pattern as the 2FA state
+  // key above, with a domain-separation prefix so the keys differ). With
+  // neither secret configured (pure local dev, single process), fall back to
+  // a random per-process key: links are 10-minute credentials anyway, whereas
+  // a hardcoded constant would let anyone forge them.
+  const downloadSignKey = crypto
+    .createHash('sha256')
+    .update(
+      `download-link:${
+        process.env.DATABASE_URL ||
+        process.env.ADMIN_API_TOKEN ||
+        `local-${crypto.randomBytes(32).toString('hex')}`
+      }`,
+    )
+    .digest();
+
+  const signDownloadLink = (type: string, exp: number, uid: string): string =>
+    crypto.createHmac('sha256', downloadSignKey).update(`${type}|${exp}|${uid}`).digest('base64url');
+
   app.get('/api/v1/download/releases', (_req, res) => {
     res.json({
       success: true,
-      latestVersion: '1.4.2',
+      // Derived from the catalog itself — never a hardcoded version string.
+      latestVersion: db.releases[0]?.version || '',
       releases: db.releases,
+    });
+  });
+
+  // Mint a short-lived signed download link (used by the cross-device QR).
+  // Requires a real session — a device without credentials can consume the
+  // link, but only a signed-in user can create one.
+  app.post('/api/v1/download/:type/token', (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
+    const type = sanitizeText(req.params.type, 16);
+    if (!['apk', 'exe', 'dmg', 'appimage'].includes(type)) {
+      return res.status(400).json({ error: 'Invalid platform release type. Expected: apk, exe, dmg, appimage' });
+    }
+    const exp = Date.now() + DOWNLOAD_LINK_TTL_MS;
+    const sig = signDownloadLink(type, exp, actor.id);
+    res.json({
+      url: `/api/v1/download/${type}?exp=${exp}&uid=${encodeURIComponent(actor.id)}&sig=${sig}`,
+      expiresAt: new Date(exp).toISOString(),
+      expiresInSec: DOWNLOAD_LINK_TTL_MS / 1000,
     });
   });
 
   app.get('/api/v1/download/:type', (req, res) => {
     try {
-      const actor = getActorUser(req);
-      if (!actor) return res.status(401).json({ error: 'Authentication required' });
-      const source = detectSource(req);
       const type = sanitizeText(req.params.type, 16) as 'apk' | 'exe' | 'dmg' | 'appimage';
+      const typeValid = ['apk', 'exe', 'dmg', 'appimage'].includes(type);
+      const source = detectSource(req);
 
-      if (!['apk', 'exe', 'dmg', 'appimage'].includes(type)) {
+      // Authorization path A: a real session (the console's own fetch).
+      let actor = getActorUser(req);
+
+      // Authorization path B: a valid short-lived signed link (QR scan).
+      // The signature covers type + expiry + issuing user id, so a link for
+      // one artifact cannot be replayed against another or extended.
+      if (!actor) {
+        const exp = Number(req.query.exp);
+        const sig = String(req.query.sig || '');
+        const uid = String(req.query.uid || '').slice(0, 64);
+        const now = Date.now();
+        let valid = false;
+        if (typeValid && sig && Number.isFinite(exp) && exp > now && exp <= now + DOWNLOAD_LINK_TTL_MS) {
+          const expected = Buffer.from(signDownloadLink(type, exp, uid), 'utf8');
+          const given = Buffer.from(sig, 'utf8');
+          valid = expected.length === given.length && crypto.timingSafeEqual(expected, given);
+        }
+        if (!valid) return res.status(401).json({ error: 'Authentication required' });
+        // Attribute to the issuing account when it still exists; otherwise to
+        // an honest machine principal — never to a fabricated human.
+        actor =
+          db.users.find((u) => u.id === uid) || {
+            id: 'usr_signed_download_link',
+            email: 'signed-download-link@vanitas.local',
+            name: 'Signed Download Link',
+            username: 'signed_download_link',
+            avatarUrl: '',
+            role: 'USER' as const,
+            twoFactorEnabled: false,
+            createdAt: '1970-01-01T00:00:00.000Z',
+            lastLoginAt: '1970-01-01T00:00:00.000Z',
+            verification: '',
+            connectedAccounts: { google: false, github: false, discord: false },
+          };
+      }
+
+      if (!typeValid) {
         return res.status(400).json({ error: 'Invalid platform release type. Expected: apk, exe, dmg, appimage' });
       }
 
-      const release = db.recordClientDownload(type, actor, source);
+      const release = db.releases.find((r) => r.type === type);
       if (!release) return res.status(404).json({ error: 'Release artifact not found' });
 
-      // If client requests JSON representation (e.g. from frontend API inspector)
+      // Metadata inspection is a pure read — it NEVER moves download counts.
       if (req.query.format === 'json' || req.headers.accept?.includes('application/json')) {
         return res.json({
           success: true,
           release,
-          downloadUrl: `/api/v1/download/${type}?direct=true`,
+          artifactKind: release.artifactKind,
+          downloadUrl: `/api/v1/download/${type}`,
         });
       }
 
-      // Generate downloadable client binary package
-      const mimeTypes: Record<string, string> = {
-        apk: 'application/vnd.android.package-archive',
-        exe: 'application/x-msdownload',
-        dmg: 'application/x-apple-diskimage',
-        appimage: 'application/x-executable',
-      };
+      const payload = db.getReleasePayload(type);
+      if (!payload) return res.status(404).json({ error: 'Release artifact not found' });
 
-      const contentType = mimeTypes[type] || 'application/octet-stream';
-      const filename = release.filename;
+      // The count and the audit entry move only now — bytes are leaving.
+      db.recordClientDownload(type, actor, source);
 
-      // Construct verified Vanitas client manifest payload header
-      const manifestHeader = [
-        `==============================================================================`,
-        `VANITAS UNIFIED PLATFORM CLIENT BINARY PACKAGE`,
-        `==============================================================================`,
-        `Artifact:       ${release.name}`,
-        `Filename:       ${release.filename}`,
-        `Version:        ${release.version}`,
-        `Platform:       ${release.platform}`,
-        `Target Arch:    ${release.architecture}`,
-        `SHA-256:        ${release.sha256}`,
-        `Build Date:     ${release.releaseDate}`,
-        `Central Gateway: https://vanitas-bot.vercel.app/api/v1/`,
-        `==============================================================================`,
-        `[VANITAS RUNTIME PAYLOAD INITIALIZED - BIOMETRIC & OFFLINE GATEWAY DAEMON READY]`,
-        `\n`,
-      ].join('\n');
-
-      const buffer = Buffer.from(manifestHeader, 'utf-8');
-
-      res.setHeader('Content-Disposition', `attachment; filename="${sanitizeText(filename, 128)}"`);
-      res.setHeader('Content-Type', contentType);
+      res.setHeader('Content-Disposition', `attachment; filename="${sanitizeText(release.filename, 128)}"`);
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
       res.setHeader('X-Vanitas-Version', sanitizeText(release.version, 32));
       res.setHeader('X-Vanitas-Checksum-SHA256', sanitizeText(release.sha256, 128));
-      res.setHeader('Content-Length', buffer.length);
+      res.setHeader('X-Vanitas-Artifact-Kind', release.artifactKind);
+      res.setHeader('Content-Length', String(payload.length));
 
-      res.send(buffer);
+      res.send(payload);
     } catch (err: any) {
       console.error('[download]', (err as Error)?.message);
       res.status(500).json({ error: 'Download failed' });

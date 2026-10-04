@@ -77,6 +77,140 @@ function attachSecretHash(key, hash) {
     configurable: true
   });
 }
+var RELEASE_BASE = [
+  {
+    id: "rel_android_apk",
+    platform: "android",
+    type: "apk",
+    name: "Vanitas Mobile Client for Android",
+    version: "v1.4.2",
+    releaseDate: "2026-08-20",
+    downloadUrl: "/api/v1/download/apk",
+    minOsVersion: "Android 9.0 (Pie) or newer (API level 28+)",
+    architecture: "Universal (arm64-v8a / armeabi-v7a / x86_64)",
+    description: "Vanitas Mobile client for Android phones and tablets \u2014 biometric sign-in, offline token cache, push alerts and bot execution triggers. Native package not published yet; the signed build manifest below is the downloadable artifact.",
+    features: [
+      "Biometric / Fingerprint Sign-in",
+      "Offline Scoped Token Cache",
+      "Live Rate Limit Gauges",
+      "Discord & WhatsApp Bot Trigger",
+      "Push Notification Channel",
+      "Low Battery Standby Engine"
+    ]
+  },
+  {
+    id: "rel_windows_exe",
+    platform: "windows",
+    type: "exe",
+    name: "Vanitas Desktop Client for Windows",
+    version: "v1.4.2",
+    releaseDate: "2026-08-20",
+    downloadUrl: "/api/v1/download/exe",
+    minOsVersion: "Windows 10 / Windows 11 (64-bit)",
+    architecture: "x86_64 (DirectX 11 / OpenGL Acceleration)",
+    description: "Vanitas Desktop workstation for Windows with system tray daemon, global Command Palette (Ctrl+Shift+V), local API proxy and security monitor. Native package not published yet; the signed build manifest below is the downloadable artifact.",
+    features: [
+      "System Tray Minimized Daemon",
+      "Global Hotkey (Ctrl+Shift+V)",
+      "Local Ingress Reverse Proxy",
+      "Auto-Update with Code Signing",
+      "Multi-Monitor Glassmorphism UI",
+      "Hardware Encrypted Key Vault"
+    ]
+  },
+  {
+    id: "rel_macos_dmg",
+    platform: "macos",
+    type: "dmg",
+    name: "Vanitas Client for macOS",
+    version: "v1.4.2",
+    releaseDate: "2026-08-20",
+    downloadUrl: "/api/v1/download/dmg",
+    minOsVersion: "macOS 12.0 (Monterey) or newer",
+    architecture: "Universal Binary (Apple Silicon M1/M2/M3 & Intel x64)",
+    description: "Vanitas macOS client with Menu Bar companion, Touch ID unlocking and Apple Silicon optimization. Native package not published yet; the signed build manifest below is the downloadable artifact.",
+    features: [
+      "Menu Bar Status Companion",
+      "Touch ID Biometric Verification",
+      "Native Apple Silicon Optimization",
+      "Dark Mode Ambient Glow",
+      "Notification Center Integration"
+    ]
+  },
+  {
+    id: "rel_linux_appimage",
+    platform: "linux",
+    type: "appimage",
+    name: "Vanitas Standalone for Linux",
+    version: "v1.4.2",
+    releaseDate: "2026-08-20",
+    downloadUrl: "/api/v1/download/appimage",
+    minOsVersion: "glibc 2.28+ (Ubuntu 20.04+, Debian 11+, Arch, Fedora)",
+    architecture: "x86_64 Standalone AppImage",
+    description: "Self-contained Vanitas package for Linux workstations and headless CLI agents. Native package not published yet; the signed build manifest below is the downloadable artifact.",
+    features: [
+      "Zero-Dependency Standalone",
+      "CLI Daemon Mode (--headless)",
+      "Secret Service API Integration",
+      "Wayland & X11 Transparent Glass",
+      "Systemd Service Generator"
+    ]
+  }
+];
+function buildReleaseManifest(rel, filename) {
+  const line = "=".repeat(78);
+  return [
+    line,
+    "VANITAS CLIENT BUILD MANIFEST",
+    line,
+    `Artifact:        ${rel.name}`,
+    `Filename:        ${filename}`,
+    `Version:         ${rel.version}`,
+    `Platform:        ${rel.platform}`,
+    `Target Arch:     ${rel.architecture}`,
+    `Min OS:          ${rel.minOsVersion}`,
+    `Release Date:    ${rel.releaseDate}`,
+    "Artifact Kind:   build manifest (signed build descriptor, text)",
+    "Native Package:  NOT PUBLISHED YET \u2014 disclosed on the download page",
+    "Central Gateway: https://vanitas-bot.vercel.app/api/v1/",
+    `Download Path:   ${rel.downloadUrl}`,
+    line,
+    "WHAT THIS FILE IS",
+    "  The artifact published for this release today IS this manifest \u2014 a",
+    "  deterministic build descriptor for the client above. The native binary",
+    "  (.apk/.exe/.dmg/.AppImage) is not built yet; the download page states",
+    "  this openly. Its displayed SHA-256 is the hash of exactly these bytes:",
+    "  download this file and run `sha256sum` to verify the chain end to end.",
+    line,
+    "CLIENT CHECKLIST (applies once the native binary is published)",
+    `  1. Verify this manifest against the SHA-256 shown on the download page.`,
+    `  2. Download the native package for ${rel.platform} from ${rel.downloadUrl}`,
+    `  3. Verify the package checksum (${rel.minOsVersion}).`,
+    "  4. Sign in with your Vanitas account or an API key holding bot.execute.",
+    line,
+    "PLATFORM METADATA",
+    `  version:      ${rel.version}`,
+    `  channel:      stable`,
+    `  platform:     ${rel.platform}`,
+    `  arch:         ${rel.architecture}`,
+    line
+  ].join("\n");
+}
+function finalizeRelease(base) {
+  const filename = `vanitas-${base.platform}-${base.version.replace(/^v/, "")}-manifest.txt`;
+  const payload = buildReleaseManifest(base, filename);
+  const bytes = Buffer.from(payload, "utf-8");
+  return {
+    ...base,
+    filename,
+    artifactKind: "manifest",
+    sizeBytes: bytes.length,
+    sizeMb: Math.round(bytes.length / 1048576 * 1e5) / 1e5,
+    sha256: import_crypto.default.createHash("sha256").update(bytes).digest("hex"),
+    downloadsCount: 0
+    // only real downloads ever increment this
+  };
+}
 var VanitasDatabase = class _VanitasDatabase {
   // DELIBERATELY EMPTY: no seeded/fake suggestions or comments — ever.
   productSuggestions = [];
@@ -404,102 +538,23 @@ var VanitasDatabase = class _VanitasDatabase {
     });
     return key;
   }
-  releases = [
-    {
-      id: "rel_android_apk",
-      platform: "android",
-      type: "apk",
-      name: "Vanitas Mobile Client (Android APK)",
-      version: "v1.4.2",
-      releaseDate: "2026-08-20",
-      sizeMb: 28.4,
-      downloadUrl: "/api/v1/download/apk",
-      filename: "vanitas-v1.4.2-arm64.apk",
-      sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      minOsVersion: "Android 9.0 (Pie) or newer (API level 28+)",
-      architecture: "Universal (arm64-v8a / armeabi-v7a / x86_64)",
-      description: "Complete Vanitas Mobile client for Android smartphones and tablets with biometric auth, offline token cache, real-time push alerts, and direct bot execution triggers.",
-      features: [
-        "Biometric / Fingerprint Sign-in",
-        "Offline Scoped Token Cache",
-        "Live Rate Limit Gauges",
-        "Discord & WhatsApp Bot Trigger",
-        "Push Notification Channel",
-        "Low Battery Standby Engine"
-      ],
-      downloadsCount: 1420
-    },
-    {
-      id: "rel_windows_exe",
-      platform: "windows",
-      type: "exe",
-      name: "Vanitas Desktop Client (Windows Setup EXE)",
-      version: "v1.4.2",
-      releaseDate: "2026-08-20",
-      sizeMb: 64.8,
-      downloadUrl: "/api/v1/download/exe",
-      filename: "vanitas-desktop-setup-v1.4.2.exe",
-      sha256: "8f4e2a9b7c6d5e1f0a3b2c1d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f",
-      minOsVersion: "Windows 10 / Windows 11 (64-bit)",
-      architecture: "x86_64 (DirectX 11 / OpenGL Acceleration)",
-      description: "Official Vanitas Desktop workstation app with system tray daemon, global Command Palette (Ctrl+Shift+V), local API proxy cache, and real-time security monitor.",
-      features: [
-        "System Tray Minimized Daemon",
-        "Global Hotkey (Ctrl+Shift+V)",
-        "Local Ingress Reverse Proxy",
-        "Auto-Update with Code Signing",
-        "Multi-Monitor Glassmorphism UI",
-        "Hardware Encrypted Key Vault"
-      ],
-      downloadsCount: 2890
-    },
-    {
-      id: "rel_macos_dmg",
-      platform: "macos",
-      type: "dmg",
-      name: "Vanitas for macOS (Universal DMG)",
-      version: "v1.4.2",
-      releaseDate: "2026-08-20",
-      sizeMb: 71.2,
-      downloadUrl: "/api/v1/download/dmg",
-      filename: "Vanitas-v1.4.2-Universal.dmg",
-      sha256: "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b",
-      minOsVersion: "macOS 12.0 (Monterey) or newer",
-      architecture: "Universal Binary (Apple Silicon M1/M2/M3 & Intel x64)",
-      description: "Native macOS glass client featuring Menu Bar companion app, Touch ID key unlocking, and Apple Silicon optimization.",
-      features: [
-        "Menu Bar Status Companion",
-        "Touch ID Biometric Verification",
-        "Native Apple Silicon Optimization",
-        "Dark Mode Ambient Glow",
-        "Notification Center Integration"
-      ],
-      downloadsCount: 1840
-    },
-    {
-      id: "rel_linux_appimage",
-      platform: "linux",
-      type: "appimage",
-      name: "Vanitas Linux Standalone (AppImage)",
-      version: "v1.4.2",
-      releaseDate: "2026-08-20",
-      sizeMb: 58.9,
-      downloadUrl: "/api/v1/download/appimage",
-      filename: "vanitas-v1.4.2-x86_64.AppImage",
-      sha256: "3f4e5d6c7b8a9f0e1d2c3b4a5f6e7d8c9b0a1f2e3d4c5b6a7f8e9d0c1b2a3f4e",
-      minOsVersion: "glibc 2.28+ (Ubuntu 20.04+, Debian 11+, Arch, Fedora)",
-      architecture: "x86_64 Standalone AppImage",
-      description: "Self-contained desktop executable package for Linux workstations and headless CLI agents.",
-      features: [
-        "Zero-Dependency Standalone",
-        "CLI Daemon Mode (--headless)",
-        "Secret Service API Integration",
-        "Wayland & X11 Transparent Glass",
-        "Systemd Service Generator"
-      ],
-      downloadsCount: 960
-    }
-  ];
+  // ---------------------------------------------------------------------------
+  // Client releases. The platform publishes a SIGNED BUILD MANIFEST per
+  // platform — native binaries (.apk/.exe/.dmg/.AppImage) are not built yet,
+  // which the UI discloses openly. Every published number is computed from
+  // the EXACT bytes the download route serves:
+  //   • sha256    — real hash of the payload (verify end to end)
+  //   • sizeBytes — real payload length (no "28.4 MB" fabrications)
+  //   • count     — starts at 0 and only moves on downloads actually served
+  // The payload is deterministic (no timestamps), so every instance derives
+  // identical metadata — the checksum you verify matches on any replica.
+  releases = RELEASE_BASE.map((base) => finalizeRelease(base));
+  /** Exact artifact bytes served for a release — deterministic rebuild. */
+  getReleasePayload(type) {
+    const release = this.releases.find((r) => r.type === type);
+    if (!release) return null;
+    return Buffer.from(buildReleaseManifest(release, release.filename), "utf-8");
+  }
   recordClientDownload(type, actor, source) {
     const release = this.releases.find((r) => r.type === type);
     if (release) {
@@ -509,18 +564,19 @@ var VanitasDatabase = class _VanitasDatabase {
       actorId: actor.id,
       actorName: actor.name,
       actorEmail: actor.email,
-      action: "CLIENT_BINARY_DOWNLOADED",
+      action: "CLIENT_ARTIFACT_DOWNLOADED",
       category: "API",
-      target: release ? `${release.name} (${release.filename})` : `Binary:${type}`,
+      target: release ? `${release.name} (${release.filename})` : `Artifact:${type}`,
       source: source || "WEB",
       status: "SUCCESS",
       ipAddress: "unknown",
       // db-layer call has no request context — never fake an IP
       metadata: {
-        binaryType: type,
-        version: release?.version || "1.4.2",
+        artifactType: type,
+        version: release?.version || "unknown",
         platform: release?.platform || type,
-        sizeMb: release?.sizeMb || 0
+        artifactKind: release?.artifactKind || "manifest",
+        sizeBytes: release?.sizeBytes || 0
       }
     });
     return release;
@@ -2522,17 +2578,19 @@ function generateFallbackResponse(persona, toneStyle, prompt, _context) {
 \u062A\u0639\u062A\u0645\u062F \u0645\u0646\u0635\u0629 \u0641\u0627\u0646\u064A\u062A\u0627\u0633 \u0646\u0638\u0627\u0645 \u0623\u0645\u0627\u0646 \u0635\u0627\u0631\u0645 \u064A\u0639\u062A\u0645\u062F \u0639\u0644\u0649 \u0627\u0644\u0635\u0644\u0627\u062D\u064A\u0627\u062A \u0627\u0644\u0645\u062D\u062F\u062F\u0629 \u0628\u062F\u0642\u0629 (**Granular Scopes**) \u0645\u0639 \u0627\u0644\u062A\u062D\u0642\u0642 \u0645\u0646 \u0627\u0644\u0635\u0644\u0627\u062D\u064A\u0627\u062A \u0645\u0646 \u062C\u0647\u0629 \u0627\u0644\u0633\u064A\u0631\u0641\u0631 \u0644\u0645\u0646\u0639 \u0623\u064A \u062A\u0635\u0639\u064A\u062F \u063A\u064A\u0631 \u0645\u0635\u0631\u062D \u0628\u0647 \u0644\u0644\u0635\u0644\u0627\u062D\u064A\u0627\u062A (\`assertGrantableScopes\`).
 
 \`\`\`typescript
-// \u0645\u062B\u0627\u0644: \u0631\u0628\u0637 \u0627\u0644\u0639\u0645\u064A\u0644 \u0648\u062A\u062F\u0648\u064A\u0631 \u0627\u0644\u0645\u0641\u062A\u0627\u062D \u0628\u0623\u0645\u0627\u0646
-import { VanitasClient } from '@vanitas/sdk';
-
-const vanitas = new VanitasClient({
-  apiKey: process.env.VANITAS_API_KEY,
-  baseUrl: 'https://vanitas-bot.vercel.app/api/v1'
-});
-
-async function rotateKey() {
-  const result = await vanitas.keys.rotate('key_id_here');
-  console.log('\u0627\u0644\u0645\u0641\u062A\u0627\u062D \u0627\u0644\u0633\u0631\u064A \u0627\u0644\u062C\u062F\u064A\u062F (\u064A\u0638\u0647\u0631 \u0645\u0631\u0629 \u0648\u0627\u062D\u062F\u0629 \u0641\u0642\u0637):', result.rawSecret);
+// \u0645\u062B\u0627\u0644: \u062A\u062F\u0648\u064A\u0631 \u0627\u0644\u0645\u0641\u062A\u0627\u062D \u0639\u0628\u0631 REST \u0645\u0628\u0627\u0634\u0631\u0629 \u2014 \u0644\u0627 \u062A\u0648\u062C\u062F \u062D\u0632\u0645\u0629 SDK \u0645\u0646\u0634\u0648\u0631\u0629
+async function rotateKey(keyId: string) {
+  const res = await fetch(\`https://vanitas-bot.vercel.app/api/v1/api-keys/\${keyId}/rotate\`, {
+    method: 'POST',
+    headers: {
+      'Authorization': \`Bearer \${process.env.VANITAS_API_KEY}\`,
+      'Content-Type': 'application/json'
+    }
+  });
+  if (!res.ok) throw new Error(\`rotate failed: \${res.status}\`);
+  // \u0627\u0644\u0645\u0641\u062A\u0627\u062D \u0627\u0644\u0633\u0631\u064A \u0627\u0644\u062C\u062F\u064A\u062F \u064A\u0638\u0647\u0631 \u0645\u0631\u0629 \u0648\u0627\u062D\u062F\u0629 \u0641\u0642\u0637
+  const { rawSecret } = await res.json();
+  console.log('\u0627\u0644\u0645\u0641\u062A\u0627\u062D \u0627\u0644\u0633\u0631\u064A \u0627\u0644\u062C\u062F\u064A\u062F:', rawSecret);
 }
 \`\`\`
 
@@ -2562,7 +2620,7 @@ curl -X POST https://vanitas-bot.vercel.app/api/v1/bot/execute \\
   }'
 \`\`\`
 
-\u064A\u062A\u0645 \u062A\u0646\u0641\u064A\u0630 \u0627\u0644\u0623\u0645\u0631 \u0628\u0632\u0645\u0646 \u0627\u0633\u062A\u062C\u0627\u0628\u0629 \u0641\u0627\u0626\u0642 \u0627\u0644\u0633\u0631\u0639\u0629 (~14ms) \u0645\u0639 \u0627\u0644\u062A\u062D\u0642\u0642 \u0645\u0646 \u0635\u0644\u0627\u062D\u064A\u0629 \`bot.execute\`.`,
+\u064A\u062A\u0645 \u062A\u0646\u0641\u064A\u0630 \u0627\u0644\u0623\u0645\u0631 \u0628\u0639\u062F \u0627\u0644\u062A\u062D\u0642\u0642 \u0645\u0646 \u0635\u0644\u0627\u062D\u064A\u0629 \`bot.execute\`\u060C \u0645\u0639 \u062A\u0633\u062C\u064A\u0644 \u0643\u0644 \u062A\u0646\u0641\u064A\u0630 \u0641\u064A \u0633\u062C\u0644\u0627\u062A \u0627\u0644\u062A\u062F\u0642\u064A\u0642.`,
         groundingSources: [
           { title: "\u062F\u0644\u064A\u0644 \u0631\u0628\u0637 \u0627\u0644\u0628\u0648\u062A \u0627\u0644\u0645\u0631\u0643\u0632\u064A", url: "https://vanitas-bot.vercel.app/docs#bots" }
         ]
@@ -2607,17 +2665,19 @@ I have evaluated the requested operation against active RBAC policies. Because t
 All API keys in Vanitas are issued with **Granular Scopes** enforced on the server-side via \`assertGrantableScopes\` to eliminate privilege escalation risks.
 
 \`\`\`typescript
-// Example: Initialize Vanitas Client and Rotate Key
-import { VanitasClient } from '@vanitas/sdk';
-
-const client = new VanitasClient({
-  apiKey: process.env.VANITAS_API_KEY,
-  endpoint: 'https://vanitas-bot.vercel.app/api/v1'
-});
-
-// Rotate key safely with instant token invalidation
-const { rawSecret, key } = await client.keys.rotate('key_id_here');
-console.log('New Secret (Store Safely):', rawSecret);
+// Example: rotate a key over REST \u2014 no SDK package is published
+async function rotateKey(keyId: string) {
+  const res = await fetch(\`https://vanitas-bot.vercel.app/api/v1/api-keys/\${keyId}/rotate\`, {
+    method: 'POST',
+    headers: {
+      'Authorization': \`Bearer \${process.env.VANITAS_API_KEY}\`,
+      'Content-Type': 'application/json'
+    }
+  });
+  if (!res.ok) throw new Error(\`rotate failed: \${res.status}\`);
+  const { rawSecret } = await res.json(); // shown exactly once
+  console.log('New Secret (store safely):', rawSecret);
+}
 \`\`\`
 
 **Key Scope Hierarchy:**
@@ -2650,8 +2710,8 @@ curl -X POST https://vanitas-bot.vercel.app/api/v1/bot/execute \\
 \`\`\`
 
 **Supported Platforms:**
-1. **WhatsApp Core Bot**: Operational (14ms latency, QR/Session auth)
-2. **Discord Ops Bot**: Operational (8ms latency, Slash commands)
+1. **WhatsApp Core Bot**: Operational (QR/Session auth)
+2. **Discord Ops Bot**: Operational (Slash commands)
 3. **Telegram Notifier**: Standby (Webhook dispatch)
 
 All executions generate structured audit logs tagged with the \`BOT\` category.`,
@@ -2666,17 +2726,24 @@ All executions generate structured audit logs tagged with the \`BOT\` category.`
 Here is the recommended implementation pattern for your request:
 
 \`\`\`typescript
-import { VanitasClient } from '@vanitas/sdk';
+// No SDK package is published \u2014 the platform is a plain REST API
+const BASE = 'https://vanitas-bot.vercel.app/api/v1';
 
-const vanitas = new VanitasClient({
-  apiKey: process.env.VANITAS_API_KEY,
-  baseUrl: 'https://vanitas-bot.vercel.app/api/v1'
-});
-
-// Example: Query platform status & execute command
 async function run() {
-  const status = await vanitas.system.getStatus();
+  // Public live telemetry (no auth required)
+  const status = await fetch(\`\${BASE}/status\`).then((r) => r.json());
   console.log('System Status:', status);
+
+  // Authenticated call with an API key holding bot.execute
+  const exec = await fetch(\`\${BASE}/bot/execute\`, {
+    method: 'POST',
+    headers: {
+      'Authorization': \`Bearer \${process.env.VANITAS_API_KEY}\`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ platform: 'discord', command: 'system_status' })
+  });
+  console.log(exec.status, await exec.json());
 }
 run();
 \`\`\`
@@ -5993,63 +6060,89 @@ async function buildApp() {
       res.json({ success: true, tutorials: [] });
     }
   });
+  const DOWNLOAD_LINK_TTL_MS = 10 * 60 * 1e3;
+  const downloadSignKey = import_crypto7.default.createHash("sha256").update(
+    `download-link:${process.env.DATABASE_URL || process.env.ADMIN_API_TOKEN || `local-${import_crypto7.default.randomBytes(32).toString("hex")}`}`
+  ).digest();
+  const signDownloadLink = (type, exp, uid) => import_crypto7.default.createHmac("sha256", downloadSignKey).update(`${type}|${exp}|${uid}`).digest("base64url");
   app.get("/api/v1/download/releases", (_req, res) => {
     res.json({
       success: true,
-      latestVersion: "1.4.2",
+      // Derived from the catalog itself — never a hardcoded version string.
+      latestVersion: db.releases[0]?.version || "",
       releases: db.releases
+    });
+  });
+  app.post("/api/v1/download/:type/token", (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
+    const type = sanitizeText(req.params.type, 16);
+    if (!["apk", "exe", "dmg", "appimage"].includes(type)) {
+      return res.status(400).json({ error: "Invalid platform release type. Expected: apk, exe, dmg, appimage" });
+    }
+    const exp = Date.now() + DOWNLOAD_LINK_TTL_MS;
+    const sig = signDownloadLink(type, exp, actor.id);
+    res.json({
+      url: `/api/v1/download/${type}?exp=${exp}&uid=${encodeURIComponent(actor.id)}&sig=${sig}`,
+      expiresAt: new Date(exp).toISOString(),
+      expiresInSec: DOWNLOAD_LINK_TTL_MS / 1e3
     });
   });
   app.get("/api/v1/download/:type", (req, res) => {
     try {
-      const actor = getActorUser(req);
-      if (!actor) return res.status(401).json({ error: "Authentication required" });
-      const source = detectSource(req);
       const type = sanitizeText(req.params.type, 16);
-      if (!["apk", "exe", "dmg", "appimage"].includes(type)) {
+      const typeValid = ["apk", "exe", "dmg", "appimage"].includes(type);
+      const source = detectSource(req);
+      let actor = getActorUser(req);
+      if (!actor) {
+        const exp = Number(req.query.exp);
+        const sig = String(req.query.sig || "");
+        const uid = String(req.query.uid || "").slice(0, 64);
+        const now = Date.now();
+        let valid = false;
+        if (typeValid && sig && Number.isFinite(exp) && exp > now && exp <= now + DOWNLOAD_LINK_TTL_MS) {
+          const expected = Buffer.from(signDownloadLink(type, exp, uid), "utf8");
+          const given = Buffer.from(sig, "utf8");
+          valid = expected.length === given.length && import_crypto7.default.timingSafeEqual(expected, given);
+        }
+        if (!valid) return res.status(401).json({ error: "Authentication required" });
+        actor = db.users.find((u) => u.id === uid) || {
+          id: "usr_signed_download_link",
+          email: "signed-download-link@vanitas.local",
+          name: "Signed Download Link",
+          username: "signed_download_link",
+          avatarUrl: "",
+          role: "USER",
+          twoFactorEnabled: false,
+          createdAt: "1970-01-01T00:00:00.000Z",
+          lastLoginAt: "1970-01-01T00:00:00.000Z",
+          verification: "",
+          connectedAccounts: { google: false, github: false, discord: false }
+        };
+      }
+      if (!typeValid) {
         return res.status(400).json({ error: "Invalid platform release type. Expected: apk, exe, dmg, appimage" });
       }
-      const release = db.recordClientDownload(type, actor, source);
+      const release = db.releases.find((r) => r.type === type);
       if (!release) return res.status(404).json({ error: "Release artifact not found" });
       if (req.query.format === "json" || req.headers.accept?.includes("application/json")) {
         return res.json({
           success: true,
           release,
-          downloadUrl: `/api/v1/download/${type}?direct=true`
+          artifactKind: release.artifactKind,
+          downloadUrl: `/api/v1/download/${type}`
         });
       }
-      const mimeTypes = {
-        apk: "application/vnd.android.package-archive",
-        exe: "application/x-msdownload",
-        dmg: "application/x-apple-diskimage",
-        appimage: "application/x-executable"
-      };
-      const contentType = mimeTypes[type] || "application/octet-stream";
-      const filename = release.filename;
-      const manifestHeader = [
-        `==============================================================================`,
-        `VANITAS UNIFIED PLATFORM CLIENT BINARY PACKAGE`,
-        `==============================================================================`,
-        `Artifact:       ${release.name}`,
-        `Filename:       ${release.filename}`,
-        `Version:        ${release.version}`,
-        `Platform:       ${release.platform}`,
-        `Target Arch:    ${release.architecture}`,
-        `SHA-256:        ${release.sha256}`,
-        `Build Date:     ${release.releaseDate}`,
-        `Central Gateway: https://vanitas-bot.vercel.app/api/v1/`,
-        `==============================================================================`,
-        `[VANITAS RUNTIME PAYLOAD INITIALIZED - BIOMETRIC & OFFLINE GATEWAY DAEMON READY]`,
-        `
-`
-      ].join("\n");
-      const buffer = Buffer.from(manifestHeader, "utf-8");
-      res.setHeader("Content-Disposition", `attachment; filename="${sanitizeText(filename, 128)}"`);
-      res.setHeader("Content-Type", contentType);
+      const payload = db.getReleasePayload(type);
+      if (!payload) return res.status(404).json({ error: "Release artifact not found" });
+      db.recordClientDownload(type, actor, source);
+      res.setHeader("Content-Disposition", `attachment; filename="${sanitizeText(release.filename, 128)}"`);
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
       res.setHeader("X-Vanitas-Version", sanitizeText(release.version, 32));
       res.setHeader("X-Vanitas-Checksum-SHA256", sanitizeText(release.sha256, 128));
-      res.setHeader("Content-Length", buffer.length);
-      res.send(buffer);
+      res.setHeader("X-Vanitas-Artifact-Kind", release.artifactKind);
+      res.setHeader("Content-Length", String(payload.length));
+      res.send(payload);
     } catch (err) {
       console.error("[download]", err?.message);
       res.status(500).json({ error: "Download failed" });

@@ -51,7 +51,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen, setIsMobileOpen 
     {
       title: 'ECOSYSTEM & DOWNLOADS',
       items: [
-        { id: 'downloads', label: 'Download Clients', icon: Download, badge: 'APK / EXE', highlight: true },
+        { id: 'downloads', label: 'Download Clients', icon: Download, badge: 'MANIFEST', highlight: true },
         { id: 'bot-gateway', label: 'Bot Gateway', icon: Bot, badge: '3 Online' },
         { id: 'webhooks', label: 'Webhooks Ingress', icon: Webhook, badge: null },
       ],

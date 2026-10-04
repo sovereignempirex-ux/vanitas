@@ -391,14 +391,25 @@ export interface ClientRelease {
   name: string;
   version: string;
   releaseDate: string;
+  /** Real size of the published artifact (computed from the served bytes). */
   sizeMb: number;
+  /** Exact artifact length in bytes — the source of truth for the UI. */
+  sizeBytes: number;
   downloadUrl: string;
   filename: string;
+  /** Real sha256 of the published artifact — verifiable end to end. */
   sha256: string;
+  /**
+   * What is actually downloadable today. 'manifest' = the signed build
+   * manifest (text) — native binaries are not published yet; the catalog
+   * serves 'binary' once real packages exist.
+   */
+  artifactKind: 'manifest' | 'binary';
   minOsVersion: string;
   architecture: string;
   description: string;
   features: string[];
+  /** Real downloads served by this process — starts at 0, never seeded. */
   downloadsCount: number;
   buildChannel?: 'stable' | 'beta' | 'nightly';
   hardwareSupport?: string[];

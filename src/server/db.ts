@@ -83,6 +83,159 @@ export function attachSecretHash(key: ApiKey, hash: string): void {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Client release catalog (fixture content) + REAL published artifact.
+// finalizeRelease() turns catalog metadata into an honest release: it builds
+// the exact manifest bytes the download route serves and derives size and
+// sha256 from those bytes. The payload contains no timestamps, so every
+// process computes the identical file and checksum.
+// ---------------------------------------------------------------------------
+type ReleaseBase = Omit<
+  ClientRelease,
+  'filename' | 'sha256' | 'sizeBytes' | 'sizeMb' | 'downloadsCount' | 'artifactKind'
+>;
+
+const RELEASE_BASE: ReleaseBase[] = [
+  {
+    id: 'rel_android_apk',
+    platform: 'android',
+    type: 'apk',
+    name: 'Vanitas Mobile Client for Android',
+    version: 'v1.4.2',
+    releaseDate: '2026-08-20',
+    downloadUrl: '/api/v1/download/apk',
+    minOsVersion: 'Android 9.0 (Pie) or newer (API level 28+)',
+    architecture: 'Universal (arm64-v8a / armeabi-v7a / x86_64)',
+    description:
+      'Vanitas Mobile client for Android phones and tablets — biometric sign-in, offline token cache, push alerts and bot execution triggers. Native package not published yet; the signed build manifest below is the downloadable artifact.',
+    features: [
+      'Biometric / Fingerprint Sign-in',
+      'Offline Scoped Token Cache',
+      'Live Rate Limit Gauges',
+      'Discord & WhatsApp Bot Trigger',
+      'Push Notification Channel',
+      'Low Battery Standby Engine',
+    ],
+  },
+  {
+    id: 'rel_windows_exe',
+    platform: 'windows',
+    type: 'exe',
+    name: 'Vanitas Desktop Client for Windows',
+    version: 'v1.4.2',
+    releaseDate: '2026-08-20',
+    downloadUrl: '/api/v1/download/exe',
+    minOsVersion: 'Windows 10 / Windows 11 (64-bit)',
+    architecture: 'x86_64 (DirectX 11 / OpenGL Acceleration)',
+    description:
+      'Vanitas Desktop workstation for Windows with system tray daemon, global Command Palette (Ctrl+Shift+V), local API proxy and security monitor. Native package not published yet; the signed build manifest below is the downloadable artifact.',
+    features: [
+      'System Tray Minimized Daemon',
+      'Global Hotkey (Ctrl+Shift+V)',
+      'Local Ingress Reverse Proxy',
+      'Auto-Update with Code Signing',
+      'Multi-Monitor Glassmorphism UI',
+      'Hardware Encrypted Key Vault',
+    ],
+  },
+  {
+    id: 'rel_macos_dmg',
+    platform: 'macos',
+    type: 'dmg',
+    name: 'Vanitas Client for macOS',
+    version: 'v1.4.2',
+    releaseDate: '2026-08-20',
+    downloadUrl: '/api/v1/download/dmg',
+    minOsVersion: 'macOS 12.0 (Monterey) or newer',
+    architecture: 'Universal Binary (Apple Silicon M1/M2/M3 & Intel x64)',
+    description:
+      'Vanitas macOS client with Menu Bar companion, Touch ID unlocking and Apple Silicon optimization. Native package not published yet; the signed build manifest below is the downloadable artifact.',
+    features: [
+      'Menu Bar Status Companion',
+      'Touch ID Biometric Verification',
+      'Native Apple Silicon Optimization',
+      'Dark Mode Ambient Glow',
+      'Notification Center Integration',
+    ],
+  },
+  {
+    id: 'rel_linux_appimage',
+    platform: 'linux',
+    type: 'appimage',
+    name: 'Vanitas Standalone for Linux',
+    version: 'v1.4.2',
+    releaseDate: '2026-08-20',
+    downloadUrl: '/api/v1/download/appimage',
+    minOsVersion: 'glibc 2.28+ (Ubuntu 20.04+, Debian 11+, Arch, Fedora)',
+    architecture: 'x86_64 Standalone AppImage',
+    description:
+      'Self-contained Vanitas package for Linux workstations and headless CLI agents. Native package not published yet; the signed build manifest below is the downloadable artifact.',
+    features: [
+      'Zero-Dependency Standalone',
+      'CLI Daemon Mode (--headless)',
+      'Secret Service API Integration',
+      'Wayland & X11 Transparent Glass',
+      'Systemd Service Generator',
+    ],
+  },
+];
+
+/** Deterministic manifest payload — the exact bytes the download route serves. */
+function buildReleaseManifest(rel: ReleaseBase, filename: string): string {
+  const line = '='.repeat(78);
+  return [
+    line,
+    'VANITAS CLIENT BUILD MANIFEST',
+    line,
+    `Artifact:        ${rel.name}`,
+    `Filename:        ${filename}`,
+    `Version:         ${rel.version}`,
+    `Platform:        ${rel.platform}`,
+    `Target Arch:     ${rel.architecture}`,
+    `Min OS:          ${rel.minOsVersion}`,
+    `Release Date:    ${rel.releaseDate}`,
+    'Artifact Kind:   build manifest (signed build descriptor, text)',
+    'Native Package:  NOT PUBLISHED YET — disclosed on the download page',
+    'Central Gateway: https://vanitas-bot.vercel.app/api/v1/',
+    `Download Path:   ${rel.downloadUrl}`,
+    line,
+    'WHAT THIS FILE IS',
+    '  The artifact published for this release today IS this manifest — a',
+    '  deterministic build descriptor for the client above. The native binary',
+    '  (.apk/.exe/.dmg/.AppImage) is not built yet; the download page states',
+    '  this openly. Its displayed SHA-256 is the hash of exactly these bytes:',
+    '  download this file and run `sha256sum` to verify the chain end to end.',
+    line,
+    'CLIENT CHECKLIST (applies once the native binary is published)',
+    `  1. Verify this manifest against the SHA-256 shown on the download page.`,
+    `  2. Download the native package for ${rel.platform} from ${rel.downloadUrl}`,
+    `  3. Verify the package checksum (${rel.minOsVersion}).`,
+    '  4. Sign in with your Vanitas account or an API key holding bot.execute.',
+    line,
+    'PLATFORM METADATA',
+    `  version:      ${rel.version}`,
+    `  channel:      stable`,
+    `  platform:     ${rel.platform}`,
+    `  arch:         ${rel.architecture}`,
+    line,
+  ].join('\n');
+}
+
+function finalizeRelease(base: ReleaseBase): ClientRelease {
+  const filename = `vanitas-${base.platform}-${base.version.replace(/^v/, '')}-manifest.txt`;
+  const payload = buildReleaseManifest(base, filename);
+  const bytes = Buffer.from(payload, 'utf-8');
+  return {
+    ...base,
+    filename,
+    artifactKind: 'manifest',
+    sizeBytes: bytes.length,
+    sizeMb: Math.round((bytes.length / 1048576) * 100000) / 100000,
+    sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+    downloadsCount: 0, // only real downloads ever increment this
+  };
+}
+
 export class VanitasDatabase {
   // DELIBERATELY EMPTY: no seeded/fake suggestions or comments — ever.
   productSuggestions: ProductSuggestion[] = [];
@@ -480,106 +633,29 @@ export class VanitasDatabase {
     return key;
   }
 
-  releases: ClientRelease[] = [
-    {
-      id: 'rel_android_apk',
-      platform: 'android',
-      type: 'apk',
-      name: 'Vanitas Mobile Client (Android APK)',
-      version: 'v1.4.2',
-      releaseDate: '2026-08-20',
-      sizeMb: 28.4,
-      downloadUrl: '/api/v1/download/apk',
-      filename: 'vanitas-v1.4.2-arm64.apk',
-      sha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-      minOsVersion: 'Android 9.0 (Pie) or newer (API level 28+)',
-      architecture: 'Universal (arm64-v8a / armeabi-v7a / x86_64)',
-      description: 'Complete Vanitas Mobile client for Android smartphones and tablets with biometric auth, offline token cache, real-time push alerts, and direct bot execution triggers.',
-      features: [
-        'Biometric / Fingerprint Sign-in',
-        'Offline Scoped Token Cache',
-        'Live Rate Limit Gauges',
-        'Discord & WhatsApp Bot Trigger',
-        'Push Notification Channel',
-        'Low Battery Standby Engine',
-      ],
-      downloadsCount: 1420,
-    },
-    {
-      id: 'rel_windows_exe',
-      platform: 'windows',
-      type: 'exe',
-      name: 'Vanitas Desktop Client (Windows Setup EXE)',
-      version: 'v1.4.2',
-      releaseDate: '2026-08-20',
-      sizeMb: 64.8,
-      downloadUrl: '/api/v1/download/exe',
-      filename: 'vanitas-desktop-setup-v1.4.2.exe',
-      sha256: '8f4e2a9b7c6d5e1f0a3b2c1d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f',
-      minOsVersion: 'Windows 10 / Windows 11 (64-bit)',
-      architecture: 'x86_64 (DirectX 11 / OpenGL Acceleration)',
-      description: 'Official Vanitas Desktop workstation app with system tray daemon, global Command Palette (Ctrl+Shift+V), local API proxy cache, and real-time security monitor.',
-      features: [
-        'System Tray Minimized Daemon',
-        'Global Hotkey (Ctrl+Shift+V)',
-        'Local Ingress Reverse Proxy',
-        'Auto-Update with Code Signing',
-        'Multi-Monitor Glassmorphism UI',
-        'Hardware Encrypted Key Vault',
-      ],
-      downloadsCount: 2890,
-    },
-    {
-      id: 'rel_macos_dmg',
-      platform: 'macos',
-      type: 'dmg',
-      name: 'Vanitas for macOS (Universal DMG)',
-      version: 'v1.4.2',
-      releaseDate: '2026-08-20',
-      sizeMb: 71.2,
-      downloadUrl: '/api/v1/download/dmg',
-      filename: 'Vanitas-v1.4.2-Universal.dmg',
-      sha256: '1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b',
-      minOsVersion: 'macOS 12.0 (Monterey) or newer',
-      architecture: 'Universal Binary (Apple Silicon M1/M2/M3 & Intel x64)',
-      description: 'Native macOS glass client featuring Menu Bar companion app, Touch ID key unlocking, and Apple Silicon optimization.',
-      features: [
-        'Menu Bar Status Companion',
-        'Touch ID Biometric Verification',
-        'Native Apple Silicon Optimization',
-        'Dark Mode Ambient Glow',
-        'Notification Center Integration',
-      ],
-      downloadsCount: 1840,
-    },
-    {
-      id: 'rel_linux_appimage',
-      platform: 'linux',
-      type: 'appimage',
-      name: 'Vanitas Linux Standalone (AppImage)',
-      version: 'v1.4.2',
-      releaseDate: '2026-08-20',
-      sizeMb: 58.9,
-      downloadUrl: '/api/v1/download/appimage',
-      filename: 'vanitas-v1.4.2-x86_64.AppImage',
-      sha256: '3f4e5d6c7b8a9f0e1d2c3b4a5f6e7d8c9b0a1f2e3d4c5b6a7f8e9d0c1b2a3f4e',
-      minOsVersion: 'glibc 2.28+ (Ubuntu 20.04+, Debian 11+, Arch, Fedora)',
-      architecture: 'x86_64 Standalone AppImage',
-      description: 'Self-contained desktop executable package for Linux workstations and headless CLI agents.',
-      features: [
-        'Zero-Dependency Standalone',
-        'CLI Daemon Mode (--headless)',
-        'Secret Service API Integration',
-        'Wayland & X11 Transparent Glass',
-        'Systemd Service Generator',
-      ],
-      downloadsCount: 960,
-    },
-  ];
+  // ---------------------------------------------------------------------------
+  // Client releases. The platform publishes a SIGNED BUILD MANIFEST per
+  // platform — native binaries (.apk/.exe/.dmg/.AppImage) are not built yet,
+  // which the UI discloses openly. Every published number is computed from
+  // the EXACT bytes the download route serves:
+  //   • sha256    — real hash of the payload (verify end to end)
+  //   • sizeBytes — real payload length (no "28.4 MB" fabrications)
+  //   • count     — starts at 0 and only moves on downloads actually served
+  // The payload is deterministic (no timestamps), so every instance derives
+  // identical metadata — the checksum you verify matches on any replica.
+  releases: ClientRelease[] = RELEASE_BASE.map((base) => finalizeRelease(base));
+
+  /** Exact artifact bytes served for a release — deterministic rebuild. */
+  getReleasePayload(type: ClientRelease['type']): Buffer | null {
+    const release = this.releases.find((r) => r.type === type);
+    if (!release) return null;
+    return Buffer.from(buildReleaseManifest(release, release.filename), 'utf-8');
+  }
 
   recordClientDownload(type: 'apk' | 'exe' | 'dmg' | 'appimage', actor: User, source: ClientSource) {
     const release = this.releases.find((r) => r.type === type);
     if (release) {
+      // Real counter: only bytes actually served move this number.
       release.downloadsCount += 1;
     }
 
@@ -587,17 +663,18 @@ export class VanitasDatabase {
       actorId: actor.id,
       actorName: actor.name,
       actorEmail: actor.email,
-      action: 'CLIENT_BINARY_DOWNLOADED',
+      action: 'CLIENT_ARTIFACT_DOWNLOADED',
       category: 'API',
-      target: release ? `${release.name} (${release.filename})` : `Binary:${type}`,
+      target: release ? `${release.name} (${release.filename})` : `Artifact:${type}`,
       source: source || 'WEB',
       status: 'SUCCESS',
       ipAddress: 'unknown', // db-layer call has no request context — never fake an IP
       metadata: {
-        binaryType: type,
-        version: release?.version || '1.4.2',
+        artifactType: type,
+        version: release?.version || 'unknown',
         platform: release?.platform || type,
-        sizeMb: release?.sizeMb || 0,
+        artifactKind: release?.artifactKind || 'manifest',
+        sizeBytes: release?.sizeBytes || 0,
       },
     });
 

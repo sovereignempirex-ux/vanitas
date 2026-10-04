@@ -342,6 +342,48 @@ check('disable with live code → success', r.status === 200 && r.json?.success 
 r = await call('POST', '/auth/login', { body: { email, password } });
 check('plain password login works after disable', r.status === 200, r);
 
+console.log('— honest download catalog + real integrity chain —');
+r = await call('GET', '/download/releases');
+check(
+  'release catalog → 200 + latestVersion derived from catalog',
+  r.status === 200 && typeof r.json?.latestVersion === 'string' && r.json.latestVersion.length > 0,
+  r.json?.latestVersion,
+);
+const dlReleases = r.json?.releases || [];
+check(
+  '4 releases — every published number derived from the real served bytes',
+  dlReleases.length === 4 &&
+    dlReleases.every(
+      (x) =>
+        /^[0-9a-f]{64}$/.test(x.sha256 || '') &&
+        Number.isInteger(x.sizeBytes) &&
+        x.sizeBytes > 0 &&
+        Math.abs(x.sizeMb - x.sizeBytes / 1048576) < 0.00001 &&
+        x.artifactKind === 'manifest' &&
+        String(x.filename).endsWith('-manifest.txt') &&
+        typeof x.downloadsCount === 'number' &&
+        x.downloadsCount >= 0,
+    ),
+  dlReleases,
+);
+const apkMeta = dlReleases.find((x) => x.type === 'apk');
+r = await call('GET', '/download/apk');
+check('download without a session → 401 (never serves unauthenticated)', r.status === 401, r.status);
+{
+  const dlRes = await fetch(`${BASE}/download/apk`, { headers: { authorization: `Bearer ${token}` } });
+  const dlBuf = Buffer.from(await dlRes.arrayBuffer());
+  check(
+    'session download → 200 + exact published byte count',
+    dlRes.status === 200 && apkMeta && dlBuf.length === apkMeta.sizeBytes,
+    { s: dlRes.status, bytes: dlBuf.length, sizeBytes: apkMeta?.sizeBytes },
+  );
+  check(
+    'sha256(served bytes) === published checksum (end-to-end chain on production)',
+    !!apkMeta && crypto.createHash('sha256').update(dlBuf).digest('hex') === apkMeta.sha256,
+    { real: crypto.createHash('sha256').update(dlBuf).digest('hex'), published: apkMeta?.sha256 },
+  );
+}
+
 console.log('— account cleanup —');
 r = await call('DELETE', '/auth/account', { token });
 check('delete own account → success', r.status === 200 && r.json?.success === true, r);

@@ -357,6 +357,42 @@ check(
   whT.json ?? whT.status,
 );
 
+console.log('— signed download artifacts: integrity chain on production —');
+{
+  const SITE = BASE.replace(/\/api\/v1$/, '');
+  const cat = await call('GET', '/download/releases');
+  const apkRel = (cat.json?.releases || []).find((x) => x.type === 'apk');
+  check(
+    'catalog publishes manifest metadata (real sha/size/kind)',
+    cat.status === 200 && !!apkRel && apkRel.artifactKind === 'manifest' && /^[0-9a-f]{64}$/.test(apkRel.sha256) && Number.isInteger(apkRel.sizeBytes) && apkRel.sizeBytes > 0,
+    apkRel ?? cat.status,
+  );
+  // Session download authenticated by the admin token (a real actor path).
+  const dlRes = await fetch(`${BASE}/download/apk`, {
+    headers: { authorization: `Bearer ${TOKEN}` },
+    signal: AbortSignal.timeout(30000),
+  });
+  const dlBuf = Buffer.from(await dlRes.arrayBuffer());
+  const dlSha = crypto.createHash('sha256').update(dlBuf).digest('hex');
+  check(
+    'download → 200 + exact published bytes + matching sha256',
+    dlRes.status === 200 && !!apkRel && dlBuf.length === apkRel.sizeBytes && dlSha === apkRel.sha256,
+    { s: dlRes.status, bytes: dlBuf.length, sizeBytes: apkRel?.sizeBytes, sha: dlSha, published: apkRel?.sha256 },
+  );
+  // Cross-device signed link (the QR flow).
+  const mint = await call('POST', '/download/apk/token', { token: TOKEN });
+  check('signed link minted with a 10-minute TTL', mint.status === 200 && mint.json?.expiresInSec === 600, mint.json ?? mint.status);
+  const signed = await fetch(SITE + mint.json.url, { signal: AbortSignal.timeout(30000) });
+  const signedBuf = Buffer.from(await signed.arrayBuffer());
+  check(
+    'signed link download → 200 + same checksum (verifies across serverless instances)',
+    signed.status === 200 && crypto.createHash('sha256').update(signedBuf).digest('hex') === apkRel?.sha256,
+    { s: signed.status, bytes: signedBuf.length },
+  );
+  const tampered = await fetch(SITE + String(mint.json.url).replace(/sig=[^&]+/, 'sig=tampered'), { signal: AbortSignal.timeout(30000) });
+  check('tampered signed link → 401', tampered.status === 401, tampered.status);
+}
+
 console.log('— durable audit trail (must come from PostgreSQL) —');
 const logs = await call('GET', '/admin/logs?limit=200', admin);
 const actions = (logs.json?.logs || []).map((l) => l.action);

@@ -627,23 +627,62 @@ class ApiClient {
     }>('/download/releases');
   }
 
-  async getReleaseDetails(type: 'apk' | 'exe' | 'dmg' | 'appimage') {
-    return this.request<{
-      success: boolean;
-      release: ClientRelease;
-      downloadUrl: string;
-    }>(`/download/${type}?format=json`);
-  }
+  /**
+   * Authenticated download. A plain <a> click cannot carry the session
+   * Bearer token (it used to save a 401 JSON body while the UI celebrated),
+   * so we fetch the artifact WITH credentials, then hand the real bytes to
+   * the browser. Resolves only after the download actually starts — the
+   * caller gets the true byte count and filename, or a thrown error.
+   */
+  async downloadRelease(
+    type: 'apk' | 'exe' | 'dmg' | 'appimage',
+    fallbackFilename?: string,
+  ): Promise<{ bytes: number; filename: string }> {
+    const headers: Record<string, string> = {};
+    const token = this.getAuthToken();
+    if (token) headers.authorization = `Bearer ${token}`;
 
-  triggerDirectDownload(type: 'apk' | 'exe' | 'dmg' | 'appimage') {
-    // Initiate browser binary download stream
-    const url = `${this.baseUrl}/download/${type}`;
+    const res = await fetch(`${this.baseUrl}/download/${type}`, { headers });
+    if (!res.ok) {
+      let message = `Download failed (HTTP ${res.status})`;
+      try {
+        const body = await res.json();
+        if (body?.error) message = String(body.error);
+      } catch {
+        /* non-json error body */
+      }
+      const error: Error & { status?: number } = new Error(message);
+      error.status = res.status;
+      throw error;
+    }
+
+    const blob = await res.blob();
+    const disposition = res.headers.get('content-disposition') || '';
+    const nameFromHeader = /filename="([^"]+)"/.exec(disposition)?.[1];
+    const filename = nameFromHeader || fallbackFilename || type;
+
+    const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.setAttribute('download', '');
+    link.download = filename;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(url), 30_000);
+
+    return { bytes: blob.size, filename };
+  }
+
+  /**
+   * Mint a short-lived signed link for cross-device downloads (the QR modal).
+   * The scanning phone has no session — this link (10-minute expiry, bound to
+   * this artifact and this account) is its credential.
+   */
+  async getDownloadLink(type: 'apk' | 'exe' | 'dmg' | 'appimage') {
+    return this.request<{ url: string; expiresAt: string; expiresInSec: number }>(
+      `/download/${type}/token`,
+      { method: 'POST' },
+    );
   }
 
   // AI Semantic Global Search

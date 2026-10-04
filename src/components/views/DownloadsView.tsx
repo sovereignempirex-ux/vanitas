@@ -5,6 +5,7 @@ import { detectUserPlatform, PlatformInfo } from '../../lib/platformDetector.ts'
 import QRCode from 'qrcode';
 import { ClientRelease } from '../../types.ts';
 import { BRAND_ASSETS } from '../../data/assets.ts';
+import { formatBytes } from '../../lib/format.ts';
 import {
   Smartphone,
   Laptop,
@@ -38,10 +39,17 @@ export const DownloadsView: React.FC = () => {
   const { setActiveView } = useAuth();
   const [platformInfo, setPlatformInfo] = useState<PlatformInfo>(detectUserPlatform());
   const [releases, setReleases] = useState<ClientRelease[]>([]);
+  const [latestVersion, setLatestVersion] = useState('');
+  const [metadataError, setMetadataError] = useState<string | null>(null);
   const [selectedPlatform, setSelectedPlatform] = useState<'android' | 'windows' | 'macos' | 'linux'>('android');
   const [copiedHash, setCopiedHash] = useState<string | null>(null);
   const [downloadingType, setDownloadingType] = useState<string | null>(null);
-  const [downloadSuccessType, setDownloadSuccessType] = useState<string | null>(null);
+  // REAL download outcomes: success shows the actual saved filename and byte
+  // count, failure shows the actual server error. Nothing celebrates on a
+  // timer anymore — the old flow clicked an unauthenticated link (saving a
+  // 401 body) and reported success 1.2s later regardless.
+  const [downloadDone, setDownloadDone] = useState<{ filename: string; bytes: number } | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
   const [verifyInputHash, setVerifyInputHash] = useState('');
   const [verifyResult, setVerifyResult] = useState<'match' | 'mismatch' | null>(null);
   const [showQrModal, setShowQrModal] = useState(false);
@@ -69,24 +77,32 @@ export const DownloadsView: React.FC = () => {
       if (data.releases) {
         setReleases(data.releases);
       }
+      setLatestVersion(data.latestVersion || '');
+      setMetadataError(null);
     } catch (e) {
+      // Honest degraded state: with no catalog we hide sizes, counts and
+      // checksums instead of inventing them.
       console.warn('Failed to load release metadata:', e);
+      setMetadataError('Release metadata unavailable — sizes and checksums are hidden until the catalog loads.');
     }
   };
 
-  const handleDownload = (type: 'apk' | 'exe' | 'dmg' | 'appimage') => {
+  const handleDownload = async (type: 'apk' | 'exe' | 'dmg' | 'appimage') => {
     setDownloadingType(type);
-    api.triggerDirectDownload(type);
-
-    setTimeout(() => {
+    setDownloadError(null);
+    setDownloadDone(null);
+    try {
+      const release = releases.find((r) => r.type === type);
+      const result = await api.downloadRelease(type, release?.filename);
+      setDownloadDone(result);
+      loadReleases(); // refresh the real counter after bytes were actually served
+      setTimeout(() => setDownloadDone(null), 6000);
+    } catch (err: any) {
+      setDownloadError(err?.message || 'Download failed');
+      setTimeout(() => setDownloadError(null), 8000);
+    } finally {
       setDownloadingType(null);
-      setDownloadSuccessType(type);
-      loadReleases(); // refresh download counts
-
-      setTimeout(() => {
-        setDownloadSuccessType(null);
-      }, 5000);
-    }, 1200);
+    }
   };
 
   const handleCopyHash = (hash: string) => {
@@ -96,6 +112,20 @@ export const DownloadsView: React.FC = () => {
   };
 
   const activeRelease = releases.find((r) => r.platform === selectedPlatform) || releases[0];
+  // Release for the auto-detected device — drives the hero CTA and capsule
+  // with REAL version/size/count. When the catalog is unavailable we simply
+  // show no size chip instead of inventing one.
+  const recommendedRelease = releases.find((r) => r.type === platformInfo.recommendedType) || releases[0];
+  const androidRelease = releases.find((r) => r.type === 'apk');
+  const windowsRelease = releases.find((r) => r.type === 'exe');
+  const recommendedLabel =
+    platformInfo.recommendedType === 'apk'
+      ? 'Android'
+      : platformInfo.recommendedType === 'dmg'
+      ? 'macOS'
+      : platformInfo.recommendedType === 'appimage'
+      ? 'Linux'
+      : 'Windows';
 
   const handleVerifyHash = () => {
     if (!verifyInputHash.trim() || !activeRelease) return;
@@ -107,15 +137,42 @@ export const DownloadsView: React.FC = () => {
     }
   };
 
-  // QR Code URL pointing to current origin APK download
+  // QR flow: the scanning phone has NO session, so opening the modal mints a
+  // short-lived signed link (POST /download/:type/token — 10-minute expiry,
+  // bound to this artifact and this account) and the QR encodes that URL.
+  // Rendered LOCALLY in the browser: a third-party QR service would learn the
+  // signed URL and could return a QR encoding a different payload than the
+  // one we asked for (payload swap → wrong download on the phone).
   const currentOrigin = typeof window !== 'undefined' ? window.location.origin : 'https://vanitas-bot.vercel.app';
-  const qrTargetUrl = `${currentOrigin}/api/v1/download/apk`;
-  // Rendered LOCALLY in the browser: a third-party QR service would learn
-  // the target URL and could return a QR encoding a different payload than
-  // the one we asked for (payload swap → wrong download on the phone).
+  const [qrLink, setQrLink] = useState<{ url: string; expiresAt: string } | null>(null);
+  const [qrLinkError, setQrLinkError] = useState<string | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [qrFailed, setQrFailed] = useState(false);
+
   useEffect(() => {
+    if (!showQrModal) {
+      setQrLink(null);
+      setQrLinkError(null);
+      setQrDataUrl(null);
+      return;
+    }
+    let alive = true;
+    api
+      .getDownloadLink('apk')
+      .then((link) => {
+        if (alive) setQrLink(link);
+      })
+      .catch((err: any) => {
+        if (alive) setQrLinkError(err?.message || 'Could not create a QR download link');
+      });
+    return () => {
+      alive = false;
+    };
+  }, [showQrModal]);
+
+  const qrTargetUrl = qrLink ? `${currentOrigin}${qrLink.url}` : null;
+  useEffect(() => {
+    if (!qrTargetUrl) return;
     let alive = true;
     QRCode.toDataURL(qrTargetUrl, {
       width: 240,
@@ -196,18 +253,14 @@ export const DownloadsView: React.FC = () => {
                 )}
                 <span>
                   {downloadingType === platformInfo.recommendedType
-                    ? 'Packaging Client...'
-                    : platformInfo.isMobile
-                    ? 'Download APK (Android v1.4.2)'
-                    : platformInfo.detectedPlatform === 'desktop_mac'
-                    ? 'Download DMG (macOS v1.4.2)'
-                    : platformInfo.detectedPlatform === 'desktop_linux'
-                    ? 'Download AppImage (Linux v1.4.2)'
-                    : 'Download Setup.EXE (Windows v1.4.2)'}
+                    ? 'Preparing download…'
+                    : `Download ${recommendedLabel} build manifest`}
                 </span>
-                <span className="rounded-lg bg-black/25 px-2 py-0.5 font-mono text-xs">
-                  {platformInfo.isMobile ? '28.4 MB' : platformInfo.detectedPlatform === 'desktop_mac' ? '71.2 MB' : '64.8 MB'}
-                </span>
+                {recommendedRelease && (
+                  <span className="rounded-lg bg-black/25 px-2 py-0.5 font-mono text-xs">
+                    {recommendedRelease.version} · {formatBytes(recommendedRelease.sizeBytes)}
+                  </span>
+                )}
               </button>
 
               {/* QR Code trigger for cross-device mobile download */}
@@ -229,20 +282,28 @@ export const DownloadsView: React.FC = () => {
               </button>
             </div>
 
-            {/* Quick trust badges */}
+            {/* Quick trust badges — every claim is verifiable on this page */}
             <div className="flex flex-wrap items-center gap-4 pt-3 text-[11px] font-mono text-slate-400">
               <span className="flex items-center gap-1.5 text-emerald-400">
                 <ShieldCheck className="h-3.5 w-3.5" />
-                <span>Cryptographically Signed SHA-256</span>
+                <span>SHA-256 verifiable end to end</span>
+              </span>
+              <span>•</span>
+              <span className="flex items-center gap-1.5 text-amber-300">
+                <Info className="h-3.5 w-3.5" />
+                <span>Artifact: signed build manifest — native package pending</span>
               </span>
               <span>•</span>
               <span className="flex items-center gap-1.5 text-blue-400">
                 <CheckCircle2 className="h-3.5 w-3.5" />
-                <span>No Root / Administrator Required</span>
+                <span>Download counts are real</span>
               </span>
-              <span>•</span>
-              <span>Central Ingress Sync Ready</span>
             </div>
+            {metadataError && (
+              <p className="rounded-xl border border-amber-500/30 bg-amber-950/30 px-3 py-2 text-[11px] text-amber-300">
+                {metadataError}
+              </p>
+            )}
           </div>
 
           {/* Device Showcase Capsule */}
@@ -256,33 +317,40 @@ export const DownloadsView: React.FC = () => {
                 />
               </div>
 
-              <h3 className="font-display text-base font-bold text-white">VANITAS v1.4.2</h3>
+              <h3 className="font-display text-base font-bold text-white">
+                {recommendedRelease ? `VANITAS ${recommendedRelease.version}` : 'VANITAS'}
+              </h3>
               <p className="font-mono text-xs text-blue-400 mt-0.5">Central Native Companion</p>
 
               <div className="mt-4 w-full space-y-2 text-left text-xs">
                 <div className="flex justify-between py-1 border-b border-white/[0.06]">
                   <span className="text-slate-400">Target Build:</span>
                   <span className="font-mono text-slate-200">
-                    {platformInfo.isMobile ? 'Android arm64-v8a' : 'Windows x86_64'}
+                    {recommendedRelease?.architecture || '—'}
                   </span>
                 </div>
                 <div className="flex justify-between py-1 border-b border-white/[0.06]">
                   <span className="text-slate-400">Package:</span>
                   <span className="font-mono text-blue-300">
-                    {platformInfo.isMobile ? 'app.vanitas.client' : 'VanitasSetup.exe'}
+                    {recommendedRelease?.filename || '—'}
                   </span>
                 </div>
                 <div className="flex justify-between py-1">
                   <span className="text-slate-400">Total Downloads:</span>
                   <span className="font-mono text-emerald-400 font-bold">
-                    {(activeRelease?.downloadsCount || 4280).toLocaleString()}
+                    {recommendedRelease ? recommendedRelease.downloadsCount.toLocaleString() : '—'}
                   </span>
                 </div>
               </div>
 
-              {downloadSuccessType && (
+              {downloadDone && (
                 <div className="mt-4 w-full rounded-xl border border-emerald-500/40 bg-emerald-950/40 p-2.5 text-xs text-emerald-300 text-center animate-in zoom-in-95">
-                  ✓ Download started! Check your downloads folder.
+                  ✓ {downloadDone.filename} saved · {formatBytes(downloadDone.bytes)}
+                </div>
+              )}
+              {downloadError && (
+                <div className="mt-4 w-full rounded-xl border border-rose-500/40 bg-rose-950/40 p-2.5 text-xs text-rose-300 text-center animate-in zoom-in-95">
+                  Download failed: {downloadError}
                 </div>
               )}
             </div>
@@ -303,7 +371,11 @@ export const DownloadsView: React.FC = () => {
             </p>
           </div>
           <span className="rounded-lg bg-blue-500/10 border border-blue-500/20 px-2.5 py-1 font-mono text-xs text-blue-300">
-            Latest Stable v1.4.2
+            {latestVersion
+              ? `Latest Stable ${latestVersion}`
+              : metadataError
+              ? 'Release catalog unavailable'
+              : 'Loading release catalog…'}
           </span>
         </div>
 
@@ -395,7 +467,7 @@ export const DownloadsView: React.FC = () => {
                 )}
                 <span>Download {activeRelease.filename}</span>
                 <span className="rounded bg-black/30 px-1.5 py-0.5 font-mono text-[10px]">
-                  {activeRelease.sizeMb} MB
+                  {formatBytes(activeRelease.sizeBytes)}
                 </span>
               </button>
 
@@ -409,6 +481,18 @@ export const DownloadsView: React.FC = () => {
                 </button>
               )}
             </div>
+          </div>
+
+          {/* Honest disclosure: what is actually downloadable today */}
+          <div className="flex items-start gap-2.5 rounded-xl border border-amber-500/30 bg-amber-950/20 px-4 py-3 text-xs leading-relaxed text-amber-200/90">
+            <Info className="h-4 w-4 flex-shrink-0 text-amber-400 mt-0.5" />
+            <span>
+              <strong className="text-amber-200">Published artifact:</strong> signed build manifest (
+              {formatBytes(activeRelease.sizeBytes)}, text) — the native{' '}
+              <code className="font-mono">{activeRelease.type}</code> package is not published yet. The
+              size, SHA-256 and download count on this page describe the file you actually receive, and
+              the verifier below checks it for real.
+            </span>
           </div>
 
           {/* Spec Grid */}
@@ -448,10 +532,10 @@ export const DownloadsView: React.FC = () => {
             </div>
           </div>
 
-          {/* Features Included In Native Client */}
+          {/* Capabilities of the planned native client */}
           <div>
             <h4 className="text-xs font-mono font-bold tracking-wider text-slate-400 uppercase mb-3">
-              Included Client Capabilities & System Hooks
+              Planned Client Capabilities (native build pending)
             </h4>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
               {activeRelease.features.map((feat, idx) => (
@@ -505,7 +589,14 @@ export const DownloadsView: React.FC = () => {
             <span>Installation & Setup Guide</span>
           </h3>
           <p className="text-xs text-slate-400 mt-1">
-            Follow these verified steps to install and pair your native client with the Vanitas Central API.
+            Follow these steps to install and pair your native client with the Vanitas Central API.
+          </p>
+          <p className="mt-2 flex items-start gap-1.5 rounded-lg border border-amber-500/25 bg-amber-950/20 px-3 py-2 text-[11px] leading-relaxed text-amber-200/80">
+            <Info className="h-3.5 w-3.5 flex-shrink-0 text-amber-400 mt-0.5" />
+            <span>
+              Native packages are not published yet — today's download is the signed build manifest, so
+              steps 2–4 apply once the native binaries ship to this page.
+            </span>
           </p>
         </div>
 
@@ -523,7 +614,13 @@ export const DownloadsView: React.FC = () => {
                   1
                 </span>
                 <div>
-                  <strong className="text-white">Download APK:</strong> Click the "Download APK" button or scan the QR Code on your Android phone to save <code className="text-blue-300 font-mono">vanitas-v1.4.2-arm64.apk</code>.
+                  <strong className="text-white">Download the Android artifact:</strong> Click the download
+                  button or scan the QR code on your Android phone to save{' '}
+                  <code className="text-blue-300 font-mono">
+                    {androidRelease?.filename ?? 'the Android release artifact'}
+                  </code>
+                  ; the native <code className="font-mono">.apk</code> package will be published on this
+                  same page.
                 </div>
               </li>
               <li className="flex items-start gap-2.5">
@@ -566,7 +663,12 @@ export const DownloadsView: React.FC = () => {
                   1
                 </span>
                 <div>
-                  <strong className="text-white">Download Setup EXE:</strong> Save <code className="text-blue-300 font-mono">vanitas-desktop-setup-v1.4.2.exe</code> to your computer.
+                  <strong className="text-white">Download the Windows artifact:</strong> Save{' '}
+                  <code className="text-blue-300 font-mono">
+                    {windowsRelease?.filename ?? 'the Windows release artifact'}
+                  </code>{' '}
+                  to your computer; the native setup <code className="font-mono">.exe</code> will be
+                  published on this same page.
                 </div>
               </li>
               <li className="flex items-start gap-2.5">
@@ -604,10 +706,14 @@ export const DownloadsView: React.FC = () => {
           <div>
             <h3 className="text-base font-bold text-white flex items-center gap-2">
               <ShieldCheck className="h-5 w-5 text-emerald-400" />
-              <span>Verify Binary Integrity (SHA-256)</span>
+              <span>Verify Artifact Integrity (SHA-256)</span>
             </h3>
             <p className="text-xs text-slate-400 mt-0.5">
-              Paste the SHA-256 checksum calculated on your downloaded file to confirm it matches the official Vanitas build signature.
+              Compute the hash of the file you downloaded — <code className="font-mono">sha256sum</code>{' '}
+              on macOS/Linux or{' '}
+              <code className="font-mono">certutil -hashfile &lt;file&gt; SHA256</code> on Windows — and
+              paste it here. It must equal the checksum published above for{' '}
+              {activeRelease?.filename ?? 'the release'}.
             </p>
           </div>
         </div>
@@ -636,7 +742,9 @@ export const DownloadsView: React.FC = () => {
           <div className="flex items-center gap-2 rounded-xl border border-emerald-500/40 bg-emerald-950/30 p-3 text-xs text-emerald-300">
             <CheckCircle2 className="h-4 w-4 text-emerald-400 flex-shrink-0" />
             <span>
-              <strong>Valid Signature:</strong> The pasted checksum matches the official Vanitas {activeRelease?.version} build signature perfectly. The binary is authentic and untampered.
+              <strong>Valid Signature:</strong> The pasted checksum matches the published checksum for{' '}
+              {activeRelease?.filename} ({activeRelease?.version}) — the file you received is authentic
+              and untampered.
             </span>
           </div>
         )}
@@ -645,7 +753,9 @@ export const DownloadsView: React.FC = () => {
           <div className="flex items-center gap-2 rounded-xl border border-rose-500/40 bg-rose-950/30 p-3 text-xs text-rose-300">
             <ShieldAlert className="h-4 w-4 text-rose-400 flex-shrink-0" />
             <span>
-              <strong>Hash Mismatch:</strong> The pasted checksum does NOT match the official signature ({activeRelease?.sha256.substring(0, 16)}...). Please redownload the official release.
+              <strong>Hash Mismatch:</strong> The pasted checksum does NOT match the published checksum (
+              {activeRelease?.sha256.substring(0, 16)}...). Re-download the file from this page and hash
+              it again.
             </span>
           </div>
         )}
@@ -666,27 +776,38 @@ export const DownloadsView: React.FC = () => {
               <QrCode className="h-8 w-8 text-cyan-400" />
             </div>
 
-            <h3 className="text-lg font-bold text-white">Scan to Download APK</h3>
+            <h3 className="text-lg font-bold text-white">Scan to Download for Android</h3>
             <p className="text-xs text-slate-400 leading-relaxed">
-              Open your phone camera (Android or iOS) and point it at this QR Code to initiate the instant APK package download directly on your phone.
+              Open your phone camera and point it at this QR code. It encodes a{' '}
+              <strong className="text-slate-300">signed link that expires in 10 minutes</strong>, minted by
+              your session, so the phone (which is not signed in) receives the same published artifact —
+              today the Android build manifest.
             </p>
 
             <div className="flex justify-center p-3 bg-[#060913] rounded-2xl border border-blue-500/20 shadow-inner">
               {qrDataUrl ? (
                 <img
                   src={qrDataUrl}
-                  alt="Vanitas Mobile APK Download QR Code"
+                  alt="Signed Vanitas Android download QR code"
                   className="h-48 w-48 rounded-xl object-contain filter drop-shadow-[0_0_12px_rgba(59,130,246,0.5)]"
                 />
               ) : (
                 <div className="h-48 w-48 rounded-xl flex flex-col items-center justify-center gap-2 text-[11px] text-slate-400 text-center p-4">
                   <QrCode className="h-7 w-7 text-slate-500" />
-                  {qrFailed
+                  {qrLinkError
+                    ? `Signed link unavailable: ${qrLinkError} — use the direct download button below.`
+                    : qrFailed
                     ? 'QR could not be generated in this browser — use the direct download button below.'
-                    : 'Generating QR code locally…'}
+                    : 'Creating signed download link + QR locally…'}
                 </div>
               )}
             </div>
+
+            {qrLink && (
+              <p className="font-mono text-[10px] text-slate-500">
+                Link valid until {new Date(qrLink.expiresAt).toLocaleTimeString()}
+              </p>
+            )}
 
             <div className="pt-1 flex justify-center gap-2">
               <button
@@ -694,7 +815,7 @@ export const DownloadsView: React.FC = () => {
                 className="flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-500 transition-all"
               >
                 <Download className="h-4 w-4" />
-                <span>Download APK directly</span>
+                <span>Download on this device</span>
               </button>
               <button
                 onClick={() => setShowQrModal(false)}

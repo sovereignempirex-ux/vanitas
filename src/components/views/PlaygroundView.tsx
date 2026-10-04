@@ -24,6 +24,34 @@ interface PresetEndpoint {
   defaultPayload?: string;
 }
 
+// Real HTTP reason phrases — the badge never falls back to a blanket
+// "ERROR" for perfectly meaningful codes like 429 or 404.
+const HTTP_REASONS: Record<number, string> = {
+  200: 'OK',
+  201: 'CREATED',
+  202: 'ACCEPTED',
+  204: 'NO CONTENT',
+  301: 'MOVED',
+  302: 'FOUND',
+  304: 'NOT MODIFIED',
+  400: 'BAD REQUEST',
+  401: 'UNAUTHORIZED',
+  403: 'FORBIDDEN',
+  404: 'NOT FOUND',
+  405: 'METHOD NOT ALLOWED',
+  408: 'REQUEST TIMEOUT',
+  409: 'CONFLICT',
+  410: 'GONE',
+  413: 'PAYLOAD TOO LARGE',
+  415: 'UNSUPPORTED MEDIA TYPE',
+  422: 'UNPROCESSABLE',
+  429: 'TOO MANY REQUESTS',
+  500: 'SERVER ERROR',
+  502: 'BAD GATEWAY',
+  503: 'UNAVAILABLE',
+  504: 'GATEWAY TIMEOUT',
+};
+
 export const PlaygroundView: React.FC = () => {
   const { role, clientSource } = useAuth();
   // Whether requests will actually carry a session Bearer token.
@@ -36,6 +64,20 @@ export const PlaygroundView: React.FC = () => {
       path: '/api/v1/health',
       description: 'Check uptime and core gateway operational health',
       category: 'System',
+    },
+    {
+      name: 'Platform Status (Public)',
+      method: 'GET',
+      path: '/api/v1/status',
+      description: 'Public live telemetry: uptime, p95 latency, 24h traffic and component evidence',
+      category: 'System',
+    },
+    {
+      name: 'Public Ping (API-Key)',
+      method: 'GET',
+      path: '/api/v1/public/ping',
+      description: 'Verify x-api-key auth and read rate-limit headers (paste a key below)',
+      category: 'Auth',
     },
     {
       name: 'Get Current Authenticated User',
@@ -88,7 +130,9 @@ export const PlaygroundView: React.FC = () => {
   const [method, setMethod] = useState<'GET' | 'POST' | 'PATCH' | 'DELETE'>('GET');
   const [endpoint, setEndpoint] = useState('/api/v1/health');
   const [payload, setPayload] = useState('{\n  \n}');
-  const [customHeaderToken, setCustomHeaderToken] = useState('vnt_live_sk_••••••••••••');
+  // Optional API key sent as x-api-key (for key-auth endpoints like
+  // /api/v1/public/ping). Empty by default — we never prefill a fake token.
+  const [apiKey, setApiKey] = useState('');
   const [loading, setLoading] = useState(false);
 
   // Response state
@@ -96,6 +140,9 @@ export const PlaygroundView: React.FC = () => {
   const [responseLatency, setResponseLatency] = useState<number | null>(null);
   const [responseHeaders, setResponseHeaders] = useState<Record<string, string>>({});
   const [responseBody, setResponseBody] = useState<string | null>(null);
+  // Set when NO HTTP response exists (network failure or playground-side
+  // rejection). Never dressed up as a fabricated status code like 500.
+  const [dispatchError, setDispatchError] = useState<string | null>(null);
 
   // Code tab state
   const [codeTab, setCodeTab] = useState<'curl' | 'typescript' | 'python'>('curl');
@@ -112,12 +159,16 @@ export const PlaygroundView: React.FC = () => {
     // Same-origin API only: a free-form URL would turn this console into a
     // request gadget pointed anywhere the browser can reach.
     if (!endpoint.startsWith('/api/v1/')) {
-      setResponseStatus(400);
+      const message = 'Endpoint must start with /api/v1/ — the playground only calls this API';
+      setResponseStatus(null);
       setResponseLatency(0);
-      setResponseBody(JSON.stringify({ error: 'Endpoint must start with /api/v1/ — the playground only calls this API' }, null, 2));
+      setResponseHeaders({});
+      setDispatchError(message);
+      setResponseBody(JSON.stringify({ error: message }, null, 2));
       return;
     }
     setLoading(true);
+    setDispatchError(null);
     const start = performance.now();
 
     try {
@@ -130,6 +181,9 @@ export const PlaygroundView: React.FC = () => {
       // spoofable header.
       const sessionToken = api.getSessionToken();
       if (sessionToken) headers['Authorization'] = `Bearer ${sessionToken}`;
+      // Optional key auth: only sent when the user pasted a real key.
+      const key = apiKey.trim();
+      if (key) headers['x-api-key'] = key;
       const options: RequestInit = { method, headers };
 
       if (['POST', 'PATCH', 'PUT'].includes(method) && payload.trim()) {
@@ -162,9 +216,23 @@ export const PlaygroundView: React.FC = () => {
         setResponseBody(text);
       }
     } catch (err: any) {
-      setResponseStatus(500);
+      // A thrown fetch is NOT an HTTP 500 — no server answered at all.
+      // Report it as what it is instead of fabricating a status code.
+      const message = err?.message || 'Request dispatch failed';
+      setResponseStatus(null);
       setResponseLatency(Math.round(performance.now() - start));
-      setResponseBody(JSON.stringify({ error: err.message || 'Request dispatch failed' }, null, 2));
+      setResponseHeaders({});
+      setDispatchError(message);
+      setResponseBody(
+        JSON.stringify(
+          {
+            error: message,
+            note: 'No HTTP response was received (network failure, blocked request, or server unreachable).',
+          },
+          null,
+          2
+        ),
+      );
     } finally {
       setLoading(false);
     }
@@ -180,6 +248,11 @@ export const PlaygroundView: React.FC = () => {
     const fullUrl = `${getPortalUrl()}${endpoint}`;
     if (codeTab === 'curl') {
       let cmd = `curl -X ${method} "${fullUrl}" \\\n  -H "Authorization: Bearer YOUR_API_KEY" \\\n  -H "x-client-source: ${clientSource}" \\\n  -H "Content-Type: application/json"`;
+      // Reflect the optional key header actually configured above — with a
+      // placeholder, never the pasted secret itself.
+      if (apiKey.trim()) {
+        cmd += ` \\\n  -H "x-api-key: YOUR_API_KEY"`;
+      }
       if (['POST', 'PATCH'].includes(method)) {
         cmd += ` \\\n  -d '${payload.replace(/\n\s*/g, '')}'`;
       }
@@ -187,13 +260,9 @@ export const PlaygroundView: React.FC = () => {
     }
 
     if (codeTab === 'typescript') {
-      return `import { VanitasClient } from '@vanitas/sdk';
-
-const vanitas = new VanitasClient({
-  apiKey: process.env.VANITAS_API_KEY,
-  source: '${clientSource}'
-});
-
+      // Plain fetch only — there is no published @vanitas/sdk package, and
+      // an example that imports a package that does not exist is useless.
+      return `// Vanitas API over plain fetch — no SDK required.
 async function main() {
   const response = await fetch('${fullUrl}', {
     method: '${method}',
@@ -201,19 +270,25 @@ async function main() {
       'Authorization': \`Bearer \${process.env.VANITAS_API_KEY}\`,
       'Content-Type': 'application/json',
       'x-client-source': '${clientSource}'
-    },${['POST', 'PATCH'].includes(method) ? `\n    body: JSON.stringify(${payload}),` : ''}
+    },${['POST', 'PATCH'].includes(method) ? `\n    body: JSON.stringify(${payload.replace(/\n\s*/g, ' ') || '{}'}),` : ''}
   });
+
+  if (!response.ok) {
+    throw new Error(\`Vanitas API \${response.status}: \${await response.text()}\`);
+  }
 
   const data = await response.json();
   console.log(data);
 }
 
-main();`;
+main().catch(console.error);`;
     }
 
     if (codeTab === 'python') {
-      return `import requests
-import json
+      // The payload is embedded as a JSON string and parsed with json.loads
+      // — inline JSON (true/false) is not valid Python on its own.
+      return `import json
+import requests
 
 url = "${fullUrl}"
 headers = {
@@ -221,10 +296,11 @@ headers = {
     "x-client-source": "${clientSource}",
     "Content-Type": "application/json"
 }
-${['POST', 'PATCH'].includes(method) ? `payload = ${payload}\nresponse = requests.${method.toLowerCase()}(url, headers=headers, json=payload)` : `response = requests.${method.toLowerCase()}(url, headers=headers)`}
+${['POST', 'PATCH'].includes(method) ? `payload = json.loads(${JSON.stringify(payload)})\nresponse = requests.${method.toLowerCase()}(url, headers=headers, json=payload)` : `response = requests.${method.toLowerCase()}(url, headers=headers)`}
 
+response.raise_for_status()
 print(response.status_code)
-print(response.json())`;
+print(json.dumps(response.json(), indent=2))`;
     }
 
     return '';
@@ -314,10 +390,25 @@ print(response.json())`;
                   <span className={role === 'ADMIN' ? 'text-amber-400' : 'text-blue-400'}>{sessionActive ? `Bearer •••• (${role})` : 'not signed in'}</span>
                 </div>
                 <div className="flex justify-between text-slate-400">
+                  <span>x-api-key</span>
+                  <span className={apiKey.trim() ? 'text-emerald-300' : 'text-slate-500'}>
+                    {apiKey.trim() ? 'set •••• (sent with request)' : 'not set — paste a key to test key auth'}
+                  </span>
+                </div>
+                <div className="flex justify-between text-slate-400">
                   <span>Content-Type</span>
                   <span className="text-slate-300">application/json</span>
                 </div>
               </div>
+              <input
+                type="password"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                placeholder="Optional API key (sent as x-api-key) — try /api/v1/public/ping"
+                autoComplete="off"
+                spellCheck={false}
+                className="mt-2 w-full rounded-xl border border-white/10 bg-slate-900/80 px-3 py-2 font-mono text-xs text-white placeholder:text-slate-600 focus:border-blue-500 focus:outline-none"
+              />
             </div>
 
             {/* Request JSON Body (if applicable) */}
@@ -393,24 +484,35 @@ print(response.json())`;
                 <span className="text-xs font-semibold text-white">Response Inspector</span>
               </div>
 
-              {responseStatus !== null && (
+              {responseStatus !== null ? (
                 <div className="flex items-center gap-2">
                   <span
                     className={`rounded-lg px-2.5 py-0.5 font-mono text-xs font-bold ${
                       responseStatus >= 200 && responseStatus < 300
                         ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
-                        : responseStatus === 403
+                        : responseStatus >= 300 && responseStatus < 400
+                        ? 'bg-blue-500/15 text-blue-300 border border-blue-500/30'
+                        : responseStatus === 401 || responseStatus === 403 || responseStatus === 429
                         ? 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
                         : 'bg-rose-500/15 text-rose-300 border border-rose-500/30'
                     }`}
                   >
-                    {responseStatus} {responseStatus === 200 ? 'OK' : responseStatus === 201 ? 'CREATED' : responseStatus === 403 ? 'FORBIDDEN' : 'ERROR'}
+                    {responseStatus} {HTTP_REASONS[responseStatus] || 'RESPONSE'}
                   </span>
                   {responseLatency !== null && (
                     <span className="font-mono text-xs text-slate-400">{responseLatency}ms</span>
                   )}
                 </div>
-              )}
+              ) : dispatchError ? (
+                <div className="flex items-center gap-2">
+                  <span className="rounded-lg px-2.5 py-0.5 font-mono text-xs font-bold bg-rose-500/15 text-rose-300 border border-rose-500/30">
+                    NO RESPONSE
+                  </span>
+                  {responseLatency !== null && (
+                    <span className="font-mono text-xs text-slate-400">{responseLatency}ms</span>
+                  )}
+                </div>
+              ) : null}
             </div>
 
             {/* Body or Placeholder */}
@@ -423,8 +525,8 @@ print(response.json())`;
               ) : responseBody ? (
                 <div className="flex-1 flex flex-col">
                   <div className="flex justify-between items-center pb-2 text-[10px] font-mono text-slate-500 uppercase">
-                    <span>JSON Payload</span>
-                    <span>{responseBody.length} bytes</span>
+                    <span>Response Body</span>
+                    <span>{new TextEncoder().encode(responseBody).length} bytes</span>
                   </div>
                   <pre className="flex-1 rounded-2xl border border-white/5 bg-black/60 p-4 font-mono text-xs text-emerald-300/90 overflow-auto max-h-[380px] leading-relaxed">
                     <code>{responseBody}</code>

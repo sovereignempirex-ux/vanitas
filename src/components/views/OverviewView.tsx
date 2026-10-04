@@ -2,9 +2,10 @@ import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext.tsx';
 import { api } from '../../lib/apiClient.ts';
 import { BRAND_ASSETS } from '../../data/assets.ts';
-import { SystemStats, VideoTutorialItem, ExternalDatabaseConfig, YouTubeVideoItem } from '../../types.ts';
+import { SystemStats, VideoTutorialItem, ExternalDatabaseConfig, YouTubeVideoItem, ClientRelease } from '../../types.ts';
 import { detectUserPlatform } from '../../lib/platformDetector.ts';
 import { safeWebHref, safeEmbedSrc } from '../../lib/urls.ts';
+import { formatBytes } from '../../lib/format.ts';
 import {
   Activity,
   Layers,
@@ -67,10 +68,54 @@ export const OverviewView: React.FC = () => {
   const [testingDbId, setTestingDbId] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<{ id: string; msg: string; latency: number } | null>(null);
 
+  // Real release metadata for the download cards — version/size come from
+  // the catalog, never hardcoded — plus per-type download outcomes reported
+  // only after the bytes were actually fetched.
+  const [releases, setReleases] = useState<ClientRelease[]>([]);
+  const [dlStatus, setDlStatus] = useState<Record<string, string | 'busy'>>({});
+
+  const clearDlStatus = (type: string, afterMs: number) =>
+    setTimeout(() => {
+      setDlStatus((s) => {
+        const next = { ...s };
+        delete next[type];
+        return next;
+      });
+    }, afterMs);
+
+  const refreshReleases = () => {
+    api
+      .getReleases()
+      .then((d) => d.releases && setReleases(d.releases))
+      .catch(() => {
+        /* catalog refresh is best-effort */
+      });
+  };
+
+  const handleOverviewDownload = async (type: 'apk' | 'exe') => {
+    setDlStatus((s) => ({ ...s, [type]: 'busy' }));
+    try {
+      const release = releases.find((r) => r.type === type);
+      const result = await api.downloadRelease(type, release?.filename);
+      setDlStatus((s) => ({
+        ...s,
+        [type]: `✓ ${result.filename} saved · ${formatBytes(result.bytes)}`,
+      }));
+      refreshReleases(); // the real counter moves only when bytes were served
+      clearDlStatus(type, 6000);
+    } catch (err: any) {
+      setDlStatus((s) => ({ ...s, [type]: `Download failed: ${err?.message || 'unknown error'}` }));
+      clearDlStatus(type, 8000);
+    }
+  };
+
+  const androidRel = releases.find((r) => r.type === 'apk');
+  const windowsRel = releases.find((r) => r.type === 'exe');
+
   useEffect(() => {
     const loadData = async () => {
       try {
-        const [statsData, tutData, dbData] = await Promise.all([
+        const [statsData, tutData, dbData, relData] = await Promise.all([
           api.getAdminStatistics().catch(() => ({ stats: null })),
           api.getVideoTutorials().catch(() => ({ tutorials: [] })),
           // Connection metadata is admin-only server-side — don't even ask
@@ -78,11 +123,13 @@ export const OverviewView: React.FC = () => {
           role === 'ADMIN'
             ? api.getExternalDatabases().catch(() => ({ databases: [] }))
             : Promise.resolve({ databases: [] }),
+          api.getReleases().catch(() => ({ releases: [] })),
         ]);
 
         if (statsData?.stats) setStats(statsData.stats);
         if (tutData?.tutorials) setTutorials(tutData.tutorials);
         if (dbData?.databases) setDatabases(dbData.databases);
+        if (relData?.releases) setReleases(relData.releases);
       } catch (e) {
         console.warn('Using base status:', e);
       } finally {
@@ -991,10 +1038,11 @@ export const OverviewView: React.FC = () => {
           <div>
             <div className="flex items-center gap-2">
               <Download className="h-5 w-5 text-cyan-400" />
-              <h2 className="text-lg font-bold text-white">Native Client Applications & Binaries</h2>
+              <h2 className="text-lg font-bold text-white">Client Releases & Downloads</h2>
             </div>
             <p className="text-xs text-slate-400 mt-1">
-              Download the official Vanitas client for Android (.APK) or Windows PC (.EXE) to pair with the Central API.
+              Android and Windows client releases pair with the Central API. Today each ships as a signed
+              build manifest with a real SHA-256 — native packages (.apk/.exe) publish here once built.
             </p>
           </div>
           <button
@@ -1015,26 +1063,32 @@ export const OverviewView: React.FC = () => {
                   <Smartphone className="h-6 w-6" />
                 </div>
                 <div>
-                  <h3 className="font-bold text-sm text-white">Android Mobile App (.APK)</h3>
-                  <p className="text-xs text-slate-400">v1.4.2 • 28.4 MB • arm64-v8a</p>
+                  <h3 className="font-bold text-sm text-white">Android Mobile Client</h3>
+                  <p className="text-xs text-slate-400">
+                    {androidRel
+                      ? `${androidRel.version} · ${formatBytes(androidRel.sizeBytes)} · ${
+                          androidRel.artifactKind === 'binary' ? 'native package' : 'build manifest'
+                        }`
+                      : 'Release metadata unavailable'}
+                  </p>
                 </div>
               </div>
               <span className="rounded bg-cyan-500/10 border border-cyan-500/20 px-2 py-0.5 font-mono text-[10px] text-cyan-300">
-                APK
+                {androidRel ? (androidRel.artifactKind === 'binary' ? 'APK' : 'MANIFEST') : '—'}
               </span>
             </div>
             <p className="mt-3 text-xs text-slate-300 leading-relaxed">
-              Fingerprint biometric auth, offline token vault, push alarms, and direct bot execution triggers.
+              Planned native client: fingerprint auth, offline token vault, push alarms, and bot execution
+              triggers. Download today delivers the signed build manifest.
             </p>
             <div className="mt-4 flex items-center gap-2">
               <button
-                onClick={() => {
-                  api.triggerDirectDownload('apk');
-                }}
-                className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-blue-600 hover:bg-blue-500 py-2.5 text-xs font-bold text-white transition-all shadow-md shadow-blue-600/20"
+                onClick={() => handleOverviewDownload('apk')}
+                disabled={dlStatus.apk === 'busy'}
+                className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-blue-600 hover:bg-blue-500 py-2.5 text-xs font-bold text-white transition-all shadow-md shadow-blue-600/20 disabled:opacity-60"
               >
                 <Download className="h-3.5 w-3.5" />
-                <span>Download APK</span>
+                <span>{dlStatus.apk === 'busy' ? 'Preparing download…' : 'Download Android manifest'}</span>
               </button>
               <button
                 onClick={() => setActiveView('downloads')}
@@ -1044,6 +1098,15 @@ export const OverviewView: React.FC = () => {
                 <QrCode className="h-4 w-4 text-cyan-400" />
               </button>
             </div>
+            {dlStatus.apk && dlStatus.apk !== 'busy' && (
+              <p
+                className={`mt-2 text-[11px] font-mono ${
+                  dlStatus.apk.startsWith('✓') ? 'text-emerald-400' : 'text-rose-300'
+                }`}
+              >
+                {dlStatus.apk}
+              </p>
+            )}
           </div>
 
           {/* Windows EXE Card */}
@@ -1054,26 +1117,32 @@ export const OverviewView: React.FC = () => {
                   <Laptop className="h-6 w-6" />
                 </div>
                 <div>
-                  <h3 className="font-bold text-sm text-white">Windows Desktop Client (.EXE)</h3>
-                  <p className="text-xs text-slate-400">v1.4.2 • 64.8 MB • Windows 10/11 x64</p>
+                  <h3 className="font-bold text-sm text-white">Windows Desktop Client</h3>
+                  <p className="text-xs text-slate-400">
+                    {windowsRel
+                      ? `${windowsRel.version} · ${formatBytes(windowsRel.sizeBytes)} · ${
+                          windowsRel.artifactKind === 'binary' ? 'native package' : 'build manifest'
+                        }`
+                      : 'Release metadata unavailable'}
+                  </p>
                 </div>
               </div>
               <span className="rounded bg-blue-500/10 border border-blue-500/20 px-2 py-0.5 font-mono text-[10px] text-blue-300">
-                EXE
+                {windowsRel ? (windowsRel.artifactKind === 'binary' ? 'EXE' : 'MANIFEST') : '—'}
               </span>
             </div>
             <p className="mt-3 text-xs text-slate-300 leading-relaxed">
-              System Tray background daemon, global hotkey (Ctrl+Shift+V), and local reverse proxy cache.
+              Planned native client: system tray daemon, global hotkey (Ctrl+Shift+V), and local reverse
+              proxy cache. Download today delivers the signed build manifest.
             </p>
             <div className="mt-4 flex items-center gap-2">
               <button
-                onClick={() => {
-                  api.triggerDirectDownload('exe');
-                }}
-                className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 py-2.5 text-xs font-bold text-white transition-all shadow-md shadow-blue-600/20"
+                onClick={() => handleOverviewDownload('exe')}
+                disabled={dlStatus.exe === 'busy'}
+                className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 py-2.5 text-xs font-bold text-white transition-all shadow-md shadow-blue-600/20 disabled:opacity-60"
               >
                 <Download className="h-3.5 w-3.5" />
-                <span>Download Setup.EXE</span>
+                <span>{dlStatus.exe === 'busy' ? 'Preparing download…' : 'Download Windows manifest'}</span>
               </button>
               <button
                 onClick={() => setActiveView('downloads')}
@@ -1082,6 +1151,15 @@ export const OverviewView: React.FC = () => {
                 <span>Docs</span>
               </button>
             </div>
+            {dlStatus.exe && dlStatus.exe !== 'busy' && (
+              <p
+                className={`mt-2 text-[11px] font-mono ${
+                  dlStatus.exe.startsWith('✓') ? 'text-emerald-400' : 'text-rose-300'
+                }`}
+              >
+                {dlStatus.exe}
+              </p>
+            )}
           </div>
         </div>
       </div>
