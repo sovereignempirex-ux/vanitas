@@ -123,6 +123,21 @@ const me0 = await call('GET', '/auth/me', { token: probeToken });
 const probeId = me0.json?.user?.id;
 check('temp account is a plain USER', me0.json?.user?.role === 'USER' && !!probeId, me0.json?.user?.role);
 
+// Real usage analytics: structural integrity of the live series — the sum of
+// the 24 real buckets must equal the reported total exactly (no synthesis).
+const an = await call('GET', '/api-keys/usage-analytics?period=24h', { token: probeToken });
+const anSum = (an.json?.timeSeries || []).reduce((s, p) => s + p.totalRequests, 0);
+check(
+  'GET /api-keys/usage-analytics -> 200 with a consistent real series',
+  an.status === 200 &&
+    Array.isArray(an.json?.timeSeries) &&
+    an.json.timeSeries.length === 24 &&
+    anSum === an.json?.totalVolume &&
+    Array.isArray(an.json?.summaries) &&
+    typeof an.json?.overallErrorCount === 'number',
+  { s: an.status, sum: anSum, total: an.json?.totalVolume },
+);
+
 const grant = await call('PATCH', `/admin/users/${probeId}/verification`, {
   ...admin,
   body: { verification: 'DEVELOPER' },

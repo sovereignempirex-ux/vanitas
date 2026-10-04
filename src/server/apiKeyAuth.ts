@@ -266,6 +266,25 @@ async function runApiKeyAuth(req: Request, res: Response, next: NextFunction): P
     return;
   }
 
+  // Record the REAL outcome of this request for usage analytics. Attached
+  // before quota/rate/scope decisions so 403/429 rejections are counted
+  // honestly too — the chart never reports traffic that did not happen.
+  const receivedAt = Date.now();
+  res.on('finish', () => {
+    try {
+      db.recordApiKeyUsage({
+        keyId: key.id,
+        ownerId: key.ownerId,
+        path: req.path,
+        status: res.statusCode,
+        latencyMs: Date.now() - receivedAt,
+        ts: Date.now(),
+      });
+    } catch {
+      // Telemetry must never break a served response.
+    }
+  });
+
   // --- status / expiry ------------------------------------------------------
   if (key.status === 'revoked') {
     res.status(403).json({ error: 'API key revoked', keyId: key.id });

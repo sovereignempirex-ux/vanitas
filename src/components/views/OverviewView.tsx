@@ -435,8 +435,21 @@ export const OverviewView: React.FC = () => {
                     {db.provider.toUpperCase()} • {db.tier.toUpperCase()}
                   </span>
                   <div className="flex items-center gap-1.5">
-                    <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-                    <span className="text-[10px] font-mono text-slate-400">{db.latencyMs}ms</span>
+                    {/* Status dot reflects the REAL probe result — grey until tested. */}
+                    <span
+                      className={`h-2 w-2 rounded-full ${
+                        db.status === 'connected'
+                          ? 'bg-emerald-400 animate-pulse'
+                          : db.status === 'unreachable'
+                            ? 'bg-rose-500'
+                            : db.status === 'syncing'
+                              ? 'bg-amber-400 animate-pulse'
+                              : 'bg-slate-500'
+                      }`}
+                    />
+                    <span className="text-[10px] font-mono text-slate-400">
+                      {db.lastTestedAt ? `${db.latencyMs}ms` : 'not tested'}
+                    </span>
                   </div>
                 </div>
 
@@ -449,11 +462,15 @@ export const OverviewView: React.FC = () => {
                 <div className="mt-3 grid grid-cols-2 gap-2 text-[10px] text-slate-400">
                   <div className="bg-white/[0.02] p-2 rounded-lg border border-white/5">
                     <span className="block text-slate-500">Tables</span>
-                    <span className="font-bold text-slate-200">{db.tablesCount} schema tables</span>
+                    <span className="font-bold text-slate-200">
+                      {db.tablesCount > 0 ? `${db.tablesCount} schema tables` : 'not measured'}
+                    </span>
                   </div>
                   <div className="bg-white/[0.02] p-2 rounded-lg border border-white/5">
                     <span className="block text-slate-500">Storage</span>
-                    <span className="font-bold text-slate-200">{db.storageUsedMb} / {db.storageMaxMb} MB</span>
+                    <span className="font-bold text-slate-200">
+                      {db.storageMaxMb > 0 ? `${db.storageUsedMb} / ${db.storageMaxMb} MB` : 'not measured'}
+                    </span>
                   </div>
                 </div>
               </div>
@@ -467,7 +484,9 @@ export const OverviewView: React.FC = () => {
                   <RefreshCw className={`h-3 w-3 ${testingDbId === db.id ? 'animate-spin' : ''}`} />
                   <span>{testingDbId === db.id ? 'Testing...' : 'Test Connection'}</span>
                 </button>
-                <span className="text-[10px] font-mono text-slate-500">SSL Active</span>
+                <span className="text-[10px] font-mono text-slate-500">
+                  {db.sslEnabled ? 'TLS by scheme' : 'TLS unverified'}
+                </span>
               </div>
             </div>
           ))}

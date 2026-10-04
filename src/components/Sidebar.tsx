@@ -39,7 +39,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen, setIsMobileOpen 
         { id: 'keys', label: 'API Keys & Scopes', icon: Key, badge: 'Live' },
         { id: 'playground', label: 'API Playground', icon: Terminal, badge: null },
         { id: 'docs', label: 'Developer Portal', icon: FileCode2, badge: null },
-        { id: 'status', label: 'Public Status', icon: Activity, badge: '99.98%' },
+        { id: 'status', label: 'Public Status', icon: Activity, badge: 'Live' },
       ],
     },
     {
@@ -70,7 +70,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen, setIsMobileOpen 
     items: [
       { id: 'admin-center', label: 'Overview & Users', icon: Users, badge: 'RBAC' },
       { id: 'admin-moderation', label: 'Moderation & Suggestions', icon: MessageSquare, badge: 'Live' },
-      { id: 'admin-logs', label: 'Audit Logs & CSV', icon: ScrollText, badge: '500+' },
+      { id: 'admin-logs', label: 'Audit Logs & CSV', icon: ScrollText, badge: null },
       { id: 'admin-permissions', label: 'Permissions Matrix', icon: Lock, badge: null },
       { id: 'admin-flags', label: 'Feature Flags', icon: Sliders, badge: null },
       { id: 'admin-emergency', label: 'Emergency Controls', icon: AlertOctagon, badge: 'Critical' },

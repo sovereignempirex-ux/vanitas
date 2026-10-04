@@ -86,15 +86,18 @@ export const ApiKeyUsageChart: React.FC<ApiKeyUsageChartProps> = ({ keys, onRefr
     if (!analyticsData?.timeSeries) return [];
     if (selectedKeyId === 'all') return analyticsData.timeSeries;
 
+    // Real per-key splits recorded server-side (<keyId>__t / <keyId>__e) —
+    // no proportional guessing when a single key is selected.
     return analyticsData.timeSeries.map((pt) => {
       const keyCount = Number(pt[selectedKeyId]) || 0;
-      const throttledRatio = pt.throttledCount > 0 ? (keyCount / Math.max(1, pt.totalRequests)) : 0;
-      const keyThrottled = Math.round(pt.throttledCount * throttledRatio);
+      const keyThrottled = Number(pt[`${selectedKeyId}__t`]) || 0;
+      const keyErrors = Number(pt[`${selectedKeyId}__e`]) || 0;
       return {
         ...pt,
         totalRequests: keyCount,
-        successCount: Math.max(0, keyCount - keyThrottled),
+        successCount: Math.max(0, keyCount - keyThrottled - keyErrors),
         throttledCount: keyThrottled,
+        errorCount: keyErrors,
       };
     });
   }, [analyticsData, selectedKeyId]);
@@ -104,6 +107,12 @@ export const ApiKeyUsageChart: React.FC<ApiKeyUsageChartProps> = ({ keys, onRefr
     if (selectedKeyId === 'all') return null;
     return analyticsData.summaries.find((s) => s.keyId === selectedKeyId) || null;
   }, [analyticsData, selectedKeyId]);
+
+  // Honest empty state: with no observed traffic the KPIs show "—", never a
+  // made-up default percentage or latency.
+  const noTraffic = selectedSummary
+    ? selectedSummary.totalRequests === 0
+    : (analyticsData?.totalVolume || 0) === 0;
 
   // Custom Chart Tooltip
   const CustomTooltip = ({ active, payload, label }: any) => {
@@ -265,11 +274,17 @@ export const ApiKeyUsageChart: React.FC<ApiKeyUsageChartProps> = ({ keys, onRefr
             Success Rate
           </span>
           <div className="text-lg sm:text-xl font-bold font-mono text-emerald-400">
-            {selectedSummary
-              ? `${selectedSummary.successRate}%`
-              : `${analyticsData?.overallSuccessRate || 99.4}%`}
+            {noTraffic
+              ? '—'
+              : selectedSummary
+                ? `${selectedSummary.successRate}%`
+                : `${analyticsData?.overallSuccessRate ?? 0}%`}
           </div>
-          <p className="text-[10px] text-emerald-500/80 font-mono">Zero Critical Faults</p>
+          <p className="text-[10px] text-emerald-500/80 font-mono">
+            {selectedSummary
+              ? `${selectedSummary.errorCount} errors in window`
+              : `${analyticsData?.overallErrorCount ?? 0} errors in window`}
+          </p>
         </div>
 
         <div className="rounded-2xl border border-white/5 bg-slate-900/50 p-3.5 sm:p-4 space-y-1">
@@ -291,13 +306,23 @@ export const ApiKeyUsageChart: React.FC<ApiKeyUsageChartProps> = ({ keys, onRefr
             Avg Latency
           </span>
           <div className="text-lg sm:text-xl font-bold font-mono text-cyan-300">
-            {selectedSummary
-              ? `${selectedSummary.avgLatencyMs} ms`
-              : `${analyticsData?.overallAvgLatencyMs || 22} ms`}
+            {noTraffic
+              ? '—'
+              : selectedSummary
+                ? `${selectedSummary.avgLatencyMs} ms`
+                : `${analyticsData?.overallAvgLatencyMs ?? 0} ms`}
           </div>
-          <p className="text-[10px] text-slate-500 font-mono">Edge Ingress Target</p>
+          <p className="text-[10px] text-slate-500 font-mono">Measured at gateway ingress</p>
         </div>
       </div>
+
+      {/* Honest empty state — zero traffic is reported as zero, not invented. */}
+      {analyticsData && analyticsData.totalVolume === 0 && (
+        <div className="rounded-xl border border-sky-400/20 bg-sky-500/5 px-4 py-3 text-xs text-sky-300">
+          No API traffic recorded in this window yet — every point in this chart is a real counted request. Send a
+          call with one of your keys and the timeline fills in with live data.
+        </div>
+      )}
 
       {/* Main Recharts Area Chart Container */}
       <div className="rounded-2xl border border-white/5 bg-slate-900/40 p-4 sm:p-5">
@@ -527,12 +552,16 @@ export const ApiKeyUsageChart: React.FC<ApiKeyUsageChartProps> = ({ keys, onRefr
                 {/* Top Endpoints */}
                 <div className="mt-2.5 pt-2 border-t border-white/5 space-y-1">
                   <span className="text-[9px] uppercase font-semibold text-slate-500 tracking-wider block">Top Endpoint Ingress</span>
-                  {summary.topEndpoints.slice(0, 2).map((ep, eIdx) => (
-                    <div key={eIdx} className="flex items-center justify-between text-[10px] font-mono text-slate-400">
-                      <span className="truncate max-w-[140px]">{ep.endpoint}</span>
-                      <span className="text-slate-300 font-semibold">{ep.percentage}%</span>
-                    </div>
-                  ))}
+                  {summary.topEndpoints.length === 0 ? (
+                    <span className="text-[10px] font-mono text-slate-600">No API calls yet in this window</span>
+                  ) : (
+                    summary.topEndpoints.slice(0, 2).map((ep, eIdx) => (
+                      <div key={eIdx} className="flex items-center justify-between text-[10px] font-mono text-slate-400">
+                        <span className="truncate max-w-[140px]">{ep.endpoint}</span>
+                        <span className="text-slate-300 font-semibold">{ep.percentage}%</span>
+                      </div>
+                    ))
+                  )}
                 </div>
               </div>
             );

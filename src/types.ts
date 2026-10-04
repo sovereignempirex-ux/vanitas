@@ -282,6 +282,8 @@ export interface ApiKeyUsageSummary {
   totalRequests: number;
   successRate: number;
   throttledRequests: number;
+  /** Real 4xx/5xx count (excluding 429) recorded for this key in the window. */
+  errorCount: number;
   quotaUsedPercent: number;
   peakRpm: number;
   avgLatencyMs: number;
@@ -295,6 +297,8 @@ export interface ApiKeyUsageResponse {
   totalVolume: number;
   overallSuccessRate: number;
   overallThrottledCount: number;
+  /** Real 4xx/5xx count (excluding 429) across the whole window. */
+  overallErrorCount: number;
   overallAvgLatencyMs: number;
 }
 
@@ -469,7 +473,8 @@ export interface ExternalDatabaseConfig {
   storageUsedMb: number;
   storageMaxMb: number;
   sslEnabled: boolean;
-  lastTestedAt: string;
+  /** Set only after a real probe — absent means "never tested". */
+  lastTestedAt?: string;
 }
 
 export interface VideoTutorialItem {

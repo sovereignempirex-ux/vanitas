@@ -23,9 +23,7 @@ import {
   TrendingUp,
   BarChart2,
   Settings2,
-  Flame,
   RefreshCw,
-  Play,
   Server,
   Info,
   SlidersHorizontal,
@@ -117,22 +115,6 @@ export const ApiKeysView: React.FC = () => {
   const [editAction, setEditAction] = useState<'reject_429' | 'throttle_delay' | 'alert_only'>('reject_429');
   const [editQuota, setEditQuota] = useState<number>(200000);
   const [savingRateLimit, setSavingRateLimit] = useState(false);
-
-  // Simulation state
-  const [simulatingKeyId, setSimulatingKeyId] = useState<string | null>(null);
-  const [simulationResult, setSimulationResult] = useState<{
-    keyId: string;
-    keyName: string;
-    batch: number;
-    currentRpm: number;
-    isThrottled: boolean;
-    headers: {
-      'x-ratelimit-limit': number;
-      'x-ratelimit-remaining': number;
-      'x-ratelimit-reset': number;
-      'retry-after': number;
-    };
-  } | null>(null);
 
   // One-time reveal modal
   const [revealedSecret, setRevealedSecret] = useState<{ key: ApiKey; rawSecret: string; note: string } | null>(null);
@@ -302,40 +284,6 @@ export const ApiKeysView: React.FC = () => {
       setError(err.message);
     } finally {
       setSavingRateLimit(false);
-    }
-  };
-
-  const handleSimulateTraffic = async (key: ApiKey, count: number) => {
-    try {
-      setSimulatingKeyId(key.id);
-      setError(null);
-      const res = await api.simulateApiKeyTraffic(key.id, count);
-      setSimulationResult({
-        keyId: key.id,
-        keyName: key.name,
-        batch: count,
-        currentRpm: res.currentRpm,
-        isThrottled: res.isThrottled,
-        headers: res.headers,
-      });
-
-      // Update local state without full reload
-      setKeys((prev) =>
-        prev.map((k) =>
-          k.id === key.id
-            ? {
-                ...k,
-                currentRpmUsage: res.currentRpm,
-                usageCount: k.usageCount + count,
-                currentUsageThisMonth: (k.currentUsageThisMonth || 0) + count,
-              }
-            : k
-        )
-      );
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setSimulatingKeyId(null);
     }
   };
 
@@ -753,64 +701,6 @@ export const ApiKeysView: React.FC = () => {
           </div>
         </div>
 
-        {/* Live Simulation Response Toast / Banner */}
-        {simulationResult && (
-          <div className="rounded-2xl border border-indigo-500/30 bg-indigo-950/50 p-4 backdrop-blur-xl animate-in slide-in-from-top-2 duration-200">
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
-              <div className="flex items-start gap-3">
-                <div
-                  className={`flex h-9 w-9 items-center justify-center rounded-xl border flex-shrink-0 ${
-                    simulationResult.isThrottled
-                      ? 'bg-rose-500/20 text-rose-400 border-rose-500/30'
-                      : 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
-                  }`}
-                >
-                  {simulationResult.isThrottled ? <ShieldAlert className="h-5 w-5" /> : <CheckCircle2 className="h-5 w-5" />}
-                </div>
-                <div>
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-xs font-bold text-white">
-                      Traffic Simulation: {simulationResult.batch} Requests dispatched to "{simulationResult.keyName}"
-                    </span>
-                    <span
-                      className={`rounded px-2 py-0.5 font-mono text-[10px] font-semibold uppercase ${
-                        simulationResult.isThrottled
-                          ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
-                          : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                      }`}
-                    >
-                      {simulationResult.isThrottled ? '429 Rate Limit Exceeded (Throttled)' : '200 OK (Allowed)'}
-                    </span>
-                  </div>
-                  <div className="mt-1 flex flex-wrap items-center gap-3 text-[11px] font-mono text-slate-300">
-                    <span>
-                      X-RateLimit-Limit: <strong>{simulationResult.headers['x-ratelimit-limit']}</strong>
-                    </span>
-                    <span>
-                      X-RateLimit-Remaining: <strong className="text-indigo-300">{simulationResult.headers['x-ratelimit-remaining']}</strong>
-                    </span>
-                    <span>
-                      X-RateLimit-Reset: <strong>in {simulationResult.headers['x-ratelimit-reset'] - Math.floor(Date.now() / 1000)}s</strong>
-                    </span>
-                    {simulationResult.isThrottled && (
-                      <span className="text-rose-400 font-bold">
-                        Retry-After: {simulationResult.headers['retry-after']}s
-                      </span>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              <button
-                onClick={() => setSimulationResult(null)}
-                className="self-end md:self-center rounded-lg bg-white/10 px-3 py-1 text-xs text-slate-300 hover:text-white"
-              >
-                Dismiss
-              </button>
-            </div>
-          </div>
-        )}
-
         {/* Per-Key Rate Limit Visualizer Cards */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {filteredKeys.map((k) => {
@@ -965,34 +855,6 @@ export const ApiKeysView: React.FC = () => {
                     </p>
                   </div>
                 </div>
-
-                {/* Simulation Trigger Bar */}
-                {k.status === 'active' && (
-                  <div className="mt-4 pt-3 border-t border-white/5 flex items-center justify-between gap-2">
-                    <span className="text-[11px] text-slate-400 flex items-center gap-1">
-                      <Flame className="h-3.5 w-3.5 text-amber-400" />
-                      Simulate Ingress:
-                    </span>
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        onClick={() => handleSimulateTraffic(k, 50)}
-                        disabled={simulatingKeyId === k.id}
-                        className="rounded-lg bg-white/[0.05] hover:bg-white/10 px-2.5 py-1 text-[11px] font-mono text-slate-200 border border-white/10 hover:border-indigo-400/40 transition-all flex items-center gap-1"
-                      >
-                        <Play className="h-2.5 w-2.5 text-emerald-400" />
-                        +50 Reqs
-                      </button>
-                      <button
-                        onClick={() => handleSimulateTraffic(k, 200)}
-                        disabled={simulatingKeyId === k.id}
-                        className="rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 px-2.5 py-1 text-[11px] font-mono text-indigo-200 border border-indigo-500/30 hover:border-indigo-400 transition-all flex items-center gap-1"
-                      >
-                        <Zap className="h-2.5 w-2.5 text-indigo-400" />
-                        +200 Reqs (Burst)
-                      </button>
-                    </div>
-                  </div>
-                )}
               </div>
             );
           })}

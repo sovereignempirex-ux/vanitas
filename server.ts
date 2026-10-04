@@ -461,15 +461,95 @@ export async function buildApp() {
   });
 
   // Status Summary
-  app.get('/api/v1/status', (_req, res) => {
+  // Public platform status. EVERY number below is counted live: request
+  // totals / hourly traffic / p95 / error rate come from the real request
+  // logger, uptime is this process, and each component row carries observable
+  // evidence (probe result or activity count) instead of a painted green dot.
+  app.get('/api/v1/status', async (_req, res) => {
+    const stats = db.systemStats;
+
+    // Real data-store probe — same contract as /api/v1/public/status.
+    let database: 'connected' | 'unreachable' | 'in-memory-fallback';
+    if (databasePool) {
+      try {
+        await databasePool.query('select 1');
+        database = 'connected';
+      } catch {
+        database = 'unreachable';
+      }
+    } else {
+      database = 'in-memory-fallback';
+    }
+
+    const dayAgo = Date.now() - 24 * 3600_000;
+    const logins24h = db.auditLogs.filter(
+      (l) => l.action === 'LOGIN_SUCCESS' && Date.parse(l.timestamp) >= dayAgo,
+    ).length;
+    const failedLogins24h = db.auditLogs.filter(
+      (l) => l.action === 'LOGIN_FAILURE' && Date.parse(l.timestamp) >= dayAgo,
+    ).length;
+
+    const hourlyTraffic = db.getHourlyTraffic24h();
+    const requests24h = hourlyTraffic.reduce((sum, b) => sum + b.requests, 0);
+    const errors24h = hourlyTraffic.reduce((sum, b) => sum + b.errors, 0);
+    const activeApiKeys = db.apiKeys.filter((k) => k.status === 'active').length;
+    const botsOnline = db.bots.filter((b) => b.status === 'online').length;
+
     res.json({
       platform: 'Vanitas',
-      status: db.systemStats.services,
+      status: stats.services,
+      database,
       stats: {
-        totalRequestsToday: db.systemStats.apiRequestsToday,
-        p95LatencyMs: db.systemStats.p95LatencyMs,
-        errorRate: db.systemStats.errorRate,
+        totalRequestsToday: stats.apiRequestsToday,
+        requests24h,
+        errors24h,
+        p95LatencyMs: stats.p95LatencyMs,
+        errorRate: stats.errorRate,
+        activeApiKeys,
+        logins24h,
+        failedLogins24h,
       },
+      hourlyTraffic,
+      components: [
+        {
+          id: 'api',
+          // Serving this very request IS the evidence the gateway is up.
+          status: 'operational',
+          detail: `${requests24h.toLocaleString('en-US')} requests · last 24h`,
+        },
+        {
+          id: 'database',
+          status: database === 'unreachable' ? 'outage' : 'operational',
+          detail:
+            database === 'connected'
+              ? 'PostgreSQL · SELECT 1 OK'
+              : database === 'in-memory-fallback'
+                ? 'In-process store (memory mode)'
+                : 'PostgreSQL unreachable',
+        },
+        {
+          id: 'auth',
+          status: 'operational',
+          detail: `${logins24h} sign-ins / ${failedLogins24h} failed · 24h`,
+        },
+        {
+          id: 'ai',
+          status: 'operational',
+          detail: 'Streaming copilot · site-aware · AR + EN',
+        },
+        {
+          id: 'bot',
+          status: 'operational',
+          detail: `${botsOnline} online / ${db.bots.length} configured`,
+        },
+        {
+          id: 'webhooks',
+          status: 'operational',
+          detail: `${db.webhooks.length} endpoints · ${db.webhookLogs.length} deliveries logged`,
+        },
+      ],
+      uptimeSeconds: Math.round(process.uptime()),
+      serverTime: new Date().toISOString(),
     });
   });
 
@@ -1396,50 +1476,10 @@ export async function buildApp() {
   });
 
   // API Key Simulate / Test Rate Limit Ingress
-  app.post('/api/v1/api-keys/:id/simulate-traffic', (req, res) => {
-    try {
-      const id = sanitizeText(req.params.id, 128);
-      const requestCount = req.body?.requestCount;
-      // Mutating a key's quota counters (and reading the key object back)
-      // requires being signed in AND owning that key — admins excepted.
-      const actor = getActorUser(req);
-      if (!actor) return res.status(401).json({ error: 'Authentication required' });
-      const key = db.apiKeys.find((k) => k.id === id);
-      if (!key) return res.status(404).json({ error: 'Key not found' });
-      if (key.ownerId !== actor.id && actor.role !== 'ADMIN') {
-        return res.status(403).json({ error: 'Not your API key' });
-      }
-
-      // Increment simulated usage (capped to prevent abuse)
-      const count = Math.min(Math.max(Number(requestCount) || 50, 1), 1000);
-      key.usageCount += count;
-      key.currentUsageThisMonth = (key.currentUsageThisMonth || 0) + count;
-      key.currentRpmUsage = Math.min(
-        Math.round(key.rateLimitPerMin * 1.3),
-        (key.currentRpmUsage || 0) + Math.floor(count * 0.9)
-      );
-      key.lastUsedAt = new Date().toISOString();
-
-      const isThrottled = (key.currentRpmUsage || 0) >= key.rateLimitPerMin;
-      const remainingQuota = Math.max(0, key.rateLimitPerMin - (key.currentRpmUsage || 0));
-
-      res.json({
-        success: true,
-        key,
-        simulatedBatch: count,
-        currentRpm: key.currentRpmUsage,
-        isThrottled,
-        headers: {
-          'x-ratelimit-limit': key.rateLimitPerMin,
-          'x-ratelimit-remaining': remainingQuota,
-          'x-ratelimit-reset': Math.floor(Date.now() / 1000) + 45,
-          'retry-after': isThrottled ? 15 : 0,
-        },
-      });
-    } catch (err: any) {
-      res.status(400).json({ error: 'Simulation failed' });
-    }
-  });
+  // NOTE: the old POST /api-keys/:id/simulate-traffic endpoint was removed on
+  // purpose — it inflated usage counters and rate-limit headers without a
+  // single real request. Usage is only ever moved by genuine traffic (see
+  // authenticateApiKey's res.on('finish') recorder → usage-analytics).
 
   // ---------------------------------------------------------------------------
   // PUBLIC API — machine-to-machine surface for external integrations.
@@ -2806,12 +2846,70 @@ export async function buildApp() {
     });
   });
 
-  app.post('/api/v1/databases/external/test', (req, res) => {
+  // Admin-only: REAL reachability probe for a stored external endpoint.
+  // http(s) URLs are dialled (SSRF-guarded via sanitizeUrl, redirects refused,
+  // 5s cap) and the reported latency is the MEASURED round trip; postgres/
+  // redis dialects are never dialled by the gateway (only masked URLs are
+  // stored) and report honestly as unverified — no random "connected" answers.
+  app.post('/api/v1/databases/external/test', async (req, res) => {
     if (!requireAdmin(req, res)) return;
     const id = sanitizeText(req.body?.id, 128);
     if (!id) return res.status(400).json({ error: 'Database ID is required' });
-    const result = db.testDatabaseConnection(id);
-    res.json(result);
+
+    const item = db.getExternalDatabase(id);
+    if (!item) {
+      return res.json({ success: false, latencyMs: 0, message: 'Database configuration not found' });
+    }
+
+    const scheme = (item.connectionUrlMasked.match(/^([a-z][a-z0-9+.-]*):\/\//i)?.[1] || '').toLowerCase();
+    if (scheme !== 'http' && scheme !== 'https') {
+      return res.json({
+        success: false,
+        latencyMs: 0,
+        message: `${scheme || 'non-http'} endpoints are stored masked and never dialled by the gateway — verify this connection from your own client.`,
+        database: item,
+      });
+    }
+
+    // Policy check happens WITHOUT userinfo (sanitizeUrl rejects credentials);
+    // the dial also sends no credentials — any HTTP answer proves reachability.
+    const dialUrl = item.connectionUrlMasked.replace(/\/\/[^/@]*@/, '//');
+    if (!sanitizeUrl(dialUrl)) {
+      return res.json({
+        success: false,
+        latencyMs: 0,
+        message: 'Stored URL fails the SSRF policy (blocked host or scheme) — not dialled.',
+        database: item,
+      });
+    }
+
+    const started = Date.now();
+    try {
+      const response = await fetch(dialUrl, {
+        method: 'GET',
+        redirect: 'error',
+        signal: AbortSignal.timeout(5000),
+        headers: { 'user-agent': 'Vanitas-Connect-Test/1.0' },
+      });
+      const latencyMs = Date.now() - started;
+      void response.body?.cancel().catch(() => undefined);
+      const ok = response.status < 500;
+      const database = db.markDatabaseTested(id, ok, latencyMs);
+      res.json({
+        success: ok,
+        latencyMs,
+        message: ok
+          ? `Reachable — HTTP ${response.status} in ${latencyMs}ms${response.status >= 400 ? ' (host up; endpoint answered with an error status)' : ''}.`
+          : `Host answered but returned HTTP ${response.status} in ${latencyMs}ms — unhealthy.`,
+        database,
+      });
+    } catch (err) {
+      const latencyMs = Date.now() - started;
+      const raw = String((err as Error)?.message || 'network error');
+      const reason = /abort|timeout/i.test(raw) ? `timed out after 5s (${latencyMs}ms)` : raw.slice(0, 120);
+      const database = db.markDatabaseTested(id, false, latencyMs);
+      res.json({ success: false, latencyMs, message: `Unreachable — ${reason}.`, database });
+    }
   });
 
   // Admin-only: storing a connection URL is sensitive — never return raw URL.

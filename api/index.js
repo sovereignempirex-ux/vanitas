@@ -51,7 +51,7 @@ var init_db = __esm({
       { scope: "settings.read", label: "Read Platform Settings", group: "System", adminOnly: false },
       { scope: "settings.write", label: "Update Platform Settings", group: "System", adminOnly: true }
     ];
-    VanitasDatabase = class {
+    VanitasDatabase = class _VanitasDatabase {
       // DELIBERATELY EMPTY: no seeded/fake suggestions or comments — ever.
       productSuggestions = [];
       // DELIBERATELY EMPTY: real accounts only. The first registration bootstraps
@@ -160,6 +160,24 @@ var init_db = __esm({
         requestBreakdown: [],
         hourlyTraffic: []
       };
+      // --- Real API-key usage telemetry ----------------------------------------
+      // Every entry is recorded by authenticateApiKey on response 'finish' — a
+      // raw, append-only account of what actually happened. The ring is bounded;
+      // like the keys themselves it lives for the process (memory-mode PG shares
+      // the same lifetime), so analytics NEVER invent data for periods that were
+      // not observed: unobserved buckets stay at zero.
+      apiKeyUsageEvents = [];
+      /** Rolling latency samples for the live p95 (fed by incrementRequestCount). */
+      requestLatencies = [];
+      latencySampleCount = 0;
+      static USAGE_EVENT_CAP = 2e4;
+      static LATENCY_SAMPLE_CAP = 1e3;
+      recordApiKeyUsage(event) {
+        this.apiKeyUsageEvents.push(event);
+        if (this.apiKeyUsageEvents.length > _VanitasDatabase.USAGE_EVENT_CAP + 1e3) {
+          this.apiKeyUsageEvents.splice(0, this.apiKeyUsageEvents.length - _VanitasDatabase.USAGE_EVENT_CAP);
+        }
+      }
       // --- Methods ---
       recordAuditLog(entry) {
         const log = {
@@ -481,6 +499,10 @@ var init_db = __esm({
         });
         return release;
       }
+      // Configured external endpoints (fixture). Metadata is honest: every entry
+      // starts 'idle' with zeroed metrics — an entry never claims to be
+      // "connected" or shows a latency until an admin runs a REAL probe against
+      // it (see /api/v1/databases/external/test).
       externalDatabases = [
         {
           id: "db_supabase_prod",
@@ -489,13 +511,13 @@ var init_db = __esm({
           tier: "free",
           connectionUrlMasked: "postgresql://postgres:\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022@db.supabase.co:5432/postgres",
           region: "eu-central-1 (Frankfurt)",
-          status: "connected",
-          latencyMs: 14,
-          tablesCount: 18,
-          storageUsedMb: 62.4,
-          storageMaxMb: 500,
-          sslEnabled: true,
-          lastTestedAt: (/* @__PURE__ */ new Date()).toISOString()
+          status: "idle",
+          latencyMs: 0,
+          tablesCount: 0,
+          storageUsedMb: 0,
+          storageMaxMb: 0,
+          sslEnabled: false
+          // sslmode not stated in the URL — unverified
         },
         {
           id: "db_neon_branch",
@@ -504,13 +526,13 @@ var init_db = __esm({
           tier: "free",
           connectionUrlMasked: "postgresql://neon_admin:\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022@ep-misty-water.neon.tech/main",
           region: "us-east-2 (Ohio)",
-          status: "connected",
-          latencyMs: 22,
-          tablesCount: 12,
-          storageUsedMb: 38.1,
-          storageMaxMb: 512,
-          sslEnabled: true,
-          lastTestedAt: new Date(Date.now() - 1e3 * 60 * 15).toISOString()
+          status: "idle",
+          latencyMs: 0,
+          tablesCount: 0,
+          storageUsedMb: 0,
+          storageMaxMb: 0,
+          sslEnabled: false
+          // sslmode not stated in the URL — unverified
         },
         {
           id: "db_upstash_redis",
@@ -519,13 +541,13 @@ var init_db = __esm({
           tier: "free",
           connectionUrlMasked: "rediss://default:\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022@eu1-rest-upstash.io:6379",
           region: "eu-west-1 (Ireland)",
-          status: "connected",
-          latencyMs: 8,
-          tablesCount: 6,
-          storageUsedMb: 12,
-          storageMaxMb: 256,
-          sslEnabled: true,
-          lastTestedAt: new Date(Date.now() - 1e3 * 60 * 30).toISOString()
+          status: "idle",
+          latencyMs: 0,
+          tablesCount: 0,
+          storageUsedMb: 0,
+          storageMaxMb: 0,
+          sslEnabled: true
+          // rediss:// scheme proves TLS
         },
         {
           id: "db_render_backend",
@@ -534,30 +556,30 @@ var init_db = __esm({
           tier: "free",
           connectionUrlMasked: "https://vanitas-worker-api.onrender.com/api/v1",
           region: "us-west-1 (Oregon)",
-          status: "connected",
-          latencyMs: 29,
-          tablesCount: 8,
-          storageUsedMb: 18.5,
-          storageMaxMb: 1e3,
-          sslEnabled: true,
-          lastTestedAt: new Date(Date.now() - 1e3 * 60 * 45).toISOString()
+          status: "idle",
+          latencyMs: 0,
+          tablesCount: 0,
+          storageUsedMb: 0,
+          storageMaxMb: 0,
+          sslEnabled: true
+          // https:// scheme proves TLS
         }
       ];
-      testDatabaseConnection(dbId) {
+      getExternalDatabase(dbId) {
+        return this.externalDatabases.find((d) => d.id === dbId);
+      }
+      /**
+       * Persist the outcome of a REAL probe. The dial itself happens in
+       * server.ts (it owns sanitizeUrl and the network policy) — this method only
+       * records what actually happened: measured latency and the true verdict.
+       */
+      markDatabaseTested(dbId, success, latencyMs) {
         const dbItem = this.externalDatabases.find((d) => d.id === dbId);
-        if (!dbItem) {
-          return { success: false, latencyMs: 0, message: "Database configuration not found" };
-        }
-        const latencyMs = Math.round(8 + Math.random() * 18);
-        dbItem.status = "connected";
-        dbItem.latencyMs = latencyMs;
+        if (!dbItem) return void 0;
+        dbItem.status = success ? "connected" : "unreachable";
+        dbItem.latencyMs = Math.max(0, Math.round(latencyMs));
         dbItem.lastTestedAt = (/* @__PURE__ */ new Date()).toISOString();
-        return {
-          success: true,
-          latencyMs,
-          message: `Successfully connected to ${dbItem.name} via SSL (${latencyMs}ms roundtrip latency).`,
-          database: dbItem
-        };
+        return dbItem;
       }
       addExternalDatabase(params) {
         const masked = params.connectionUrl.replace(/:([^:@]+)@/, ":\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022@");
@@ -568,13 +590,15 @@ var init_db = __esm({
           tier: "free",
           connectionUrlMasked: masked,
           region: params.region || "us-east-1 (N. Virginia)",
-          status: "connected",
-          latencyMs: Math.round(10 + Math.random() * 15),
-          tablesCount: 5,
-          storageUsedMb: 8.2,
-          storageMaxMb: 500,
-          sslEnabled: true,
-          lastTestedAt: (/* @__PURE__ */ new Date()).toISOString()
+          // Honest defaults: a freshly stored config is UNTESTED — zeroed metrics
+          // and no lastTestedAt until an admin runs a real probe.
+          status: "idle",
+          latencyMs: 0,
+          tablesCount: 0,
+          storageUsedMb: 0,
+          storageMaxMb: 0,
+          // TLS is only claimed when the scheme itself proves it.
+          sslEnabled: /^https:\/\//i.test(params.connectionUrl) || /^rediss:\/\//i.test(params.connectionUrl)
         };
         this.externalDatabases.push(newDb);
         return newDb;
@@ -583,14 +607,59 @@ var init_db = __esm({
         this.systemStats.apiRequestsToday += 1;
         this.systemStats.apiRequestsThisMonth += 1;
         let ep = this.systemStats.requestBreakdown.find((b) => b.endpoint === endpoint);
-        if (!ep) {
-          if (this.systemStats.requestBreakdown.length >= 12) return;
+        if (!ep && this.systemStats.requestBreakdown.length < 12) {
           ep = { endpoint, count: 0, avgLatencyMs: latencyMs, errorCount: 0 };
           this.systemStats.requestBreakdown.push(ep);
         }
-        ep.count += 1;
-        if (status >= 400) ep.errorCount += 1;
-        ep.avgLatencyMs = Math.round(ep.avgLatencyMs * 0.85 + latencyMs * 0.15);
+        if (ep) {
+          ep.count += 1;
+          if (status >= 400) ep.errorCount += 1;
+          ep.avgLatencyMs = Math.round(ep.avgLatencyMs * 0.85 + latencyMs * 0.15);
+        }
+        const hourKey = (/* @__PURE__ */ new Date()).toISOString().slice(0, 13);
+        const buckets = this.systemStats.hourlyTraffic;
+        let bucket = buckets.length > 0 ? buckets[buckets.length - 1] : null;
+        if (!bucket || bucket.hour !== hourKey) {
+          if (bucket && bucket.hour > hourKey) {
+            bucket = buckets.find((b) => b.hour === hourKey) || null;
+          }
+          if (!bucket) {
+            bucket = { hour: hourKey, requests: 0, errors: 0 };
+            buckets.push(bucket);
+            while (buckets.length > 24) buckets.shift();
+          }
+        }
+        bucket.requests += 1;
+        if (status >= 400) bucket.errors += 1;
+        this.requestLatencies.push(latencyMs);
+        if (this.requestLatencies.length > _VanitasDatabase.LATENCY_SAMPLE_CAP) this.requestLatencies.shift();
+        this.latencySampleCount += 1;
+        if (this.latencySampleCount % 10 === 0) {
+          const sorted = [...this.requestLatencies].sort((a, b) => a - b);
+          const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil(0.95 * sorted.length) - 1));
+          this.systemStats.p95LatencyMs = sorted[idx] ?? 0;
+          let reqs = 0;
+          let errs = 0;
+          for (const b of this.systemStats.hourlyTraffic) {
+            reqs += b.requests;
+            errs += b.errors;
+          }
+          this.systemStats.errorRate = reqs > 0 ? Number((errs / reqs).toFixed(4)) : 0;
+        }
+      }
+      /**
+       * Zero-filled last-24-hours view of the real hourly histogram. Hours with
+       * no traffic are honestly reported as 0 — buckets are never interpolated.
+       */
+      getHourlyTraffic24h() {
+        const series = [];
+        const recorded = new Map(this.systemStats.hourlyTraffic.map((b) => [b.hour, b]));
+        for (let i = 23; i >= 0; i--) {
+          const hourKey = new Date(Date.now() - i * 36e5).toISOString().slice(0, 13);
+          const hit = recorded.get(hourKey);
+          series.push({ hour: hourKey, requests: hit?.requests || 0, errors: hit?.errors || 0 });
+        }
+        return series;
       }
       getKeyUsageAnalytics(period = "24h", ownerId = null) {
         const activeKeys = ownerId === null ? this.apiKeys : this.apiKeys.filter((k) => k.ownerId === ownerId);
@@ -598,12 +667,44 @@ var init_db = __esm({
         const timeSeries = [];
         const intervals = period === "24h" ? 24 : period === "7d" ? 7 : 30;
         const intervalMs = period === "24h" ? 3600 * 1e3 : 24 * 3600 * 1e3;
+        const windowMs = intervalMs * intervals;
+        const windowStart = now - windowMs;
+        const events = this.apiKeyUsageEvents.filter(
+          (e) => e.ts > windowStart && e.ts <= now && (ownerId === null || e.ownerId === ownerId)
+        );
         let totalVolume = 0;
         let totalThrottled = 0;
         let totalErrors = 0;
         let latencySum = 0;
-        for (let i = intervals - 1; i >= 0; i--) {
-          const pointTime = new Date(now - i * intervalMs);
+        const buckets = Array.from({ length: intervals }, () => ({
+          total: 0,
+          throttled: 0,
+          errors: 0,
+          latencies: [],
+          perKey: /* @__PURE__ */ new Map()
+        }));
+        for (const ev of events) {
+          let idx = Math.floor((ev.ts - windowStart) / intervalMs);
+          if (idx < 0) idx = 0;
+          if (idx >= intervals) idx = intervals - 1;
+          const b = buckets[idx];
+          b.total += 1;
+          if (ev.status === 429) b.throttled += 1;
+          else if (ev.status >= 400) b.errors += 1;
+          b.latencies.push(ev.latencyMs);
+          const agg = b.perKey.get(ev.keyId) || { n: 0, t: 0, e: 0 };
+          agg.n += 1;
+          if (ev.status === 429) agg.t += 1;
+          else if (ev.status >= 400) agg.e += 1;
+          b.perKey.set(ev.keyId, agg);
+          totalVolume += 1;
+          if (ev.status === 429) totalThrottled += 1;
+          else if (ev.status >= 400) totalErrors += 1;
+          latencySum += ev.latencyMs;
+        }
+        for (let i = 0; i < intervals; i++) {
+          const b = buckets[i];
+          const pointTime = new Date(windowStart + (i + 1) * intervalMs);
           let timeLabel = "";
           if (period === "24h") {
             timeLabel = pointTime.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -612,58 +713,54 @@ var init_db = __esm({
           } else {
             timeLabel = pointTime.toLocaleDateString([], { month: "short", day: "numeric" });
           }
-          let pointTotal = 0;
-          let pointThrottled = 0;
-          let pointErrors = 0;
+          b.latencies.sort((x, y) => x - y);
+          const avgLatency = b.latencies.length > 0 ? Math.round(b.latencies.reduce((s, v) => s + v, 0) / b.latencies.length) : 0;
+          const p95Idx = b.latencies.length > 0 ? Math.min(b.latencies.length - 1, Math.ceil(0.95 * b.latencies.length) - 1) : -1;
           const point = {
             timeLabel,
             timestamp: pointTime.toISOString(),
-            totalRequests: 0,
-            successCount: 0,
-            throttledCount: 0,
-            errorCount: 0,
-            latencyMs: 0,
-            p95LatencyMs: 0
+            totalRequests: b.total,
+            successCount: Math.max(0, b.total - b.throttled - b.errors),
+            throttledCount: b.throttled,
+            errorCount: b.errors,
+            latencyMs: avgLatency,
+            p95LatencyMs: p95Idx >= 0 ? b.latencies[p95Idx] : 0
           };
-          activeKeys.forEach((k) => {
-            const baseFactor = k.environment === "live" ? k.id.includes("discord") ? 220 : 380 : 45;
-            const hourOfDay = pointTime.getHours();
-            const wave = 0.6 + 0.4 * Math.sin((hourOfDay - 6) / 24 * 2 * Math.PI);
-            const noise = 0.85 + 0.3 * Math.random();
-            const count = Math.max(8, Math.round(baseFactor * wave * noise * (period === "24h" ? 1 : 18)));
-            const throttled = Math.random() > 0.82 ? Math.round(count * (k.actionOnExceed === "reject_429" ? 0.04 : 0.015)) : 0;
-            const errs = Math.random() > 0.88 ? Math.round(count * 0.01) : 0;
-            point[k.id] = count;
-            pointTotal += count;
-            pointThrottled += throttled;
-            pointErrors += errs;
-          });
-          const avgLatency = Math.round(18 + Math.random() * 8 + (pointTotal > 500 ? 5 : 0));
-          const p95 = Math.round(avgLatency * 1.8 + Math.random() * 10);
-          point.totalRequests = pointTotal;
-          point.throttledCount = pointThrottled;
-          point.errorCount = pointErrors;
-          point.successCount = Math.max(0, pointTotal - pointThrottled - pointErrors);
-          point.latencyMs = avgLatency;
-          point.p95LatencyMs = p95;
+          for (const k of activeKeys) {
+            const agg = b.perKey.get(k.id);
+            point[k.id] = agg ? agg.n : 0;
+            point[`${k.id}__t`] = agg ? agg.t : 0;
+            point[`${k.id}__e`] = agg ? agg.e : 0;
+          }
           timeSeries.push(point);
-          totalVolume += pointTotal;
-          totalThrottled += pointThrottled;
-          totalErrors += pointErrors;
-          latencySum += avgLatency;
         }
         const summaries = activeKeys.map((k) => {
-          const keyRequests = timeSeries.reduce((acc, pt) => acc + (Number(pt[k.id]) || 0), 0);
-          const throttledRatio = k.environment === "live" ? 0.024 : 8e-3;
-          const keyThrottled = Math.round(keyRequests * throttledRatio);
-          const quota = k.monthlyQuota || 2e5;
-          const quotaUsedPercent = Math.min(100, Math.round(keyRequests / quota * 100));
-          const endpoints = [
-            { endpoint: "/api/v1/bot/execute", count: Math.round(keyRequests * 0.42), percentage: 42 },
-            { endpoint: "/api/v1/users/me", count: Math.round(keyRequests * 0.28), percentage: 28 },
-            { endpoint: "/api/v1/webhooks/dispatch", count: Math.round(keyRequests * 0.18), percentage: 18 },
-            { endpoint: "/api/v1/ai/chat", count: Math.round(keyRequests * 0.12), percentage: 12 }
-          ];
+          const keyEvents = events.filter((e) => e.keyId === k.id);
+          const keyRequests = keyEvents.length;
+          const keyThrottled = keyEvents.filter((e) => e.status === 429).length;
+          const keyErrors = keyEvents.filter((e) => e.status >= 400 && e.status !== 429).length;
+          const successRate = keyRequests > 0 ? Number(((keyRequests - keyThrottled - keyErrors) / keyRequests * 100).toFixed(1)) : 0;
+          const quota = k.monthlyQuota || 0;
+          const used = k.currentUsageThisMonth || 0;
+          const quotaUsedPercent = quota > 0 ? Math.min(100, Math.round(used / quota * 100)) : 0;
+          const minuteCounts = /* @__PURE__ */ new Map();
+          const epCounts = /* @__PURE__ */ new Map();
+          let keyLatencySum = 0;
+          for (const e of keyEvents) {
+            const minute = Math.floor(e.ts / 6e4);
+            minuteCounts.set(minute, (minuteCounts.get(minute) || 0) + 1);
+            epCounts.set(e.path, (epCounts.get(e.path) || 0) + 1);
+            keyLatencySum += e.latencyMs;
+          }
+          let peakRpm = 0;
+          minuteCounts.forEach((count) => {
+            if (count > peakRpm) peakRpm = count;
+          });
+          const topEndpoints = [...epCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([endpoint, count]) => ({
+            endpoint,
+            count,
+            percentage: Math.round(count / Math.max(1, keyRequests) * 100)
+          }));
           return {
             keyId: k.id,
             keyName: k.name,
@@ -671,12 +768,13 @@ var init_db = __esm({
             environment: k.environment,
             rateLimitPerMin: k.rateLimitPerMin,
             totalRequests: keyRequests,
-            successRate: Number(((1 - (keyThrottled + keyRequests * 8e-3) / keyRequests) * 100).toFixed(1)),
+            successRate,
             throttledRequests: keyThrottled,
+            errorCount: keyErrors,
             quotaUsedPercent,
-            peakRpm: Math.round(k.rateLimitPerMin * (0.65 + Math.random() * 0.25)),
-            avgLatencyMs: Math.round(19 + Math.random() * 6),
-            topEndpoints: endpoints
+            peakRpm,
+            avgLatencyMs: keyRequests > 0 ? Math.round(keyLatencySum / keyRequests) : 0,
+            topEndpoints
           };
         });
         return {
@@ -684,9 +782,10 @@ var init_db = __esm({
           timeSeries,
           summaries,
           totalVolume,
-          overallSuccessRate: Number(((1 - (totalThrottled + totalErrors) / totalVolume) * 100).toFixed(1)),
+          overallSuccessRate: totalVolume > 0 ? Number(((totalVolume - totalThrottled - totalErrors) / totalVolume * 100).toFixed(1)) : 0,
           overallThrottledCount: totalThrottled,
-          overallAvgLatencyMs: Math.round(latencySum / (timeSeries.length || 1))
+          overallErrorCount: totalErrors,
+          overallAvgLatencyMs: totalVolume > 0 ? Math.round(latencySum / totalVolume) : 0
         };
       }
     };
@@ -3376,6 +3475,20 @@ async function runApiKeyAuth(req, res, next) {
     res.status(401).json({ error: "Invalid API key" });
     return;
   }
+  const receivedAt = Date.now();
+  res.on("finish", () => {
+    try {
+      db.recordApiKeyUsage({
+        keyId: key.id,
+        ownerId: key.ownerId,
+        path: req.path,
+        status: res.statusCode,
+        latencyMs: Date.now() - receivedAt,
+        ts: Date.now()
+      });
+    } catch {
+    }
+  });
   if (key.status === "revoked") {
     res.status(403).json({ error: "API key revoked", keyId: key.id });
     return;
@@ -3805,15 +3918,81 @@ async function buildApp() {
       mode: process.env.DEMO_MODE === "true" && process.env.NODE_ENV !== "production" ? "demo" : "authenticated"
     });
   });
-  app.get("/api/v1/status", (_req, res) => {
+  app.get("/api/v1/status", async (_req, res) => {
+    const stats = db.systemStats;
+    let database;
+    if (databasePool) {
+      try {
+        await databasePool.query("select 1");
+        database = "connected";
+      } catch {
+        database = "unreachable";
+      }
+    } else {
+      database = "in-memory-fallback";
+    }
+    const dayAgo = Date.now() - 24 * 36e5;
+    const logins24h = db.auditLogs.filter(
+      (l) => l.action === "LOGIN_SUCCESS" && Date.parse(l.timestamp) >= dayAgo
+    ).length;
+    const failedLogins24h = db.auditLogs.filter(
+      (l) => l.action === "LOGIN_FAILURE" && Date.parse(l.timestamp) >= dayAgo
+    ).length;
+    const hourlyTraffic = db.getHourlyTraffic24h();
+    const requests24h = hourlyTraffic.reduce((sum, b) => sum + b.requests, 0);
+    const errors24h = hourlyTraffic.reduce((sum, b) => sum + b.errors, 0);
+    const activeApiKeys = db.apiKeys.filter((k) => k.status === "active").length;
+    const botsOnline = db.bots.filter((b) => b.status === "online").length;
     res.json({
       platform: "Vanitas",
-      status: db.systemStats.services,
+      status: stats.services,
+      database,
       stats: {
-        totalRequestsToday: db.systemStats.apiRequestsToday,
-        p95LatencyMs: db.systemStats.p95LatencyMs,
-        errorRate: db.systemStats.errorRate
-      }
+        totalRequestsToday: stats.apiRequestsToday,
+        requests24h,
+        errors24h,
+        p95LatencyMs: stats.p95LatencyMs,
+        errorRate: stats.errorRate,
+        activeApiKeys,
+        logins24h,
+        failedLogins24h
+      },
+      hourlyTraffic,
+      components: [
+        {
+          id: "api",
+          // Serving this very request IS the evidence the gateway is up.
+          status: "operational",
+          detail: `${requests24h.toLocaleString("en-US")} requests \xB7 last 24h`
+        },
+        {
+          id: "database",
+          status: database === "unreachable" ? "outage" : "operational",
+          detail: database === "connected" ? "PostgreSQL \xB7 SELECT 1 OK" : database === "in-memory-fallback" ? "In-process store (memory mode)" : "PostgreSQL unreachable"
+        },
+        {
+          id: "auth",
+          status: "operational",
+          detail: `${logins24h} sign-ins / ${failedLogins24h} failed \xB7 24h`
+        },
+        {
+          id: "ai",
+          status: "operational",
+          detail: "Streaming copilot \xB7 site-aware \xB7 AR + EN"
+        },
+        {
+          id: "bot",
+          status: "operational",
+          detail: `${botsOnline} online / ${db.bots.length} configured`
+        },
+        {
+          id: "webhooks",
+          status: "operational",
+          detail: `${db.webhooks.length} endpoints \xB7 ${db.webhookLogs.length} deliveries logged`
+        }
+      ],
+      uptimeSeconds: Math.round(process.uptime()),
+      serverTime: (/* @__PURE__ */ new Date()).toISOString()
     });
   });
   function permissionsFor(actor) {
@@ -4561,44 +4740,6 @@ async function buildApp() {
       res.json({ success: true, key });
     } catch (err) {
       res.status(400).json({ error: "Rate limit update failed" });
-    }
-  });
-  app.post("/api/v1/api-keys/:id/simulate-traffic", (req, res) => {
-    try {
-      const id = sanitizeText(req.params.id, 128);
-      const requestCount = req.body?.requestCount;
-      const actor = getActorUser(req);
-      if (!actor) return res.status(401).json({ error: "Authentication required" });
-      const key = db.apiKeys.find((k) => k.id === id);
-      if (!key) return res.status(404).json({ error: "Key not found" });
-      if (key.ownerId !== actor.id && actor.role !== "ADMIN") {
-        return res.status(403).json({ error: "Not your API key" });
-      }
-      const count = Math.min(Math.max(Number(requestCount) || 50, 1), 1e3);
-      key.usageCount += count;
-      key.currentUsageThisMonth = (key.currentUsageThisMonth || 0) + count;
-      key.currentRpmUsage = Math.min(
-        Math.round(key.rateLimitPerMin * 1.3),
-        (key.currentRpmUsage || 0) + Math.floor(count * 0.9)
-      );
-      key.lastUsedAt = (/* @__PURE__ */ new Date()).toISOString();
-      const isThrottled = (key.currentRpmUsage || 0) >= key.rateLimitPerMin;
-      const remainingQuota = Math.max(0, key.rateLimitPerMin - (key.currentRpmUsage || 0));
-      res.json({
-        success: true,
-        key,
-        simulatedBatch: count,
-        currentRpm: key.currentRpmUsage,
-        isThrottled,
-        headers: {
-          "x-ratelimit-limit": key.rateLimitPerMin,
-          "x-ratelimit-remaining": remainingQuota,
-          "x-ratelimit-reset": Math.floor(Date.now() / 1e3) + 45,
-          "retry-after": isThrottled ? 15 : 0
-        }
-      });
-    } catch (err) {
-      res.status(400).json({ error: "Simulation failed" });
     }
   });
   app.get("/api/v1/public/ping", authenticateApiKey, (req, res) => {
@@ -5745,12 +5886,57 @@ async function buildApp() {
       ]
     });
   });
-  app.post("/api/v1/databases/external/test", (req, res) => {
+  app.post("/api/v1/databases/external/test", async (req, res) => {
     if (!requireAdmin(req, res)) return;
     const id = sanitizeText(req.body?.id, 128);
     if (!id) return res.status(400).json({ error: "Database ID is required" });
-    const result = db.testDatabaseConnection(id);
-    res.json(result);
+    const item = db.getExternalDatabase(id);
+    if (!item) {
+      return res.json({ success: false, latencyMs: 0, message: "Database configuration not found" });
+    }
+    const scheme = (item.connectionUrlMasked.match(/^([a-z][a-z0-9+.-]*):\/\//i)?.[1] || "").toLowerCase();
+    if (scheme !== "http" && scheme !== "https") {
+      return res.json({
+        success: false,
+        latencyMs: 0,
+        message: `${scheme || "non-http"} endpoints are stored masked and never dialled by the gateway \u2014 verify this connection from your own client.`,
+        database: item
+      });
+    }
+    const dialUrl = item.connectionUrlMasked.replace(/\/\/[^/@]*@/, "//");
+    if (!sanitizeUrl(dialUrl)) {
+      return res.json({
+        success: false,
+        latencyMs: 0,
+        message: "Stored URL fails the SSRF policy (blocked host or scheme) \u2014 not dialled.",
+        database: item
+      });
+    }
+    const started = Date.now();
+    try {
+      const response = await fetch(dialUrl, {
+        method: "GET",
+        redirect: "error",
+        signal: AbortSignal.timeout(5e3),
+        headers: { "user-agent": "Vanitas-Connect-Test/1.0" }
+      });
+      const latencyMs = Date.now() - started;
+      void response.body?.cancel().catch(() => void 0);
+      const ok = response.status < 500;
+      const database = db.markDatabaseTested(id, ok, latencyMs);
+      res.json({
+        success: ok,
+        latencyMs,
+        message: ok ? `Reachable \u2014 HTTP ${response.status} in ${latencyMs}ms${response.status >= 400 ? " (host up; endpoint answered with an error status)" : ""}.` : `Host answered but returned HTTP ${response.status} in ${latencyMs}ms \u2014 unhealthy.`,
+        database
+      });
+    } catch (err) {
+      const latencyMs = Date.now() - started;
+      const raw = String(err?.message || "network error");
+      const reason = /abort|timeout/i.test(raw) ? `timed out after 5s (${latencyMs}ms)` : raw.slice(0, 120);
+      const database = db.markDatabaseTested(id, false, latencyMs);
+      res.json({ success: false, latencyMs, message: `Unreachable \u2014 ${reason}.`, database });
+    }
   });
   app.post("/api/v1/databases/external", (req, res) => {
     const actor = requireAdmin(req, res);

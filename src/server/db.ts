@@ -21,6 +21,22 @@ import {
   ExternalDatabaseConfig,
 } from '../types.ts';
 
+/**
+ * One real API-key request, recorded on response 'finish' by
+ * authenticateApiKey. status/latency/ts are observed facts — this is the
+ * single source of truth for the usage-analytics chart.
+ */
+export interface ApiKeyUsageEvent {
+  /** epoch ms when the response finished */
+  ts: number;
+  keyId: string;
+  ownerId: string;
+  /** full request path, e.g. /api/v1/public/ping */
+  path: string;
+  status: number;
+  latencyMs: number;
+}
+
 export const ALL_SCOPES: { scope: PermissionScope; label: string; group: string; adminOnly: boolean }[] = [
   { scope: 'api.read', label: 'Read API Data & Status', group: 'Core API', adminOnly: false },
   { scope: 'api.write', label: 'Write & Mutate API Resources', group: 'Core API', adminOnly: false },
@@ -186,6 +202,28 @@ export class VanitasDatabase {
     requestBreakdown: [],
     hourlyTraffic: [],
   };
+
+  // --- Real API-key usage telemetry ----------------------------------------
+  // Every entry is recorded by authenticateApiKey on response 'finish' — a
+  // raw, append-only account of what actually happened. The ring is bounded;
+  // like the keys themselves it lives for the process (memory-mode PG shares
+  // the same lifetime), so analytics NEVER invent data for periods that were
+  // not observed: unobserved buckets stay at zero.
+  apiKeyUsageEvents: ApiKeyUsageEvent[] = [];
+  /** Rolling latency samples for the live p95 (fed by incrementRequestCount). */
+  private requestLatencies: number[] = [];
+  private latencySampleCount = 0;
+
+  static readonly USAGE_EVENT_CAP = 20_000;
+  static readonly LATENCY_SAMPLE_CAP = 1_000;
+
+  recordApiKeyUsage(event: ApiKeyUsageEvent): void {
+    this.apiKeyUsageEvents.push(event);
+    // Trim in chunks so a hot path never does a full-array shift per request.
+    if (this.apiKeyUsageEvents.length > VanitasDatabase.USAGE_EVENT_CAP + 1000) {
+      this.apiKeyUsageEvents.splice(0, this.apiKeyUsageEvents.length - VanitasDatabase.USAGE_EVENT_CAP);
+    }
+  }
 
   // --- Methods ---
 
@@ -566,6 +604,10 @@ export class VanitasDatabase {
     return release;
   }
 
+  // Configured external endpoints (fixture). Metadata is honest: every entry
+  // starts 'idle' with zeroed metrics — an entry never claims to be
+  // "connected" or shows a latency until an admin runs a REAL probe against
+  // it (see /api/v1/databases/external/test).
   externalDatabases: ExternalDatabaseConfig[] = [
     {
       id: 'db_supabase_prod',
@@ -574,13 +616,12 @@ export class VanitasDatabase {
       tier: 'free',
       connectionUrlMasked: 'postgresql://postgres:••••••••••••@db.supabase.co:5432/postgres',
       region: 'eu-central-1 (Frankfurt)',
-      status: 'connected',
-      latencyMs: 14,
-      tablesCount: 18,
-      storageUsedMb: 62.4,
-      storageMaxMb: 500.0,
-      sslEnabled: true,
-      lastTestedAt: new Date().toISOString(),
+      status: 'idle',
+      latencyMs: 0,
+      tablesCount: 0,
+      storageUsedMb: 0,
+      storageMaxMb: 0,
+      sslEnabled: false, // sslmode not stated in the URL — unverified
     },
     {
       id: 'db_neon_branch',
@@ -589,13 +630,12 @@ export class VanitasDatabase {
       tier: 'free',
       connectionUrlMasked: 'postgresql://neon_admin:••••••••••••@ep-misty-water.neon.tech/main',
       region: 'us-east-2 (Ohio)',
-      status: 'connected',
-      latencyMs: 22,
-      tablesCount: 12,
-      storageUsedMb: 38.1,
-      storageMaxMb: 512.0,
-      sslEnabled: true,
-      lastTestedAt: new Date(Date.now() - 1000 * 60 * 15).toISOString(),
+      status: 'idle',
+      latencyMs: 0,
+      tablesCount: 0,
+      storageUsedMb: 0,
+      storageMaxMb: 0,
+      sslEnabled: false, // sslmode not stated in the URL — unverified
     },
     {
       id: 'db_upstash_redis',
@@ -604,13 +644,12 @@ export class VanitasDatabase {
       tier: 'free',
       connectionUrlMasked: 'rediss://default:••••••••••••@eu1-rest-upstash.io:6379',
       region: 'eu-west-1 (Ireland)',
-      status: 'connected',
-      latencyMs: 8,
-      tablesCount: 6,
-      storageUsedMb: 12.0,
-      storageMaxMb: 256.0,
-      sslEnabled: true,
-      lastTestedAt: new Date(Date.now() - 1000 * 60 * 30).toISOString(),
+      status: 'idle',
+      latencyMs: 0,
+      tablesCount: 0,
+      storageUsedMb: 0,
+      storageMaxMb: 0,
+      sslEnabled: true, // rediss:// scheme proves TLS
     },
     {
       id: 'db_render_backend',
@@ -619,33 +658,31 @@ export class VanitasDatabase {
       tier: 'free',
       connectionUrlMasked: 'https://vanitas-worker-api.onrender.com/api/v1',
       region: 'us-west-1 (Oregon)',
-      status: 'connected',
-      latencyMs: 29,
-      tablesCount: 8,
-      storageUsedMb: 18.5,
-      storageMaxMb: 1000.0,
-      sslEnabled: true,
-      lastTestedAt: new Date(Date.now() - 1000 * 60 * 45).toISOString(),
+      status: 'idle',
+      latencyMs: 0,
+      tablesCount: 0,
+      storageUsedMb: 0,
+      storageMaxMb: 0,
+      sslEnabled: true, // https:// scheme proves TLS
     },
   ];
 
-  testDatabaseConnection(dbId: string): { success: boolean; latencyMs: number; message: string; database?: ExternalDatabaseConfig } {
+  getExternalDatabase(dbId: string): ExternalDatabaseConfig | undefined {
+    return this.externalDatabases.find((d) => d.id === dbId);
+  }
+
+  /**
+   * Persist the outcome of a REAL probe. The dial itself happens in
+   * server.ts (it owns sanitizeUrl and the network policy) — this method only
+   * records what actually happened: measured latency and the true verdict.
+   */
+  markDatabaseTested(dbId: string, success: boolean, latencyMs: number): ExternalDatabaseConfig | undefined {
     const dbItem = this.externalDatabases.find((d) => d.id === dbId);
-    if (!dbItem) {
-      return { success: false, latencyMs: 0, message: 'Database configuration not found' };
-    }
-
-    const latencyMs = Math.round(8 + Math.random() * 18);
-    dbItem.status = 'connected';
-    dbItem.latencyMs = latencyMs;
+    if (!dbItem) return undefined;
+    dbItem.status = success ? 'connected' : 'unreachable';
+    dbItem.latencyMs = Math.max(0, Math.round(latencyMs));
     dbItem.lastTestedAt = new Date().toISOString();
-
-    return {
-      success: true,
-      latencyMs,
-      message: `Successfully connected to ${dbItem.name} via SSL (${latencyMs}ms roundtrip latency).`,
-      database: dbItem,
-    };
+    return dbItem;
   }
 
   addExternalDatabase(params: {
@@ -662,13 +699,15 @@ export class VanitasDatabase {
       tier: 'free',
       connectionUrlMasked: masked,
       region: params.region || 'us-east-1 (N. Virginia)',
-      status: 'connected',
-      latencyMs: Math.round(10 + Math.random() * 15),
-      tablesCount: 5,
-      storageUsedMb: 8.2,
-      storageMaxMb: 500.0,
-      sslEnabled: true,
-      lastTestedAt: new Date().toISOString(),
+      // Honest defaults: a freshly stored config is UNTESTED — zeroed metrics
+      // and no lastTestedAt until an admin runs a real probe.
+      status: 'idle',
+      latencyMs: 0,
+      tablesCount: 0,
+      storageUsedMb: 0,
+      storageMaxMb: 0,
+      // TLS is only claimed when the scheme itself proves it.
+      sslEnabled: /^https:\/\//i.test(params.connectionUrl) || /^rediss:\/\//i.test(params.connectionUrl),
     };
     this.externalDatabases.push(newDb);
     return newDb;
@@ -678,35 +717,130 @@ export class VanitasDatabase {
     this.systemStats.apiRequestsToday += 1;
     this.systemStats.apiRequestsThisMonth += 1;
     let ep = this.systemStats.requestBreakdown.find((b) => b.endpoint === endpoint);
-    if (!ep) {
+    if (!ep && this.systemStats.requestBreakdown.length < 12) {
       // Real traffic builds this list over time (bounded to keep it readable).
-      if (this.systemStats.requestBreakdown.length >= 12) return;
       ep = { endpoint, count: 0, avgLatencyMs: latencyMs, errorCount: 0 };
       this.systemStats.requestBreakdown.push(ep);
     }
-    ep.count += 1;
-    if (status >= 400) ep.errorCount += 1;
-    ep.avgLatencyMs = Math.round(ep.avgLatencyMs * 0.85 + latencyMs * 0.15);
+    if (ep) {
+      ep.count += 1;
+      if (status >= 400) ep.errorCount += 1;
+      ep.avgLatencyMs = Math.round(ep.avgLatencyMs * 0.85 + latencyMs * 0.15);
+    }
+
+    // --- Live hourly histogram (real, last 24 clock hours of /api traffic) ---
+    const hourKey = new Date().toISOString().slice(0, 13); // '2026-10-03T21'
+    const buckets = this.systemStats.hourlyTraffic;
+    let bucket = buckets.length > 0 ? buckets[buckets.length - 1] : null;
+    if (!bucket || bucket.hour !== hourKey) {
+      if (bucket && bucket.hour > hourKey) {
+        // Clock moved backwards — reuse the existing bucket for that hour.
+        bucket = buckets.find((b) => b.hour === hourKey) || null;
+      }
+      if (!bucket) {
+        bucket = { hour: hourKey, requests: 0, errors: 0 };
+        buckets.push(bucket);
+        while (buckets.length > 24) buckets.shift();
+      }
+    }
+    bucket.requests += 1;
+    if (status >= 400) bucket.errors += 1;
+
+    // --- Derived metrics: real p95 + error rate, recomputed on a sample
+    // cadence so the hot path never sorts on every single request. ---
+    this.requestLatencies.push(latencyMs);
+    if (this.requestLatencies.length > VanitasDatabase.LATENCY_SAMPLE_CAP) this.requestLatencies.shift();
+    this.latencySampleCount += 1;
+    if (this.latencySampleCount % 10 === 0) {
+      const sorted = [...this.requestLatencies].sort((a, b) => a - b);
+      const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil(0.95 * sorted.length) - 1));
+      this.systemStats.p95LatencyMs = sorted[idx] ?? 0;
+
+      let reqs = 0;
+      let errs = 0;
+      for (const b of this.systemStats.hourlyTraffic) {
+        reqs += b.requests;
+        errs += b.errors;
+      }
+      this.systemStats.errorRate = reqs > 0 ? Number((errs / reqs).toFixed(4)) : 0;
+    }
+  }
+
+  /**
+   * Zero-filled last-24-hours view of the real hourly histogram. Hours with
+   * no traffic are honestly reported as 0 — buckets are never interpolated.
+   */
+  getHourlyTraffic24h(): { hour: string; requests: number; errors: number }[] {
+    const series: { hour: string; requests: number; errors: number }[] = [];
+    const recorded = new Map(this.systemStats.hourlyTraffic.map((b) => [b.hour, b]));
+    for (let i = 23; i >= 0; i--) {
+      const hourKey = new Date(Date.now() - i * 3600_000).toISOString().slice(0, 13);
+      const hit = recorded.get(hourKey);
+      series.push({ hour: hourKey, requests: hit?.requests || 0, errors: hit?.errors || 0 });
+    }
+    return series;
   }
 
   getKeyUsageAnalytics(period: '24h' | '7d' | '30d' = '24h', ownerId: string | null = null): ApiKeyUsageResponse {
     // ownerId = null → fleet-wide view (admin); otherwise only that owner's
-    // keys are ever summarised — no cross-tenant leakage of key metadata.
+    // keys/events are summarised — no cross-tenant leakage of key metadata.
+    //
+    // EVERY number below is aggregated from apiKeyUsageEvents — the raw
+    // request facts recorded on response finish. Buckets with no observed
+    // traffic stay at zero; nothing is ever interpolated or randomised.
     const activeKeys = ownerId === null ? this.apiKeys : this.apiKeys.filter((k) => k.ownerId === ownerId);
     const now = Date.now();
     const timeSeries: ApiKeyUsagePoint[] = [];
 
     const intervals = period === '24h' ? 24 : period === '7d' ? 7 : 30;
     const intervalMs = period === '24h' ? 3600 * 1000 : 24 * 3600 * 1000;
+    const windowMs = intervalMs * intervals;
+    const windowStart = now - windowMs;
+
+    const events = this.apiKeyUsageEvents.filter(
+      (e) => e.ts > windowStart && e.ts <= now && (ownerId === null || e.ownerId === ownerId),
+    );
 
     let totalVolume = 0;
     let totalThrottled = 0;
     let totalErrors = 0;
     let latencySum = 0;
 
-    // Build timeline points
-    for (let i = intervals - 1; i >= 0; i--) {
-      const pointTime = new Date(now - i * intervalMs);
+    // Per-bucket accumulators (index 0 = oldest bucket).
+    const buckets = Array.from({ length: intervals }, () => ({
+      total: 0,
+      throttled: 0,
+      errors: 0,
+      latencies: [] as number[],
+      perKey: new Map<string, { n: number; t: number; e: number }>(),
+    }));
+
+    for (const ev of events) {
+      let idx = Math.floor((ev.ts - windowStart) / intervalMs);
+      if (idx < 0) idx = 0;
+      if (idx >= intervals) idx = intervals - 1;
+      const b = buckets[idx];
+      b.total += 1;
+      if (ev.status === 429) b.throttled += 1;
+      else if (ev.status >= 400) b.errors += 1;
+      b.latencies.push(ev.latencyMs);
+      const agg = b.perKey.get(ev.keyId) || { n: 0, t: 0, e: 0 };
+      agg.n += 1;
+      if (ev.status === 429) agg.t += 1;
+      else if (ev.status >= 400) agg.e += 1;
+      b.perKey.set(ev.keyId, agg);
+
+      totalVolume += 1;
+      if (ev.status === 429) totalThrottled += 1;
+      else if (ev.status >= 400) totalErrors += 1;
+      latencySum += ev.latencyMs;
+    }
+
+    // Build the timeline oldest → newest (bucket i covers
+    // (windowStart + i*intervalMs, windowStart + (i+1)*intervalMs]).
+    for (let i = 0; i < intervals; i++) {
+      const b = buckets[i];
+      const pointTime = new Date(windowStart + (i + 1) * intervalMs);
       let timeLabel = '';
 
       if (period === '24h') {
@@ -717,72 +851,74 @@ export class VanitasDatabase {
         timeLabel = pointTime.toLocaleDateString([], { month: 'short', day: 'numeric' });
       }
 
-      let pointTotal = 0;
-      let pointThrottled = 0;
-      let pointErrors = 0;
+      b.latencies.sort((x, y) => x - y);
+      const avgLatency =
+        b.latencies.length > 0 ? Math.round(b.latencies.reduce((s, v) => s + v, 0) / b.latencies.length) : 0;
+      const p95Idx =
+        b.latencies.length > 0 ? Math.min(b.latencies.length - 1, Math.ceil(0.95 * b.latencies.length) - 1) : -1;
 
       const point: ApiKeyUsagePoint = {
         timeLabel,
         timestamp: pointTime.toISOString(),
-        totalRequests: 0,
-        successCount: 0,
-        throttledCount: 0,
-        errorCount: 0,
-        latencyMs: 0,
-        p95LatencyMs: 0,
+        totalRequests: b.total,
+        successCount: Math.max(0, b.total - b.throttled - b.errors),
+        throttledCount: b.throttled,
+        errorCount: b.errors,
+        latencyMs: avgLatency,
+        p95LatencyMs: p95Idx >= 0 ? b.latencies[p95Idx] : 0,
       };
-
-      // Calculate per key distribution
-      activeKeys.forEach((k) => {
-        // Base seed depending on key environment and rate limit
-        const baseFactor = k.environment === 'live' ? (k.id.includes('discord') ? 220 : 380) : 45;
-        // Diurnal wave
-        const hourOfDay = pointTime.getHours();
-        const wave = 0.6 + 0.4 * Math.sin(((hourOfDay - 6) / 24) * 2 * Math.PI);
-        const noise = 0.85 + 0.3 * Math.random();
-
-        const count = Math.max(8, Math.round(baseFactor * wave * noise * (period === '24h' ? 1 : 18)));
-        const throttled = Math.random() > 0.82 ? Math.round(count * (k.actionOnExceed === 'reject_429' ? 0.04 : 0.015)) : 0;
-        const errs = Math.random() > 0.88 ? Math.round(count * 0.01) : 0;
-
-        point[k.id] = count;
-        pointTotal += count;
-        pointThrottled += throttled;
-        pointErrors += errs;
-      });
-
-      const avgLatency = Math.round(18 + Math.random() * 8 + (pointTotal > 500 ? 5 : 0));
-      const p95 = Math.round(avgLatency * 1.8 + Math.random() * 10);
-
-      point.totalRequests = pointTotal;
-      point.throttledCount = pointThrottled;
-      point.errorCount = pointErrors;
-      point.successCount = Math.max(0, pointTotal - pointThrottled - pointErrors);
-      point.latencyMs = avgLatency;
-      point.p95LatencyMs = p95;
+      // Per-key series: real totals plus real throttled/error splits (the
+      // chart reads <keyId>__t / <keyId>__e when a single key is selected —
+      // no derived ratios anywhere).
+      for (const k of activeKeys) {
+        const agg = b.perKey.get(k.id);
+        point[k.id] = agg ? agg.n : 0;
+        point[`${k.id}__t`] = agg ? agg.t : 0;
+        point[`${k.id}__e`] = agg ? agg.e : 0;
+      }
 
       timeSeries.push(point);
-
-      totalVolume += pointTotal;
-      totalThrottled += pointThrottled;
-      totalErrors += pointErrors;
-      latencySum += avgLatency;
     }
 
-    // Build summaries for each key
+    // Per-key summaries — same window, same real events.
     const summaries: ApiKeyUsageSummary[] = activeKeys.map((k) => {
-      const keyRequests = timeSeries.reduce((acc, pt) => acc + (Number(pt[k.id]) || 0), 0);
-      const throttledRatio = k.environment === 'live' ? 0.024 : 0.008;
-      const keyThrottled = Math.round(keyRequests * throttledRatio);
-      const quota = k.monthlyQuota || 200000;
-      const quotaUsedPercent = Math.min(100, Math.round((keyRequests / quota) * 100));
+      const keyEvents = events.filter((e) => e.keyId === k.id);
+      const keyRequests = keyEvents.length;
+      const keyThrottled = keyEvents.filter((e) => e.status === 429).length;
+      const keyErrors = keyEvents.filter((e) => e.status >= 400 && e.status !== 429).length;
+      const successRate =
+        keyRequests > 0 ? Number((((keyRequests - keyThrottled - keyErrors) / keyRequests) * 100).toFixed(1)) : 0;
 
-      const endpoints = [
-        { endpoint: '/api/v1/bot/execute', count: Math.round(keyRequests * 0.42), percentage: 42 },
-        { endpoint: '/api/v1/users/me', count: Math.round(keyRequests * 0.28), percentage: 28 },
-        { endpoint: '/api/v1/webhooks/dispatch', count: Math.round(keyRequests * 0.18), percentage: 18 },
-        { endpoint: '/api/v1/ai/chat', count: Math.round(keyRequests * 0.12), percentage: 12 },
-      ];
+      // Quota progress uses the REAL monthly usage counter — a key with no
+      // configured quota reports 0 instead of assuming a fake denominator.
+      const quota = k.monthlyQuota || 0;
+      const used = k.currentUsageThisMonth || 0;
+      const quotaUsedPercent = quota > 0 ? Math.min(100, Math.round((used / quota) * 100)) : 0;
+
+      // Peak RPM = densest real clock-minute in the window (0 with no
+      // traffic); top endpoints come from the paths actually called.
+      const minuteCounts = new Map<number, number>();
+      const epCounts = new Map<string, number>();
+      let keyLatencySum = 0;
+      for (const e of keyEvents) {
+        const minute = Math.floor(e.ts / 60_000);
+        minuteCounts.set(minute, (minuteCounts.get(minute) || 0) + 1);
+        epCounts.set(e.path, (epCounts.get(e.path) || 0) + 1);
+        keyLatencySum += e.latencyMs;
+      }
+      let peakRpm = 0;
+      minuteCounts.forEach((count) => {
+        if (count > peakRpm) peakRpm = count;
+      });
+
+      const topEndpoints = [...epCounts.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 4)
+        .map(([endpoint, count]) => ({
+          endpoint,
+          count,
+          percentage: Math.round((count / Math.max(1, keyRequests)) * 100),
+        }));
 
       return {
         keyId: k.id,
@@ -791,12 +927,13 @@ export class VanitasDatabase {
         environment: k.environment,
         rateLimitPerMin: k.rateLimitPerMin,
         totalRequests: keyRequests,
-        successRate: Number(((1 - (keyThrottled + keyRequests * 0.008) / keyRequests) * 100).toFixed(1)),
+        successRate,
         throttledRequests: keyThrottled,
+        errorCount: keyErrors,
         quotaUsedPercent,
-        peakRpm: Math.round(k.rateLimitPerMin * (0.65 + Math.random() * 0.25)),
-        avgLatencyMs: Math.round(19 + Math.random() * 6),
-        topEndpoints: endpoints,
+        peakRpm,
+        avgLatencyMs: keyRequests > 0 ? Math.round(keyLatencySum / keyRequests) : 0,
+        topEndpoints,
       };
     });
 
@@ -805,9 +942,11 @@ export class VanitasDatabase {
       timeSeries,
       summaries,
       totalVolume,
-      overallSuccessRate: Number(((1 - (totalThrottled + totalErrors) / totalVolume) * 100).toFixed(1)),
+      overallSuccessRate:
+        totalVolume > 0 ? Number((((totalVolume - totalThrottled - totalErrors) / totalVolume) * 100).toFixed(1)) : 0,
       overallThrottledCount: totalThrottled,
-      overallAvgLatencyMs: Math.round(latencySum / (timeSeries.length || 1)),
+      overallErrorCount: totalErrors,
+      overallAvgLatencyMs: totalVolume > 0 ? Math.round(latencySum / totalVolume) : 0,
     };
   }
 }

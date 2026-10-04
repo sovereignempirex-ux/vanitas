@@ -305,19 +305,44 @@ r = await call('GET', '/api-keys/usage-analytics');
 check('anon GET /api-keys/usage-analytics -> 401', r.status === 401, r.status);
 r = await call('GET', '/api-keys/usage-analytics', { token });
 check('owner GET /api-keys/usage-analytics -> 200', r.status === 200, r.status);
+
+// ---- REAL usage telemetry: the chart aggregates the pings made above ------
+const analytics = r.json || {};
+const seriesSum = (analytics.timeSeries || []).reduce((s, p) => s + p.totalRequests, 0);
+check(
+  'analytics totalVolume equals the sum of the real bucket counts',
+  analytics.totalVolume >= 1 && seriesSum === analytics.totalVolume,
+  { total: analytics.totalVolume, seriesSum },
+);
+check('24h series has 24 buckets', (analytics.timeSeries || []).length === 24, (analytics.timeSeries || []).length);
+const pingSeen = (analytics.summaries || []).some((s) =>
+  (s.topEndpoints || []).some((e) => e.endpoint === '/api/v1/public/ping'),
+);
+check('real /public/ping traffic appears in top endpoints', pingSeen, (analytics.summaries || [])[0]?.topEndpoints);
+check(
+  'per-key counts are internally consistent (requests >= throttled + errors)',
+  (analytics.summaries || []).every(
+    (s) => s.totalRequests >= s.throttledRequests + s.errorCount && Number.isInteger(s.peakRpm) && s.peakRpm >= 0,
+  ),
+  (analytics.summaries || [])[0],
+);
+
 r = await call('GET', '/api-keys/usage-analytics', { token: attackerToken });
 check(
   "another account's analytics never summarise this account's key",
   r.status === 200 && !(r.json?.summaries || []).some((s) => s.keyId === probeId),
   { status: r.status, keys: (r.json?.summaries || []).map((s) => s.keyId) },
 );
+check(
+  'an account with no key traffic sees an honest zero volume',
+  r.status === 200 && r.json?.totalVolume === 0,
+  r.json?.totalVolume,
+);
 
-r = await call('POST', '/api-keys/does-not-exist/simulate-traffic');
-check('anon simulate-traffic -> 401', r.status === 401, r.status);
-r = await call('POST', `/api-keys/${probeId}/simulate-traffic`, { token: attackerToken, body: { requestCount: 5 } });
-check("another account's simulate-traffic -> 403", r.status === 403, r.status);
+// The fake usage-injection endpoint must stay gone — counters only move on
+// real requests now (res.on('finish') recorder in authenticateApiKey).
 r = await call('POST', `/api-keys/${probeId}/simulate-traffic`, { token, body: { requestCount: 5 } });
-check('owner simulate-traffic -> 200 (no key object leaked cross-account)', r.status === 200 && r.json?.success === true, r.json ?? r.status);
+check('simulate-traffic endpoint removed (no fake usage injection) -> 404', r.status === 404, r.status);
 
 r = await call('PATCH', `/api-keys/${probeId}/scopes`, { token: attackerToken, body: { scopes: ['api.read', 'bot.execute'] } });
 check("another account's PATCH scopes -> 403", r.status === 403, r.status);

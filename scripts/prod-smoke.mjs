@@ -119,8 +119,25 @@ check('POST /admin/invites without session → 401', r.status === 401, r);
 // Hardened surfaces: key/webhook/database metadata is never anonymous.
 r = await call('GET', '/api-keys/usage-analytics');
 check('GET /api-keys/usage-analytics without session → 401', r.status === 401, r);
+// The fake usage-injection endpoint stays removed — counters only move on
+// real traffic now (404 with or without a session).
 r = await call('POST', '/api-keys/probe_key/simulate-traffic', { body: { requestCount: 5 } });
-check('POST /api-keys/:id/simulate-traffic without session → 401', r.status === 401, r);
+check('POST /api-keys/:id/simulate-traffic → 404 (fake injection removed)', r.status === 404, r.status);
+// Public status carries REAL telemetry: a 24-bucket hourly series, live
+// component evidence rows and process uptime — no painted percentages.
+r = await call('GET', '/status');
+check(
+  'GET /status returns real telemetry (24h series + components + uptime)',
+  r.status === 200 &&
+    Array.isArray(r.json?.hourlyTraffic) &&
+    r.json.hourlyTraffic.length === 24 &&
+    Array.isArray(r.json?.components) &&
+    r.json.components.length === 6 &&
+    typeof r.json?.stats?.requests24h === 'number' &&
+    typeof r.json?.stats?.errorRate === 'number' &&
+    typeof r.json?.uptimeSeconds === 'number',
+  { status: r.status, keys: r.json && Object.keys(r.json) },
+);
 r = await call('GET', '/webhooks');
 check('GET /webhooks without session → 401', r.status === 401, r);
 r = await call('POST', '/webhooks/wh_probe/test');

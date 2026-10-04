@@ -108,7 +108,25 @@ class ApiClient {
   }
 
   async getStatus() {
-    return this.request<{ platform: string; status: SystemStats['services']; stats: Record<string, number> }>('/status');
+    return this.request<{
+      platform: string;
+      status: SystemStats['services'];
+      database: 'connected' | 'unreachable' | 'in-memory-fallback';
+      stats: {
+        totalRequestsToday: number;
+        requests24h: number;
+        errors24h: number;
+        p95LatencyMs: number;
+        errorRate: number;
+        activeApiKeys: number;
+        logins24h: number;
+        failedLogins24h: number;
+      };
+      hourlyTraffic: { hour: string; requests: number; errors: number }[];
+      components: { id: string; status: 'operational' | 'degraded' | 'outage'; detail: string }[];
+      uptimeSeconds: number;
+      serverTime: string;
+    }>('/status');
   }
 
   // Auth
@@ -294,24 +312,9 @@ class ApiClient {
     });
   }
 
-  async simulateApiKeyTraffic(id: string, requestCount: number = 50) {
-    return this.request<{
-      success: boolean;
-      key: ApiKey;
-      simulatedBatch: number;
-      currentRpm: number;
-      isThrottled: boolean;
-      headers: {
-        'x-ratelimit-limit': number;
-        'x-ratelimit-remaining': number;
-        'x-ratelimit-reset': number;
-        'retry-after': number;
-      };
-    }>(`/api-keys/${id}/simulate-traffic`, {
-      method: 'POST',
-      body: JSON.stringify({ requestCount }),
-    });
-  }
+  // NOTE: simulateApiKeyTraffic was removed — inflating usage counters without
+  // real requests was a fake system. See getKeyUsageAnalytics for the real,
+  // per-request telemetry.
 
   async getKeyUsageAnalytics(period: '24h' | '7d' | '30d' = '24h') {
     return this.request<ApiKeyUsageResponse>(`/api-keys/usage-analytics?period=${period}`);
