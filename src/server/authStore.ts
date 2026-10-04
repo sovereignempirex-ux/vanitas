@@ -168,6 +168,7 @@ export function rowToUser(row: Record<string, any>): User {
     username: row.username || '',
     avatarUrl: row.avatar_url || DEFAULT_AVATAR,
     bio: row.bio || undefined,
+    accentColor: row.accent_color || undefined,
     role: row.role === 'ADMIN' ? 'ADMIN' : 'USER',
     verification: ['USER', 'DEVELOPER', 'ADMIN'].includes(row.verification) ? row.verification : '',
     twoFactorEnabled: !!row.two_factor_enabled,
@@ -244,10 +245,11 @@ export function invalidateResolveCache(userId: string): void {
 }
 
 // Persist real profile edits to the account record: display name + avatar,
-// plus the claimable @username and bio when provided (undefined = unchanged).
+// plus the claimable @username, bio and accent colour when provided
+// (undefined = unchanged).
 export async function updateProfile(
   userId: string,
-  updates: { name: string; avatarUrl: string; username?: string; bio?: string },
+  updates: { name: string; avatarUrl: string; username?: string; bio?: string; accentColor?: string },
 ): Promise<User | null> {
   if (databasePool) {
     const result = await databasePool.query(
@@ -255,10 +257,11 @@ export async function updateProfile(
           set name = $2,
               avatar_url = $3,
               username = coalesce($4, username),
-              bio = coalesce($5, bio)
+              bio = coalesce($5, bio),
+              accent_color = coalesce($6, accent_color)
         where id = $1
         returning *`,
-      [userId, updates.name, updates.avatarUrl, updates.username ?? null, updates.bio ?? null],
+      [userId, updates.name, updates.avatarUrl, updates.username ?? null, updates.bio ?? null, updates.accentColor ?? null],
     );
     const user = result.rows[0] ? rowToUser(result.rows[0]) : null;
     if (user) invalidateResolveCache(userId); // /auth/me must reflect fresh edits
@@ -271,6 +274,7 @@ export async function updateProfile(
   user.avatarUrl = updates.avatarUrl || DEFAULT_AVATAR;
   if (updates.username !== undefined) user.username = updates.username;
   if (updates.bio !== undefined) user.bio = updates.bio || undefined;
+  if (updates.accentColor !== undefined) user.accentColor = updates.accentColor || undefined;
   invalidateResolveCache(userId);
   return user;
 }
@@ -291,6 +295,7 @@ export async function findPublicProfile(username: string): Promise<PublicProfile
     username: user.username,
     avatarUrl: user.avatarUrl,
     bio: user.bio || '',
+    accentColor: user.accentColor || undefined,
     role: user.role,
     verification: user.verification,
     createdAt: user.createdAt,

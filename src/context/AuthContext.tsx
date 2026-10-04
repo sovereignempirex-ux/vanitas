@@ -32,7 +32,7 @@ interface AuthContextType {
   setIsAuthModalOpen: (open: boolean) => void;
   refreshUser: () => Promise<void>;
   /** Persist profile edits (name + avatar) to the real account server-side. */
-  updateUserProfile: (updates: { name: string; avatarUrl: string; username?: string; bio?: string }) => Promise<{ success: boolean; error?: string }>;
+  updateUserProfile: (updates: { name: string; avatarUrl: string; username?: string; bio?: string; accentColor?: string }) => Promise<{ success: boolean; error?: string }>;
   // Weekly Agent Quota System (1 run / week per account)
   weeklyAgentQuota: WeeklyAgentQuota;
   executeAgentRun: (agentType?: string) => { success: boolean; message: string };
@@ -280,7 +280,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     localStorage.removeItem('vanitas_active_user');
   };
 
-  const updateUserProfile = async (updates: { name: string; avatarUrl: string; username?: string; bio?: string }) => {
+  const updateUserProfile = async (updates: { name: string; avatarUrl: string; username?: string; bio?: string; accentColor?: string }) => {
     // Real accounts: edits are validated and persisted by the server.
     try {
       const data = await api.updateProfile(updates);

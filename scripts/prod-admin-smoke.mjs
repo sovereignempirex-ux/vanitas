@@ -272,6 +272,27 @@ check(
   mdPub.status === 200 && mdPub.json?.profile?.bio === mdBio,
   { s: mdPub.status, bio: mdPub.json?.profile?.bio },
 );
+// Accent colour round-trips on PG too, and the public profile carries the
+// real comment aggregates (honest zero on a fresh account) beside identity.
+const accR = await call('PATCH', '/auth/profile', {
+  token: unA.json?.token,
+  body: { name: 'Username Probe A', avatarUrl: '', username: claimed, accentColor: '#22c55e' },
+});
+check(
+  'accent colour accepted on PG',
+  accR.status === 200 && accR.json?.user?.accentColor === '#22c55e',
+  { s: accR.status, c: accR.json?.user?.accentColor },
+);
+const pubAct = await call('GET', `/profiles/${claimed}`);
+check(
+  'public profile exposes accent + real commentCount',
+  pubAct.status === 200 &&
+    pubAct.json?.profile?.accentColor === '#22c55e' &&
+    pubAct.json?.profile?.commentCount === 0 &&
+    Array.isArray(pubAct.json?.profile?.recentComments) &&
+    pubAct.json.profile.recentComments.length === 0,
+  { s: pubAct.status, accent: pubAct.json?.profile?.accentColor, count: pubAct.json?.profile?.commentCount },
+);
 const delU1 = await call('DELETE', `/admin/users/${unA.json?.user?.id}`, admin);
 const delU2 = await call('DELETE', `/admin/users/${unB.json?.user?.id}`, admin);
 check(

@@ -35,6 +35,8 @@ export interface User {
   username: string;
   avatarUrl: string;
   bio?: string;
+  /** User-chosen #RRGGBB profile accent (banner tint); unset = default gradient. */
+  accentColor?: string;
   role: UserRole;
   /** Verification badge granted by an admin — see VerificationType. */
   verification: VerificationType;
@@ -46,6 +48,18 @@ export interface User {
     github: boolean;
     discord: boolean;
   };
+}
+
+/**
+ * A single comment surfaced on a profile's public activity list. Comments are
+ * ordinary public docs content — a profile only aggregates what anyone can
+ * already read on the docs page. Never includes user ids or emails.
+ */
+export interface PublicUserComment {
+  /** Docs section slug (matches the /docs#<slug> anchor, e.g. "scopes"). */
+  docSlug: string;
+  body: string;
+  createdAt: string;
 }
 
 /**
@@ -61,6 +75,12 @@ export interface PublicProfile {
   verification: VerificationType;
   createdAt: string;
   connectedAccounts: User['connectedAccounts'];
+  /** User-chosen banner accent, mirrored from the account record. */
+  accentColor?: string;
+  /** Real number of docs comments this author wrote (0 on a fresh account). */
+  commentCount?: number;
+  /** The newest few of those comments — newest first, capped server-side. */
+  recentComments?: PublicUserComment[];
 }
 
 export type PermissionScope =

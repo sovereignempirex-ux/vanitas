@@ -65,6 +65,9 @@ alter table if exists public.users add column if not exists two_factor_secret te
 alter table if exists public.users add column if not exists verification text not null default '';
 alter table if exists public.users add column if not exists username text not null default '';
 alter table if exists public.users add column if not exists bio text not null default '';
+-- Profile accent colour: user-chosen #RRGGBB that tints the profile banner
+-- ('' = keep the default gradient). Validated at the API before it is stored.
+alter table if exists public.users add column if not exists accent_color text not null default '';
 -- TOTP replay watermark: highest time-step already spent on a login.
 alter table if exists public.users add column if not exists totp_last_step bigint not null default 0;
 -- Invite tokens are live credentials (some grant ADMIN): look them up by

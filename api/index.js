@@ -928,6 +928,9 @@ alter table if exists public.users add column if not exists two_factor_secret te
 alter table if exists public.users add column if not exists verification text not null default '';
 alter table if exists public.users add column if not exists username text not null default '';
 alter table if exists public.users add column if not exists bio text not null default '';
+-- Profile accent colour: user-chosen #RRGGBB that tints the profile banner
+-- ('' = keep the default gradient). Validated at the API before it is stored.
+alter table if exists public.users add column if not exists accent_color text not null default '';
 -- TOTP replay watermark: highest time-step already spent on a login.
 alter table if exists public.users add column if not exists totp_last_step bigint not null default 0;
 -- Invite tokens are live credentials (some grant ADMIN): look them up by
@@ -1221,6 +1224,7 @@ function rowToUser(row) {
     username: row.username || "",
     avatarUrl: row.avatar_url || DEFAULT_AVATAR,
     bio: row.bio || void 0,
+    accentColor: row.accent_color || void 0,
     role: row.role === "ADMIN" ? "ADMIN" : "USER",
     verification: ["USER", "DEVELOPER", "ADMIN"].includes(row.verification) ? row.verification : "",
     twoFactorEnabled: !!row.two_factor_enabled,
@@ -1286,10 +1290,11 @@ async function updateProfile(userId, updates) {
           set name = $2,
               avatar_url = $3,
               username = coalesce($4, username),
-              bio = coalesce($5, bio)
+              bio = coalesce($5, bio),
+              accent_color = coalesce($6, accent_color)
         where id = $1
         returning *`,
-      [userId, updates.name, updates.avatarUrl, updates.username ?? null, updates.bio ?? null]
+      [userId, updates.name, updates.avatarUrl, updates.username ?? null, updates.bio ?? null, updates.accentColor ?? null]
     );
     const user2 = result.rows[0] ? rowToUser(result.rows[0]) : null;
     if (user2) invalidateResolveCache(userId);
@@ -1301,6 +1306,7 @@ async function updateProfile(userId, updates) {
   user.avatarUrl = updates.avatarUrl || DEFAULT_AVATAR;
   if (updates.username !== void 0) user.username = updates.username;
   if (updates.bio !== void 0) user.bio = updates.bio || void 0;
+  if (updates.accentColor !== void 0) user.accentColor = updates.accentColor || void 0;
   invalidateResolveCache(userId);
   return user;
 }
@@ -1319,6 +1325,7 @@ async function findPublicProfile(username) {
     username: user.username,
     avatarUrl: user.avatarUrl,
     bio: user.bio || "",
+    accentColor: user.accentColor || void 0,
     role: user.role,
     verification: user.verification,
     createdAt: user.createdAt,
@@ -3776,6 +3783,38 @@ async function deleteComment(id, actor) {
   await databasePool.query("delete from public.comments where id = $1", [id]);
   return "deleted";
 }
+async function publicCommentActivity(username) {
+  const u = username.trim().toLowerCase();
+  if (!databasePool) {
+    const user = db.users.find((x) => (x.username || "").toLowerCase() === u);
+    const mine = user ? memoryComments.filter((c) => c.userId === user.id).sort((a, b) => b.createdAt.localeCompare(a.createdAt)) : [];
+    return {
+      commentCount: mine.length,
+      recentComments: mine.slice(0, 5).map((c) => ({ docSlug: c.docId, body: c.body, createdAt: c.createdAt }))
+    };
+  }
+  await ensureSchema();
+  const [countR, recentR] = await Promise.all([
+    databasePool.query(
+      "select count(*)::int as count from public.comments c join public.users u on u.id = c.user_id where lower(u.username) = $1",
+      [u]
+    ),
+    databasePool.query(
+      `select c.doc_id, c.body, c.created_at
+         from public.comments c
+         join public.users u on u.id = c.user_id
+        where lower(u.username) = $1
+        order by c.created_at desc
+        limit 5`,
+      [u]
+    )
+  ]);
+  const iso = (v) => v instanceof Date ? v.toISOString() : String(v);
+  return {
+    commentCount: countR.rows[0]?.count ?? 0,
+    recentComments: recentR.rows.map((r) => ({ docSlug: r.doc_id, body: r.body, createdAt: iso(r.created_at) }))
+  };
+}
 function mapAiChatRow(row) {
   return {
     id: row.id,
@@ -4112,8 +4151,16 @@ async function buildApp() {
       }
       bio = value;
     }
+    let accentColor;
+    if (typeof req.body?.accentColor === "string") {
+      const value = req.body.accentColor.trim();
+      if (value !== "" && !/^#[0-9a-fA-F]{6}$/.test(value)) {
+        return res.status(400).json({ error: "Accent color must be a #RRGGBB hex value (or empty to reset)" });
+      }
+      accentColor = value;
+    }
     try {
-      const updated = await updateProfile(actor.id, { name, avatarUrl, username, bio });
+      const updated = await updateProfile(actor.id, { name, avatarUrl, username, bio, accentColor });
       if (!updated) return res.status(404).json({ error: "Account not found" });
       if (username) {
         persistAuditLog({
@@ -5315,7 +5362,8 @@ async function buildApp() {
     try {
       const profile = await findPublicProfile(username);
       if (!profile) return res.status(404).json({ error: "Profile not found" });
-      res.json({ profile });
+      const activity = await publicCommentActivity(username);
+      res.json({ profile: { ...profile, ...activity } });
     } catch (err) {
       console.error("[profiles]", err.message);
       res.status(500).json({ error: "Profile lookup failed" });

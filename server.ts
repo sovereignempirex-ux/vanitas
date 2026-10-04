@@ -19,7 +19,7 @@ import {
 } from './src/server/oauth.ts';
 import { processAiQuery, processAiQueryStream, diagnoseAndFixCode, performSemanticSearch, searchYouTubeVideos, getLastAiUpstream } from './src/server/aiService.ts';
 import { authenticateApiKey, requireScope, rateWindowStatus, nextQuotaReset } from './src/server/apiKeyAuth.ts';
-import { ClientSource, UserRole, PermissionScope, ProductSuggestion, ApiKey, User, AuditLog, VerificationType, AdminInvite, WebhookEndpoint, WebhookDeliveryLog } from './src/types.ts';
+import { ClientSource, UserRole, PermissionScope, ProductSuggestion, ApiKey, User, AuditLog, VerificationType, AdminInvite, WebhookEndpoint, WebhookDeliveryLog, PublicUserComment } from './src/types.ts';
 import { getActorUser, requireAdmin, rateLimit, sanitizeText, sanitizeUrl, csvCell, parsePagination, secureToken, secureId, isValidScope } from './src/server/security.ts';
 
 function mapSuggestion(row: Record<string, any>): ProductSuggestion {
@@ -162,6 +162,49 @@ async function deleteComment(id: string, actor: { id: string; role: UserRole }):
   if (existing.rows[0].user_id !== actor.id && actor.role !== 'ADMIN') return 'forbidden';
   await databasePool.query('delete from public.comments where id = $1', [id]);
   return 'deleted';
+}
+
+// Public profile activity — REAL aggregates of this author's docs comments.
+// Every comment is already readable by anyone on its docs page; a profile
+// only groups them. The payload carries count + the 5 newest with slug,
+// body and date only — never user ids or emails (see PublicUserComment).
+async function publicCommentActivity(
+  username: string,
+): Promise<{ commentCount: number; recentComments: PublicUserComment[] }> {
+  const u = username.trim().toLowerCase();
+  if (!databasePool) {
+    const user = db.users.find((x) => (x.username || '').toLowerCase() === u);
+    const mine = user
+      ? memoryComments
+          .filter((c) => c.userId === user.id)
+          .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      : [];
+    return {
+      commentCount: mine.length,
+      recentComments: mine.slice(0, 5).map((c) => ({ docSlug: c.docId, body: c.body, createdAt: c.createdAt })),
+    };
+  }
+  await ensureSchema();
+  const [countR, recentR] = await Promise.all([
+    databasePool.query(
+      'select count(*)::int as count from public.comments c join public.users u on u.id = c.user_id where lower(u.username) = $1',
+      [u],
+    ),
+    databasePool.query(
+      `select c.doc_id, c.body, c.created_at
+         from public.comments c
+         join public.users u on u.id = c.user_id
+        where lower(u.username) = $1
+        order by c.created_at desc
+        limit 5`,
+      [u],
+    ),
+  ]);
+  const iso = (v: any) => (v instanceof Date ? v.toISOString() : String(v));
+  return {
+    commentCount: countR.rows[0]?.count ?? 0,
+    recentComments: recentR.rows.map((r) => ({ docSlug: r.doc_id, body: r.body, createdAt: iso(r.created_at) })),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -626,8 +669,20 @@ export async function buildApp() {
       bio = value;
     }
 
+    // Optional profile accent colour — #RRGGBB only; an empty string resets to
+    // the default gradient. Validated here so nothing but a well-formed hex
+    // value can reach the stored record or the inline CSS it drives in the UI.
+    let accentColor: string | undefined;
+    if (typeof req.body?.accentColor === 'string') {
+      const value = req.body.accentColor.trim();
+      if (value !== '' && !/^#[0-9a-fA-F]{6}$/.test(value)) {
+        return res.status(400).json({ error: 'Accent color must be a #RRGGBB hex value (or empty to reset)' });
+      }
+      accentColor = value;
+    }
+
     try {
-      const updated = await updateProfile(actor.id, { name, avatarUrl, username, bio });
+      const updated = await updateProfile(actor.id, { name, avatarUrl, username, bio, accentColor });
       if (!updated) return res.status(404).json({ error: 'Account not found' });
       if (username) {
         persistAuditLog({
@@ -2093,7 +2148,9 @@ export async function buildApp() {
     try {
       const profile = await findPublicProfile(username);
       if (!profile) return res.status(404).json({ error: 'Profile not found' });
-      res.json({ profile });
+      // Real public activity alongside the identity: comment total + newest few.
+      const activity = await publicCommentActivity(username);
+      res.json({ profile: { ...profile, ...activity } });
     } catch (err) {
       console.error('[profiles]', (err as Error).message);
       res.status(500).json({ error: 'Profile lookup failed' });

@@ -205,6 +205,45 @@ check('public profile serves the markdown bio', r.status === 200 && r.json?.prof
 r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'Renamed Tester', avatarUrl: '', bio: 'Builds bots and API gateways.' } });
 check('bio restored → 200', r.status === 200 && r.json?.user?.bio === 'Builds bots and API gateways.', r.json?.user?.bio);
 
+// Accent colour: #RRGGBB persists to /auth/me and the public profile; junk is
+// rejected before it can reach the stored record or the inline CSS it drives.
+r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'Renamed Tester', avatarUrl: '', accentColor: '#38bdf8' } });
+check('accent colour #RRGGBB accepted', r.status === 200 && r.json?.user?.accentColor === '#38bdf8', r.json?.user?.accentColor);
+r = await call('GET', '/auth/me', { token: loginToken });
+check('accent colour persists server-side', r.json?.user?.accentColor === '#38bdf8', r.json?.user?.accentColor);
+r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'Renamed Tester', avatarUrl: '', accentColor: 'javascript:alert(1)' } });
+check('accent colour junk → 400', r.status === 400, r);
+r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'Renamed Tester', avatarUrl: '', accentColor: 'red' } });
+check('accent colour non-hex → 400', r.status === 400, r);
+
+// Public activity: one real comment, then the public profile must count it
+// and serve it — slug/body/date only, never user ids or emails.
+r = await call('POST', '/comments/getting-started', { token: loginToken, body: { body: 'Auth-flow comment for public profile activity.' } });
+check('post real comment → 201', r.status === 201 && !!r.json?.comment?.id, r);
+const activityCommentId = r.json?.comment?.id;
+r = await call('GET', '/profiles/renamed_tester');
+check(
+  'public profile: accent + real commentCount = 1',
+  r.status === 200 && r.json?.profile?.accentColor === '#38bdf8' && r.json?.profile?.commentCount === 1,
+  { accent: r.json?.profile?.accentColor, commentCount: r.json?.profile?.commentCount },
+);
+check(
+  'recentComments serves it (slug + body, no ids/email)',
+  Array.isArray(r.json?.profile?.recentComments) &&
+    r.json.profile.recentComments.length === 1 &&
+    r.json.profile.recentComments[0]?.docSlug === 'getting-started' &&
+    r.json.profile.recentComments[0]?.body === 'Auth-flow comment for public profile activity.' &&
+    !('userId' in r.json.profile.recentComments[0]) &&
+    !('email' in r.json.profile.recentComments[0]) &&
+    !('authorAvatar' in r.json.profile.recentComments[0]),
+  r.json?.profile?.recentComments,
+);
+// Reset the accent and remove the comment so later assertions see clean state.
+r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'Renamed Tester', avatarUrl: '', accentColor: '' } });
+check('accent colour reset → cleared', r.status === 200 && r.json?.user?.accentColor === undefined, r.json?.user);
+const delActivity = await call('DELETE', `/comments/${activityCommentId}`, { token: loginToken });
+check('activity comment cleaned up', delActivity.status >= 200 && delActivity.status < 300, delActivity);
+
 const secondToken = (await call('POST', '/auth/register', { body: { email: `second_${Date.now()}@example.com`, password, name: 'Second Account' } })).json?.token;
 check('second account registered', typeof secondToken === 'string', secondToken);
 const me2 = await call('GET', '/auth/me', { token: secondToken });

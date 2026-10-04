@@ -4,6 +4,7 @@ import { CHARACTER_AVATARS } from '../../data/assets.ts';
 import { api } from '../../lib/apiClient.ts';
 import { VerifiedBadge } from '../VerifiedBadge.tsx';
 import { Markdown } from '../Markdown.tsx';
+import QRCode from 'qrcode';
 import {
   User,
   Shield,
@@ -20,18 +21,28 @@ import {
   Loader2,
   X,
   ExternalLink,
+  MessageSquare,
+  QrCode,
+  Palette,
 } from 'lucide-react';
 
 // ---------------------------------------------------------------------------
 // Profile & identity: hero card (name, @username, badges, Markdown bio, real
-// account facts) + editor (claim your @username with live availability, a
-// Markdown bio with toolbar + live preview, avatar) + read-only account
-// details + the existing character preset gallery.
+// account facts), a real profile-strength checklist, the editor (claim your
+// @username with live availability, a Markdown bio with toolbar + live
+// preview, accent colour, avatar), share actions (view / copy / QR), the
+// read-only account details and the character preset gallery.
 // ---------------------------------------------------------------------------
 
 type AvailState = { checking: boolean; available: boolean; reason?: string } | null;
 
 const BIO_LIMIT = 500;
+// Mirrors the server's DEFAULT_AVATAR — used to tell "picked a custom avatar"
+// (preset / upload / URL) from the untouched default.
+const DEFAULT_AVATAR_URL = '/images/avatar-default.svg';
+// Preset accent swatches for the profile banner tint (any hex also accepted
+// through the native colour picker — the server validates #RRGGBB either way).
+const ACCENT_PRESETS = ['#38bdf8', '#22c55e', '#a855f7', '#f59e0b', '#ef4444', '#ec4899', '#14b8a6', '#eab308'];
 
 // Markdown toolbar chips — wrap the selection (or placeholder) at the caret.
 const BIO_CHIPS: { label: string; title: string; before: string; after: string; placeholder: string }[] = [
@@ -67,12 +78,77 @@ export const ProfileView: React.FC = () => {
   // Bio editor: write vs. live preview (the preview is the exact renderer
   // used on the public /u/<name> page, so what you see is what ships).
   const [bioTab, setBioTab] = useState<'write' | 'preview'>('write');
+  // Profile accent — persisted as #RRGGBB (validated server-side), previewed
+  // live on the hero banner while editing.
+  const [accent, setAccent] = useState(user?.accentColor || '');
+  // Real docs-comment total for the facts card (fetched from the same public
+  // profile endpoint the /u/<name> page uses).
+  const [commentCount, setCommentCount] = useState<number | null>(null);
+  // QR modal for the public profile link.
+  const [qrOpen, setQrOpen] = useState(false);
+  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
+  const [qrError, setQrError] = useState<string | null>(null);
   const usernameRef = useRef<HTMLInputElement>(null);
   const bioRef = useRef<HTMLTextAreaElement>(null);
 
   const currentUsername = (user?.username || '').toLowerCase();
   const usernameDirty = usernameInput.trim().toLowerCase() !== currentUsername;
   const connectedCount = user ? Object.values(user.connectedAccounts).filter(Boolean).length : 0;
+  // Only a well-formed hex may reach an inline style.
+  const accentHex = /^#[0-9a-fA-F]{6}$/.test(accent) ? accent : '';
+
+  // Profile strength — a straight count of the four real account facts below.
+  // The formula is on screen; nothing is estimated or faked.
+  const strengthItems = [
+    {
+      label: 'Claim your @username',
+      hint: 'Sets your public /u/ link',
+      done: !!user?.username,
+      jump: () => usernameRef.current?.focus(),
+    },
+    {
+      label: 'Write a Markdown bio',
+      hint: 'Rendered on your public page',
+      done: !!user?.bio?.trim(),
+      jump: () => {
+        setBioTab('write');
+        bioRef.current?.focus();
+      },
+    },
+    {
+      label: 'Pick a custom avatar',
+      hint: 'Preset, upload or image URL',
+      done: (user?.avatarUrl || DEFAULT_AVATAR_URL) !== DEFAULT_AVATAR_URL,
+      jump: null,
+    },
+    {
+      label: 'Enable two-factor auth',
+      hint: 'TOTP in the Security Center',
+      done: !!user?.twoFactorEnabled,
+      jump: null,
+    },
+  ];
+  const strengthDone = strengthItems.filter((i) => i.done).length;
+  const strengthPct = Math.round((strengthDone / strengthItems.length) * 100);
+
+  // Real comment total behind the "Docs comments" fact — one fetch of the
+  // account's own public profile whenever the @username is known.
+  useEffect(() => {
+    let alive = true;
+    if (!user?.username) {
+      setCommentCount(null);
+      return;
+    }
+    api
+      .getPublicProfile(user.username)
+      .then((r) => {
+        if (alive && typeof r.profile.commentCount === 'number') setCommentCount(r.profile.commentCount);
+      })
+      .catch(() => undefined); // activity is a bonus — never blocks the view
+    return () => {
+      alive = false;
+    };
+  }, [user?.username]);
 
   // Debounced live availability for the @username being claimed/changed.
   useEffect(() => {
@@ -160,6 +236,7 @@ export const ProfileView: React.FC = () => {
       avatarUrl: customAvatar || selectedAvatar,
       ...(usernameDirty ? { username: usernameInput.trim().toLowerCase() } : {}),
       bio,
+      accentColor: accent,
     });
     setSaving(false);
     if (result.success) {
@@ -175,6 +252,23 @@ export const ProfileView: React.FC = () => {
     navigator.clipboard.writeText(`${window.location.origin}/u/${user.username}`);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  // Real QR code of the public profile link — same encoder the downloads view
+  // uses, so scanning it opens exactly what "View public page" opens.
+  const openQrModal = () => {
+    if (!user?.username) return;
+    setQrOpen(true);
+    setQrDataUrl(null);
+    setQrError(null);
+    QRCode.toDataURL(`${window.location.origin}/u/${user.username}`, {
+      width: 240,
+      margin: 2,
+      errorCorrectionLevel: 'M',
+      color: { dark: '#3c82f6ff', light: '#060913ff' },
+    })
+      .then((url) => setQrDataUrl(url))
+      .catch(() => setQrError('Could not render the QR code.'));
   };
 
   // Wrap the current selection (or a placeholder) with Markdown syntax at the
@@ -214,8 +308,15 @@ export const ProfileView: React.FC = () => {
         {/* Left: identity hero card */}
         <div className="lg:col-span-5 space-y-6">
           <div className="rounded-3xl border border-white/10 bg-slate-950/70 overflow-hidden backdrop-blur-xl shadow-2xl">
-            {/* Gradient banner */}
-            <div className="relative h-24 bg-gradient-to-r from-blue-600/50 via-cyan-500/35 to-purple-600/45">
+            {/* Gradient banner — tinted live by the chosen profile accent */}
+            <div
+              className="relative h-24 bg-gradient-to-r from-blue-600/50 via-cyan-500/35 to-purple-600/45"
+              style={
+                accentHex
+                  ? { background: `linear-gradient(100deg, ${accentHex} 0%, ${accentHex}cc 45%, rgba(15,23,42,0.85) 100%)` }
+                  : undefined
+              }
+            >
               <div className="absolute inset-0 bg-[radial-gradient(circle_at_20%_20%,rgba(255,255,255,0.18),transparent_45%)]" />
             </div>
 
@@ -290,6 +391,30 @@ export const ProfileView: React.FC = () => {
                   </p>
                   <p className="mt-0.5 text-xs font-semibold text-slate-200">{connectedCount} of 3</p>
                 </div>
+                <div className="col-span-2 rounded-xl border border-white/10 bg-slate-900/60 px-3 py-2">
+                  <p className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-slate-500">
+                    <MessageSquare className="h-3 w-3" /> Docs comments
+                  </p>
+                  <p className="mt-0.5 text-xs font-semibold text-slate-200">
+                    {commentCount === null ? (
+                      'Loading…'
+                    ) : commentCount === 0 ? (
+                      'No public comments yet'
+                    ) : (
+                      <>
+                        {commentCount} public comment{commentCount === 1 ? '' : 's'}
+                        {user?.username && (
+                          <a
+                            href={`/u/${user.username}`}
+                            className="ml-2 font-mono text-[10px] text-cyan-300 hover:text-cyan-200 underline underline-offset-2"
+                          >
+                            view activity →
+                          </a>
+                        )}
+                      </>
+                    )}
+                  </p>
+                </div>
               </div>
 
               {/* Shareable public profile link (only real once a username exists) */}
@@ -307,11 +432,20 @@ export const ProfileView: React.FC = () => {
                   <button
                     type="button"
                     onClick={copyProfileLink}
-                    className="flex items-center justify-center gap-2 rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-3.5 py-2 text-xs font-semibold text-cyan-200 transition-all hover:bg-cyan-500/20"
+                    className="flex items-center justify-center gap-2 rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-xs font-semibold text-cyan-200 transition-all hover:bg-cyan-500/20"
                     title="Copy profile link"
                   >
                     {copied ? <Check className="h-3.5 w-3.5 text-emerald-300" /> : <Copy className="h-3.5 w-3.5" />}
                     {copied ? 'Copied!' : 'Copy link'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={openQrModal}
+                    className="flex items-center justify-center gap-1.5 rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-xs font-semibold text-cyan-200 transition-all hover:bg-cyan-500/20"
+                    title="Show a QR code for your public profile"
+                  >
+                    <QrCode className="h-3.5 w-3.5" />
+                    QR
                   </button>
                 </div>
               ) : (
@@ -324,6 +458,68 @@ export const ProfileView: React.FC = () => {
                 </button>
               )}
             </div>
+          </div>
+
+          {/* Profile strength — computed from the four real account facts it
+              lists (username, bio, avatar, 2FA). The formula stays visible. */}
+          <div className="rounded-3xl border border-white/10 bg-slate-950/70 p-6 backdrop-blur-xl shadow-2xl">
+            <div className="flex items-center justify-between pb-4 border-b border-white/10">
+              <div className="flex items-center gap-2">
+                <Sparkles className="h-5 w-5 text-amber-400" />
+                <h3 className="text-sm font-bold text-white">Profile Strength</h3>
+              </div>
+              <span className="font-mono text-sm font-bold text-amber-300">{strengthPct}%</span>
+            </div>
+
+            <div className="mt-4 h-2 rounded-full bg-slate-900 overflow-hidden border border-white/5">
+              <div
+                className={`h-full rounded-full transition-all duration-500 ${
+                  strengthPct >= 100 ? 'bg-emerald-500' : 'bg-gradient-to-r from-amber-500 to-yellow-400'
+                }`}
+                style={{ width: `${strengthPct}%` }}
+              />
+            </div>
+
+            <ul className="mt-4 space-y-1.5">
+              {strengthItems.map((item) => {
+                const rowInner = (
+                  <>
+                    <span
+                      className={`flex h-4.5 w-4.5 shrink-0 items-center justify-center rounded-full border ${
+                        item.done ? 'border-emerald-400/50 bg-emerald-500/15' : 'border-slate-600 bg-slate-900'
+                      }`}
+                    >
+                      {item.done && <Check className="h-3 w-3 text-emerald-300" />}
+                    </span>
+                    <span className="min-w-0">
+                      <span className={`block text-xs font-medium ${item.done ? 'text-slate-200' : 'text-slate-400'}`}>
+                        {item.label}
+                      </span>
+                      <span className="block text-[10px] text-slate-500">{item.hint}</span>
+                    </span>
+                  </>
+                );
+                return item.jump ? (
+                  <button
+                    key={item.label}
+                    type="button"
+                    onClick={item.jump}
+                    className="flex w-full items-center gap-2.5 rounded-xl px-2 py-1.5 text-left transition-colors hover:bg-white/5"
+                  >
+                    {rowInner}
+                  </button>
+                ) : (
+                  <div key={item.label} className="flex w-full items-center gap-2.5 rounded-xl px-2 py-1.5 text-left">
+                    {rowInner}
+                  </div>
+                );
+              })}
+            </ul>
+
+            <p className="mt-3 text-[10px] leading-relaxed text-slate-600">
+              {strengthDone} of {strengthItems.length} steps done — counted straight from your account record, nothing
+              estimated.
+            </p>
           </div>
         </div>
 
@@ -488,6 +684,52 @@ export const ProfileView: React.FC = () => {
                 </div>
               </div>
 
+              {/* Profile accent — tints the banner here and on the public page */}
+              <div>
+                <div className="flex items-center justify-between gap-2">
+                  <label className="flex items-center gap-1.5 text-xs font-medium text-slate-300">
+                    <Palette className="h-3.5 w-3.5 text-pink-400" /> Profile Accent
+                  </label>
+                  <span className="font-mono text-[10px] text-slate-500">{accentHex || 'default gradient'}</span>
+                </div>
+                <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                  {ACCENT_PRESETS.map((c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      title={`Use ${c}`}
+                      onClick={() => setAccent(c)}
+                      className={`h-7 w-7 rounded-full border-2 transition-transform hover:scale-110 ${
+                        accentHex.toLowerCase() === c ? 'border-white scale-110' : 'border-white/20'
+                      }`}
+                      style={{ backgroundColor: c }}
+                    />
+                  ))}
+                  <label
+                    className="flex h-7 cursor-pointer items-center gap-1.5 rounded-full border border-white/15 bg-slate-900 px-2.5 text-[10px] text-slate-300 transition-colors hover:border-white/30"
+                    title="Pick any custom colour"
+                  >
+                    <input
+                      type="color"
+                      value={accentHex || '#38bdf8'}
+                      onChange={(e) => setAccent(e.target.value)}
+                      className="h-4 w-4 cursor-pointer border-0 bg-transparent p-0"
+                    />
+                    Custom
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setAccent('')}
+                    className="h-7 rounded-full border border-white/15 bg-slate-900 px-3 text-[10px] text-slate-400 transition-colors hover:text-slate-200"
+                  >
+                    Reset
+                  </button>
+                </div>
+                <p className="mt-1.5 text-[10px] text-slate-500">
+                  Tints your banner (live preview above) — stored as a server-validated #RRGGBB hex value.
+                </p>
+              </div>
+
               {saveError && (
                 <div className="rounded-xl border border-red-500/30 bg-red-950/40 p-2.5 text-[11px] text-red-300">
                   {saveError}
@@ -624,6 +866,44 @@ export const ProfileView: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* QR modal — a real, scannable code for the public profile link */}
+      {qrOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+          onClick={() => setQrOpen(false)}
+        >
+          <div
+            className="w-full max-w-xs rounded-3xl border border-white/15 bg-slate-950 p-5 text-center shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <h4 className="text-sm font-bold text-white">Your profile QR</h4>
+              <button
+                type="button"
+                onClick={() => setQrOpen(false)}
+                className="rounded-lg p-1 text-slate-400 transition-colors hover:bg-white/10 hover:text-white"
+                aria-label="Close QR code"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="mt-3 flex h-44 items-center justify-center">
+              {qrError ? (
+                <p className="text-xs text-red-300">{qrError}</p>
+              ) : qrDataUrl ? (
+                <img src={qrDataUrl} alt="QR code for your public profile" className="h-44 w-44 rounded-xl" />
+              ) : (
+                <Loader2 className="h-6 w-6 animate-spin text-cyan-300" />
+              )}
+            </div>
+            <p className="mt-3 break-all font-mono text-[10px] text-cyan-300">
+              {user?.username ? `${window.location.origin}/u/${user.username}` : ''}
+            </p>
+            <p className="mt-1 text-[10px] text-slate-500">Scan to open your public /u/ page.</p>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
