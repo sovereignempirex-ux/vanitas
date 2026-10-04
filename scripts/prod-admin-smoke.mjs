@@ -293,6 +293,34 @@ check(
     pubAct.json.profile.recentComments.length === 0,
   { s: pubAct.status, accent: pubAct.json?.profile?.accentColor, count: pubAct.json?.profile?.commentCount },
 );
+// Status line + published links round-trip on PG too (text + jsonb columns).
+const stR = await call('PATCH', '/auth/profile', {
+  token: unA.json?.token,
+  body: {
+    name: 'Username Probe A',
+    avatarUrl: '',
+    username: claimed,
+    statusLine: '🚀 Prod round-11 check',
+    links: [{ label: 'Vanitas', url: 'https://vanitas-bot.vercel.app' }],
+  },
+});
+check(
+  'status + links accepted on PG',
+  stR.status === 200 &&
+    stR.json?.user?.statusLine === '🚀 Prod round-11 check' &&
+    stR.json?.user?.profileLinks?.[0]?.url === 'https://vanitas-bot.vercel.app',
+  { s: stR.status, st: stR.json?.user?.statusLine, lk: stR.json?.user?.profileLinks },
+);
+const pubSt = await call('GET', `/profiles/${claimed}`);
+check(
+  'public profile serves status + links on PG',
+  pubSt.status === 200 &&
+    pubSt.json?.profile?.statusLine === '🚀 Prod round-11 check' &&
+    Array.isArray(pubSt.json?.profile?.links) &&
+    pubSt.json.profile.links.length === 1 &&
+    pubSt.json.profile.links[0]?.label === 'Vanitas',
+  { s: pubSt.status, st: pubSt.json?.profile?.statusLine, links: pubSt.json?.profile?.links },
+);
 const delU1 = await call('DELETE', `/admin/users/${unA.json?.user?.id}`, admin);
 const delU2 = await call('DELETE', `/admin/users/${unB.json?.user?.id}`, admin);
 check(

@@ -96,6 +96,16 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen, setIsMobileOpen 
         className={`fixed top-16 bottom-0 left-0 z-40 w-64 border-r border-white/[0.08] bg-[#05070e]/90 backdrop-blur-2xl transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] lg:translate-x-0 overflow-y-auto ${
           isMobileOpen ? 'translate-x-0 shadow-[24px_0_48px_-24px_rgba(0,0,0,0.8)]' : '-translate-x-full'
         }`}
+        // Real image background — the workspace photo the overview hero uses,
+        // under a dark gradient so every label keeps its contrast (the flat
+        // #05070e colour stays as the fallback while the image loads).
+        style={{
+          backgroundImage:
+            "linear-gradient(180deg, rgba(5,7,14,0.74) 0%, rgba(4,7,16,0.86) 45%, rgba(3,5,12,0.95) 100%), url('/images/overview-hero.jpg')",
+          backgroundSize: 'cover',
+          backgroundPosition: 'center',
+          backgroundRepeat: 'no-repeat',
+        }}
       >
         <div className="p-3 space-y-6">
           {navSections.map((section) => (

@@ -244,6 +244,59 @@ check('accent colour reset → cleared', r.status === 200 && r.json?.user?.accen
 const delActivity = await call('DELETE', `/comments/${activityCommentId}`, { token: loginToken });
 check('activity comment cleaned up', delActivity.status >= 200 && delActivity.status < 300, delActivity);
 
+// Status line: emoji-safe, ≤80 chars, collapsed to a single line; '' clears.
+r = await call('PATCH', '/auth/profile', {
+  token: loginToken,
+  body: { name: 'Renamed Tester', avatarUrl: '', statusLine: '🔨 Shipping Vanitas — bots, APIs, docs.' },
+});
+check(
+  'status line accepted + returned',
+  r.status === 200 && r.json?.user?.statusLine === '🔨 Shipping Vanitas — bots, APIs, docs.',
+  r.json?.user?.statusLine,
+);
+r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'Renamed Tester', avatarUrl: '', statusLine: 'x'.repeat(81) } });
+check('status over 80 chars → 400', r.status === 400, r);
+r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'Renamed Tester', avatarUrl: '', statusLine: 'line one\nline two' } });
+check('status collapses to a single line', r.status === 200 && r.json?.user?.statusLine === 'line one line two', JSON.stringify(r.json?.user?.statusLine));
+
+// Profile links: https only, ≤5, public-safe (label + url, nothing else).
+const goodLinks = [
+  { label: 'GitHub', url: 'https://github.com/sovereignempirex-ux' },
+  { label: 'Docs', url: 'https://vanitas-bot.vercel.app/docs' },
+];
+r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'Renamed Tester', avatarUrl: '', links: goodLinks } });
+check('two links accepted', r.status === 200 && JSON.stringify(r.json?.user?.profileLinks) === JSON.stringify(goodLinks), r.json?.user?.profileLinks);
+r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'Renamed Tester', avatarUrl: '', links: [{ label: 'Evil', url: 'javascript:alert(1)' }] } });
+check('javascript: link → 400', r.status === 400, r);
+r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'Renamed Tester', avatarUrl: '', links: [{ label: 'Plain', url: 'http://example.com/page' }] } });
+check('non-https link → 400', r.status === 400, r);
+r = await call('PATCH', '/auth/profile', {
+  token: loginToken,
+  body: { name: 'Renamed Tester', avatarUrl: '', links: Array.from({ length: 6 }, (_, i) => ({ label: `L${i}`, url: `https://example.com/${i}` })) },
+});
+check('6th link → 400', r.status === 400, r);
+r = await call('GET', '/auth/me', { token: loginToken });
+check(
+  'status + links persist server-side',
+  r.json?.user?.statusLine === 'line one line two' && JSON.stringify(r.json?.user?.profileLinks) === JSON.stringify(goodLinks),
+  { status: r.json?.user?.statusLine, links: r.json?.user?.profileLinks },
+);
+r = await call('GET', '/profiles/renamed_tester');
+check(
+  'public profile serves status + links (label/url only)',
+  r.status === 200 &&
+    r.json?.profile?.statusLine === 'line one line two' &&
+    JSON.stringify(r.json?.profile?.links) === JSON.stringify(goodLinks) &&
+    !('profileLinks' in r.json.profile),
+  { status: r.json?.profile?.statusLine, links: r.json?.profile?.links },
+);
+r = await call('PATCH', '/auth/profile', { token: loginToken, body: { name: 'Renamed Tester', avatarUrl: '', statusLine: '', links: [] } });
+check(
+  'status + links cleared by empty values',
+  r.status === 200 && r.json?.user?.statusLine === undefined && JSON.stringify(r.json?.user?.profileLinks) === '[]',
+  r.json?.user,
+);
+
 const secondToken = (await call('POST', '/auth/register', { body: { email: `second_${Date.now()}@example.com`, password, name: 'Second Account' } })).json?.token;
 check('second account registered', typeof secondToken === 'string', secondToken);
 const me2 = await call('GET', '/auth/me', { token: secondToken });

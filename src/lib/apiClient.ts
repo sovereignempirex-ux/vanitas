@@ -27,6 +27,7 @@ import {
   AiChatHistoryMessage,
   AdminInvite,
   PublicProfile,
+  ProfileLink,
 } from '../types.ts';
 
 class ApiClient {
@@ -167,8 +168,16 @@ class ApiClient {
     }
   }
 
-  /** Persist profile edits. `username`/`bio`/`accentColor` are optional — omit = unchanged. */
-  async updateProfile(params: { name: string; avatarUrl: string; username?: string; bio?: string; accentColor?: string }) {
+  /** Persist profile edits. `username`/`bio`/`accentColor`/`statusLine`/`links` are optional — omit = unchanged. */
+  async updateProfile(params: {
+    name: string;
+    avatarUrl: string;
+    username?: string;
+    bio?: string;
+    accentColor?: string;
+    statusLine?: string;
+    links?: ProfileLink[];
+  }) {
     return this.request<{ user: User; permissions: PermissionScope[] }>('/auth/profile', {
       method: 'PATCH',
       body: JSON.stringify(params),

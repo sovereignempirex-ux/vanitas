@@ -22,13 +22,16 @@ import {
   Bot as BotIcon,
   Globe,
   Download,
+  Menu,
 } from 'lucide-react';
 
 interface HeaderProps {
   onOpenCommandPalette: () => void;
+  /** Opens/closes the navigation sidebar on small screens (it is off-canvas below lg). */
+  onToggleSidebar: () => void;
 }
 
-export const Header: React.FC<HeaderProps> = ({ onOpenCommandPalette }) => {
+export const Header: React.FC<HeaderProps> = ({ onOpenCommandPalette, onToggleSidebar }) => {
   const { user, role, logout, setActiveView, isAuthModalOpen, setIsAuthModalOpen, clientSource, setClientSource } = useAuth();
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
   const [isNotifOpen, setIsNotifOpen] = useState(false);
@@ -44,7 +47,17 @@ export const Header: React.FC<HeaderProps> = ({ onOpenCommandPalette }) => {
     <header className="sticky top-0 z-40 w-full border-b border-white/[0.08] bg-[#05070e]/80 backdrop-blur-2xl supports-[backdrop-filter]:bg-[#05070e]/70">
       <div className="flex h-16 items-center justify-between px-4 sm:px-6">
         {/* Left: Brand Identity & Active Breadcrumb */}
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3 sm:gap-4">
+          {/* Mobile/tablet nav toggle — the sidebar sits off-canvas below lg */}
+          <button
+            type="button"
+            onClick={onToggleSidebar}
+            className="lg:hidden -ml-1 rounded-lg border border-white/10 bg-slate-900/60 p-2 text-slate-300 transition-all hover:border-blue-400/40 hover:text-white"
+            aria-label="Toggle navigation menu"
+            title="Toggle navigation menu"
+          >
+            <Menu className="h-4.5 w-4.5" />
+          </button>
           <button
             onClick={() => setActiveView('overview')}
             className="flex items-center gap-3 group text-left focus:outline-none"

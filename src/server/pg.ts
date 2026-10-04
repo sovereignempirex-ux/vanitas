@@ -68,6 +68,11 @@ alter table if exists public.users add column if not exists bio text not null de
 -- Profile accent colour: user-chosen #RRGGBB that tints the profile banner
 -- ('' = keep the default gradient). Validated at the API before it is stored.
 alter table if exists public.users add column if not exists accent_color text not null default '';
+-- Profile extras: a single-line status under the name and the account's
+-- published links (jsonb array of {label,url} — every field validated at the
+-- API before it is stored; '' / [] clear the value).
+alter table if exists public.users add column if not exists status_line text not null default '';
+alter table if exists public.users add column if not exists profile_links jsonb not null default '[]';
 -- TOTP replay watermark: highest time-step already spent on a login.
 alter table if exists public.users add column if not exists totp_last_step bigint not null default 0;
 -- Invite tokens are live credentials (some grant ADMIN): look them up by

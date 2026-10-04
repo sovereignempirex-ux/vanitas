@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import { databasePool } from './pg.ts';
 import { db } from './db.ts';
 import { secureId } from './security.ts';
-import type { User, UserRole, PublicProfile } from '../types.ts';
+import type { User, UserRole, PublicProfile, ProfileLink } from '../types.ts';
 
 // ---------------------------------------------------------------------------
 // Real account authentication.
@@ -169,6 +169,8 @@ export function rowToUser(row: Record<string, any>): User {
     avatarUrl: row.avatar_url || DEFAULT_AVATAR,
     bio: row.bio || undefined,
     accentColor: row.accent_color || undefined,
+    statusLine: row.status_line || undefined,
+    profileLinks: Array.isArray(row.profile_links) ? row.profile_links : [],
     role: row.role === 'ADMIN' ? 'ADMIN' : 'USER',
     verification: ['USER', 'DEVELOPER', 'ADMIN'].includes(row.verification) ? row.verification : '',
     twoFactorEnabled: !!row.two_factor_enabled,
@@ -245,11 +247,19 @@ export function invalidateResolveCache(userId: string): void {
 }
 
 // Persist real profile edits to the account record: display name + avatar,
-// plus the claimable @username, bio and accent colour when provided
-// (undefined = unchanged).
+// plus the claimable @username, bio, accent colour, status line and links
+// when provided (undefined = unchanged; '' / [] clear the value).
 export async function updateProfile(
   userId: string,
-  updates: { name: string; avatarUrl: string; username?: string; bio?: string; accentColor?: string },
+  updates: {
+    name: string;
+    avatarUrl: string;
+    username?: string;
+    bio?: string;
+    accentColor?: string;
+    statusLine?: string;
+    profileLinks?: ProfileLink[];
+  },
 ): Promise<User | null> {
   if (databasePool) {
     const result = await databasePool.query(
@@ -258,10 +268,21 @@ export async function updateProfile(
               avatar_url = $3,
               username = coalesce($4, username),
               bio = coalesce($5, bio),
-              accent_color = coalesce($6, accent_color)
+              accent_color = coalesce($6, accent_color),
+              status_line = coalesce($7, status_line),
+              profile_links = coalesce($8::jsonb, profile_links)
         where id = $1
         returning *`,
-      [userId, updates.name, updates.avatarUrl, updates.username ?? null, updates.bio ?? null, updates.accentColor ?? null],
+      [
+        userId,
+        updates.name,
+        updates.avatarUrl,
+        updates.username ?? null,
+        updates.bio ?? null,
+        updates.accentColor ?? null,
+        updates.statusLine ?? null,
+        updates.profileLinks != null ? JSON.stringify(updates.profileLinks) : null,
+      ],
     );
     const user = result.rows[0] ? rowToUser(result.rows[0]) : null;
     if (user) invalidateResolveCache(userId); // /auth/me must reflect fresh edits
@@ -275,6 +296,8 @@ export async function updateProfile(
   if (updates.username !== undefined) user.username = updates.username;
   if (updates.bio !== undefined) user.bio = updates.bio || undefined;
   if (updates.accentColor !== undefined) user.accentColor = updates.accentColor || undefined;
+  if (updates.statusLine !== undefined) user.statusLine = updates.statusLine || undefined;
+  if (updates.profileLinks !== undefined) user.profileLinks = updates.profileLinks;
   invalidateResolveCache(userId);
   return user;
 }
@@ -296,6 +319,8 @@ export async function findPublicProfile(username: string): Promise<PublicProfile
     avatarUrl: user.avatarUrl,
     bio: user.bio || '',
     accentColor: user.accentColor || undefined,
+    statusLine: user.statusLine || undefined,
+    links: user.profileLinks || [],
     role: user.role,
     verification: user.verification,
     createdAt: user.createdAt,

@@ -152,6 +152,14 @@ export const ProfilePage: React.FC<{ username: string }> = ({ username }) => {
             {p.username}
           </p>
 
+          {/* One-line status, exactly as the account holder saved it */}
+          {p.statusLine && (
+            <p className="mt-2 inline-flex max-w-full items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] text-slate-300">
+              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400 animate-pulse" />
+              <span className="truncate">{p.statusLine}</span>
+            </p>
+          )}
+
           <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
             <div className="inline-flex items-center gap-1.5 rounded-full bg-blue-500/10 border border-blue-500/30 px-3 py-1 text-xs font-mono font-bold text-blue-300">
               <Shield className="h-3.5 w-3.5" />
@@ -174,6 +182,25 @@ export const ProfilePage: React.FC<{ username: string }> = ({ username }) => {
             </div>
           ) : (
             <p className="mt-4 text-[11px] italic text-slate-500">This developer hasn't written a bio yet.</p>
+          )}
+
+          {/* Published links — label + server-validated https URL only */}
+          {(p.links || []).length > 0 && (
+            <div className="mt-3 flex flex-wrap justify-center gap-1.5">
+              {(p.links || []).map((l) => (
+                <a
+                  key={`${l.label}-${l.url}`}
+                  href={l.url}
+                  target="_blank"
+                  rel="noopener noreferrer nofollow"
+                  title={l.url}
+                  className="max-w-[170px] truncate rounded-full border border-white/15 bg-white/5 px-2.5 py-1 text-[10px] font-medium text-slate-300 transition-colors hover:border-cyan-400/50 hover:text-white"
+                >
+                  <Link2 className="mr-1 inline h-2.5 w-2.5" />
+                  {l.label}
+                </a>
+              ))}
+            </div>
           )}
 
           <div className="mt-4 flex flex-wrap items-center justify-center gap-x-4 gap-y-1.5 text-[11px] text-slate-400">

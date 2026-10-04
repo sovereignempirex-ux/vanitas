@@ -28,6 +28,16 @@ export interface AdminInvite {
 
 export type ClientSource = 'WEB' | 'BOT' | 'MOBILE' | 'DESKTOP' | 'APPLICATION' | 'OTHER';
 
+/**
+ * A user-published profile link (GitHub, site, Discord…) shown as a chip on
+ * /u/<username>. The server only ever stores a short label plus a validated
+ * https:// URL — nothing else can reach this shape.
+ */
+export interface ProfileLink {
+  label: string;
+  url: string;
+}
+
 export interface User {
   id: string;
   email: string;
@@ -37,6 +47,10 @@ export interface User {
   bio?: string;
   /** User-chosen #RRGGBB profile accent (banner tint); unset = default gradient. */
   accentColor?: string;
+  /** One-line status under the name ("Now building …"), ≤80 chars, single line. */
+  statusLine?: string;
+  /** Up to 5 published https links (server-validated). */
+  profileLinks?: ProfileLink[];
   role: UserRole;
   /** Verification badge granted by an admin — see VerificationType. */
   verification: VerificationType;
@@ -77,6 +91,10 @@ export interface PublicProfile {
   connectedAccounts: User['connectedAccounts'];
   /** User-chosen banner accent, mirrored from the account record. */
   accentColor?: string;
+  /** One-line status under the name — same value the account holder saved. */
+  statusLine?: string;
+  /** The account holder's published links (label + https URL only). */
+  links?: ProfileLink[];
   /** Real number of docs comments this author wrote (0 on a fresh account). */
   commentCount?: number;
   /** The newest few of those comments — newest first, capped server-side. */

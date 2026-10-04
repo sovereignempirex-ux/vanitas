@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { User, UserRole, ClientSource, PermissionScope, WeeklyAgentQuota } from '../types.ts';
+import { User, UserRole, ClientSource, PermissionScope, WeeklyAgentQuota, ProfileLink } from '../types.ts';
 import { api } from '../lib/apiClient.ts';
 
 const ONE_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
@@ -32,7 +32,15 @@ interface AuthContextType {
   setIsAuthModalOpen: (open: boolean) => void;
   refreshUser: () => Promise<void>;
   /** Persist profile edits (name + avatar) to the real account server-side. */
-  updateUserProfile: (updates: { name: string; avatarUrl: string; username?: string; bio?: string; accentColor?: string }) => Promise<{ success: boolean; error?: string }>;
+  updateUserProfile: (updates: {
+    name: string;
+    avatarUrl: string;
+    username?: string;
+    bio?: string;
+    accentColor?: string;
+    statusLine?: string;
+    links?: ProfileLink[];
+  }) => Promise<{ success: boolean; error?: string }>;
   // Weekly Agent Quota System (1 run / week per account)
   weeklyAgentQuota: WeeklyAgentQuota;
   executeAgentRun: (agentType?: string) => { success: boolean; message: string };
@@ -280,7 +288,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     localStorage.removeItem('vanitas_active_user');
   };
 
-  const updateUserProfile = async (updates: { name: string; avatarUrl: string; username?: string; bio?: string; accentColor?: string }) => {
+  const updateUserProfile = async (updates: {
+    name: string;
+    avatarUrl: string;
+    username?: string;
+    bio?: string;
+    accentColor?: string;
+    statusLine?: string;
+    links?: ProfileLink[];
+  }) => {
     // Real accounts: edits are validated and persisted by the server.
     try {
       const data = await api.updateProfile(updates);

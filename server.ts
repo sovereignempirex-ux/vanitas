@@ -19,7 +19,7 @@ import {
 } from './src/server/oauth.ts';
 import { processAiQuery, processAiQueryStream, diagnoseAndFixCode, performSemanticSearch, searchYouTubeVideos, getLastAiUpstream } from './src/server/aiService.ts';
 import { authenticateApiKey, requireScope, rateWindowStatus, nextQuotaReset } from './src/server/apiKeyAuth.ts';
-import { ClientSource, UserRole, PermissionScope, ProductSuggestion, ApiKey, User, AuditLog, VerificationType, AdminInvite, WebhookEndpoint, WebhookDeliveryLog, PublicUserComment } from './src/types.ts';
+import { ClientSource, UserRole, PermissionScope, ProductSuggestion, ApiKey, User, AuditLog, VerificationType, AdminInvite, WebhookEndpoint, WebhookDeliveryLog, PublicUserComment, ProfileLink } from './src/types.ts';
 import { getActorUser, requireAdmin, rateLimit, sanitizeText, sanitizeUrl, csvCell, parsePagination, secureToken, secureId, isValidScope } from './src/server/security.ts';
 
 function mapSuggestion(row: Record<string, any>): ProductSuggestion {
@@ -681,8 +681,41 @@ export async function buildApp() {
       accentColor = value;
     }
 
+    // Optional one-line status ("Now building …") — collapsed to a single
+    // line and capped at 80 chars server-side; '' clears it.
+    let statusLine: string | undefined;
+    if (typeof req.body?.statusLine === 'string') {
+      const value = sanitizeText(req.body.statusLine, 400).replace(/\s+/g, ' ').trim();
+      if (value.length > 80) {
+        return res.status(400).json({ error: 'Status line must be 80 characters or fewer' });
+      }
+      statusLine = value;
+    }
+
+    // Optional published links — up to 5, each a short label plus a https://
+    // URL. Nothing but a validated https value can reach the stored record or
+    // the <a href> it renders as on the public page (no javascript:, no
+    // protocol-relative //host). [] clears the list.
+    let profileLinks: ProfileLink[] | undefined;
+    if (req.body?.links !== undefined) {
+      const raw = req.body.links;
+      if (!Array.isArray(raw)) return res.status(400).json({ error: 'Links must be an array' });
+      if (raw.length > 5) return res.status(400).json({ error: 'Up to 5 profile links are allowed' });
+      const links: ProfileLink[] = [];
+      for (const item of raw) {
+        const label = typeof item?.label === 'string' ? sanitizeText(item.label, 40).trim() : '';
+        const url = typeof item?.url === 'string' ? item.url.trim() : '';
+        if (!label) return res.status(400).json({ error: 'Every link needs a label' });
+        if (!/^https:\/\/[^\s]{5,500}$/.test(url)) {
+          return res.status(400).json({ error: `Link "${label}" must be an https:// URL` });
+        }
+        links.push({ label, url });
+      }
+      profileLinks = links;
+    }
+
     try {
-      const updated = await updateProfile(actor.id, { name, avatarUrl, username, bio, accentColor });
+      const updated = await updateProfile(actor.id, { name, avatarUrl, username, bio, accentColor, statusLine, profileLinks });
       if (!updated) return res.status(404).json({ error: 'Account not found' });
       if (username) {
         persistAuditLog({

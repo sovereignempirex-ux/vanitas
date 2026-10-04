@@ -5,6 +5,7 @@ import { api } from '../../lib/apiClient.ts';
 import { VerifiedBadge } from '../VerifiedBadge.tsx';
 import { Markdown } from '../Markdown.tsx';
 import QRCode from 'qrcode';
+import { ProfileLink } from '../../types.ts';
 import {
   User,
   Shield,
@@ -24,6 +25,7 @@ import {
   MessageSquare,
   QrCode,
   Palette,
+  Radio,
 } from 'lucide-react';
 
 // ---------------------------------------------------------------------------
@@ -81,6 +83,10 @@ export const ProfileView: React.FC = () => {
   // Profile accent — persisted as #RRGGBB (validated server-side), previewed
   // live on the hero banner while editing.
   const [accent, setAccent] = useState(user?.accentColor || '');
+  // One-line status under the name + up to 5 published links — both validated
+  // by the server before they are stored (single line / https only).
+  const [statusLine, setStatusLine] = useState(user?.statusLine || '');
+  const [links, setLinks] = useState<ProfileLink[]>(user?.profileLinks || []);
   // Real docs-comment total for the facts card (fetched from the same public
   // profile endpoint the /u/<name> page uses).
   const [commentCount, setCommentCount] = useState<number | null>(null);
@@ -230,6 +236,23 @@ export const ProfileView: React.FC = () => {
       setSaveError('Custom avatar must be an https:// image URL.');
       return;
     }
+    // Mirror of the server's link rule (server is authoritative): drop rows
+    // left completely empty, then require a label + https:// URL for each.
+    const cleanedLinks = links
+      .map((l) => ({ label: l.label.trim(), url: l.url.trim() }))
+      .filter((l) => l.label || l.url);
+    for (const l of cleanedLinks) {
+      if (!l.label) {
+        setSaving(false);
+        setSaveError('Every link needs a label.');
+        return;
+      }
+      if (!/^https:\/\/[^\s]{5,500}$/.test(l.url)) {
+        setSaving(false);
+        setSaveError(`Link "${l.label}" must be an https:// URL.`);
+        return;
+      }
+    }
     // Persisted server-side on the real account record (PostgreSQL).
     const result = await updateUserProfile({
       name,
@@ -237,6 +260,8 @@ export const ProfileView: React.FC = () => {
       ...(usernameDirty ? { username: usernameInput.trim().toLowerCase() } : {}),
       bio,
       accentColor: accent,
+      statusLine: statusLine.trim(),
+      links: cleanedLinks,
     });
     setSaving(false);
     if (result.success) {
@@ -353,6 +378,14 @@ export const ProfileView: React.FC = () => {
                 <span>{role} PRIVILEGES</span>
               </div>
 
+              {/* One-line status (live preview while editing, exactly as saved) */}
+              {statusLine.trim() && (
+                <p className="mt-2 inline-flex max-w-full items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] text-slate-300">
+                  <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400 animate-pulse" />
+                  <span className="truncate">{statusLine.trim()}</span>
+                </p>
+              )}
+
               {user?.bio ? (
                 <div className="mt-3 text-left">
                   <Markdown text={user.bio} className="text-xs" />
@@ -416,6 +449,27 @@ export const ProfileView: React.FC = () => {
                   </p>
                 </div>
               </div>
+
+              {/* Published profile links — same rows the editor manages */}
+              {links.filter((l) => l.label && l.url).length > 0 && (
+                <div className="mt-4 flex flex-wrap justify-center gap-1.5">
+                  {links
+                    .filter((l) => l.label && l.url)
+                    .map((l) => (
+                      <a
+                        key={`${l.label}-${l.url}`}
+                        href={l.url}
+                        target="_blank"
+                        rel="noopener noreferrer nofollow"
+                        title={l.url}
+                        className="max-w-[170px] truncate rounded-full border border-white/15 bg-white/5 px-2.5 py-1 text-[10px] font-medium text-slate-300 transition-colors hover:border-blue-400/50 hover:text-white"
+                      >
+                        <Link2 className="mr-1 inline h-2.5 w-2.5" />
+                        {l.label}
+                      </a>
+                    ))}
+                </div>
+              )}
 
               {/* Shareable public profile link (only real once a username exists) */}
               {user?.username ? (
@@ -727,6 +781,84 @@ export const ProfileView: React.FC = () => {
                 </div>
                 <p className="mt-1.5 text-[10px] text-slate-500">
                   Tints your banner (live preview above) — stored as a server-validated #RRGGBB hex value.
+                </p>
+              </div>
+
+              {/* One-line status — shown under the name on the hero + /u/ page */}
+              <div>
+                <div className="flex items-center justify-between gap-2">
+                  <label className="flex items-center gap-1.5 text-xs font-medium text-slate-300">
+                    <Radio className="h-3.5 w-3.5 text-emerald-400" /> Status line
+                  </label>
+                  <span className={`font-mono text-[10px] ${statusLine.length > 70 ? 'text-amber-300' : 'text-slate-500'}`}>
+                    {statusLine.length}/80
+                  </span>
+                </div>
+                <input
+                  type="text"
+                  maxLength={80}
+                  value={statusLine}
+                  onChange={(e) => setStatusLine(e.target.value)}
+                  placeholder="🔨 Building a Discord moderation bot"
+                  className="mt-1 w-full rounded-xl border border-white/10 bg-slate-900 px-3.5 py-2 text-xs text-white placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none"
+                />
+                <p className="mt-1 text-[10px] text-slate-500">
+                  One line under your name (80 chars max, emojis welcome) — updates live in the preview above.
+                </p>
+              </div>
+
+              {/* Published links — label + validated https URL, max 5 */}
+              <div>
+                <div className="flex items-center justify-between gap-2">
+                  <label className="flex items-center gap-1.5 text-xs font-medium text-slate-300">
+                    <Link2 className="h-3.5 w-3.5 text-cyan-400" /> Profile links
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setLinks([...links, { label: '', url: '' }])}
+                    disabled={links.length >= 5}
+                    className="rounded-lg border border-white/15 bg-slate-900 px-2 py-0.5 text-[10px] font-semibold text-slate-300 transition-colors hover:border-cyan-400/50 hover:text-cyan-200 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    + Add link ({links.length}/5)
+                  </button>
+                </div>
+                {links.length === 0 ? (
+                  <p className="mt-1 text-[10px] text-slate-500">
+                    No links yet — publish up to 5 (GitHub, portfolio, Discord…). They appear as chips on your public page.
+                  </p>
+                ) : (
+                  <div className="mt-1.5 space-y-1.5">
+                    {links.map((l, i) => (
+                      <div key={i} className="flex gap-1.5">
+                        <input
+                          type="text"
+                          maxLength={30}
+                          value={l.label}
+                          placeholder="Label"
+                          onChange={(e) => setLinks(links.map((x, j) => (j === i ? { ...x, label: e.target.value } : x)))}
+                          className="w-28 shrink-0 rounded-xl border border-white/10 bg-slate-900 px-2.5 py-2 text-xs text-white placeholder:text-slate-600 focus:border-cyan-500 focus:outline-none"
+                        />
+                        <input
+                          type="url"
+                          value={l.url}
+                          placeholder="https://..."
+                          onChange={(e) => setLinks(links.map((x, j) => (j === i ? { ...x, url: e.target.value } : x)))}
+                          className="min-w-0 flex-1 rounded-xl border border-white/10 bg-slate-900 px-2.5 py-2 font-mono text-[11px] text-white placeholder:text-slate-600 focus:border-cyan-500 focus:outline-none"
+                        />
+                        <button
+                          type="button"
+                          aria-label="Remove link"
+                          onClick={() => setLinks(links.filter((_, j) => j !== i))}
+                          className="shrink-0 rounded-xl border border-white/10 px-2 text-slate-500 transition-colors hover:border-red-500/40 hover:text-red-300"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <p className="mt-1 text-[10px] text-slate-500">
+                  https:// URLs only (validated server-side) — never stored or rendered otherwise.
                 </p>
               </div>
 

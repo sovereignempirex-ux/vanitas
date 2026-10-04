@@ -137,7 +137,10 @@ const AppContent: React.FC = () => {
   return (
     <div className="min-h-screen vnt-app-bg text-slate-100 flex flex-col">
       {/* Top Navigation Bar */}
-      <Header onOpenCommandPalette={() => setIsCommandPaletteOpen(true)} />
+      <Header
+        onOpenCommandPalette={() => setIsCommandPaletteOpen(true)}
+        onToggleSidebar={() => setIsSidebarMobileOpen((open) => !open)}
+      />
 
       {/* Main Framework Body */}
       <div className="flex flex-1">

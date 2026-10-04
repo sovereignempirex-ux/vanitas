@@ -931,6 +931,11 @@ alter table if exists public.users add column if not exists bio text not null de
 -- Profile accent colour: user-chosen #RRGGBB that tints the profile banner
 -- ('' = keep the default gradient). Validated at the API before it is stored.
 alter table if exists public.users add column if not exists accent_color text not null default '';
+-- Profile extras: a single-line status under the name and the account's
+-- published links (jsonb array of {label,url} \u2014 every field validated at the
+-- API before it is stored; '' / [] clear the value).
+alter table if exists public.users add column if not exists status_line text not null default '';
+alter table if exists public.users add column if not exists profile_links jsonb not null default '[]';
 -- TOTP replay watermark: highest time-step already spent on a login.
 alter table if exists public.users add column if not exists totp_last_step bigint not null default 0;
 -- Invite tokens are live credentials (some grant ADMIN): look them up by
@@ -1225,6 +1230,8 @@ function rowToUser(row) {
     avatarUrl: row.avatar_url || DEFAULT_AVATAR,
     bio: row.bio || void 0,
     accentColor: row.accent_color || void 0,
+    statusLine: row.status_line || void 0,
+    profileLinks: Array.isArray(row.profile_links) ? row.profile_links : [],
     role: row.role === "ADMIN" ? "ADMIN" : "USER",
     verification: ["USER", "DEVELOPER", "ADMIN"].includes(row.verification) ? row.verification : "",
     twoFactorEnabled: !!row.two_factor_enabled,
@@ -1291,10 +1298,21 @@ async function updateProfile(userId, updates) {
               avatar_url = $3,
               username = coalesce($4, username),
               bio = coalesce($5, bio),
-              accent_color = coalesce($6, accent_color)
+              accent_color = coalesce($6, accent_color),
+              status_line = coalesce($7, status_line),
+              profile_links = coalesce($8::jsonb, profile_links)
         where id = $1
         returning *`,
-      [userId, updates.name, updates.avatarUrl, updates.username ?? null, updates.bio ?? null, updates.accentColor ?? null]
+      [
+        userId,
+        updates.name,
+        updates.avatarUrl,
+        updates.username ?? null,
+        updates.bio ?? null,
+        updates.accentColor ?? null,
+        updates.statusLine ?? null,
+        updates.profileLinks != null ? JSON.stringify(updates.profileLinks) : null
+      ]
     );
     const user2 = result.rows[0] ? rowToUser(result.rows[0]) : null;
     if (user2) invalidateResolveCache(userId);
@@ -1307,6 +1325,8 @@ async function updateProfile(userId, updates) {
   if (updates.username !== void 0) user.username = updates.username;
   if (updates.bio !== void 0) user.bio = updates.bio || void 0;
   if (updates.accentColor !== void 0) user.accentColor = updates.accentColor || void 0;
+  if (updates.statusLine !== void 0) user.statusLine = updates.statusLine || void 0;
+  if (updates.profileLinks !== void 0) user.profileLinks = updates.profileLinks;
   invalidateResolveCache(userId);
   return user;
 }
@@ -1326,6 +1346,8 @@ async function findPublicProfile(username) {
     avatarUrl: user.avatarUrl,
     bio: user.bio || "",
     accentColor: user.accentColor || void 0,
+    statusLine: user.statusLine || void 0,
+    links: user.profileLinks || [],
     role: user.role,
     verification: user.verification,
     createdAt: user.createdAt,
@@ -4159,8 +4181,33 @@ async function buildApp() {
       }
       accentColor = value;
     }
+    let statusLine;
+    if (typeof req.body?.statusLine === "string") {
+      const value = sanitizeText(req.body.statusLine, 400).replace(/\s+/g, " ").trim();
+      if (value.length > 80) {
+        return res.status(400).json({ error: "Status line must be 80 characters or fewer" });
+      }
+      statusLine = value;
+    }
+    let profileLinks;
+    if (req.body?.links !== void 0) {
+      const raw = req.body.links;
+      if (!Array.isArray(raw)) return res.status(400).json({ error: "Links must be an array" });
+      if (raw.length > 5) return res.status(400).json({ error: "Up to 5 profile links are allowed" });
+      const links = [];
+      for (const item of raw) {
+        const label = typeof item?.label === "string" ? sanitizeText(item.label, 40).trim() : "";
+        const url = typeof item?.url === "string" ? item.url.trim() : "";
+        if (!label) return res.status(400).json({ error: "Every link needs a label" });
+        if (!/^https:\/\/[^\s]{5,500}$/.test(url)) {
+          return res.status(400).json({ error: `Link "${label}" must be an https:// URL` });
+        }
+        links.push({ label, url });
+      }
+      profileLinks = links;
+    }
     try {
-      const updated = await updateProfile(actor.id, { name, avatarUrl, username, bio, accentColor });
+      const updated = await updateProfile(actor.id, { name, avatarUrl, username, bio, accentColor, statusLine, profileLinks });
       if (!updated) return res.status(404).json({ error: "Account not found" });
       if (username) {
         persistAuditLog({
