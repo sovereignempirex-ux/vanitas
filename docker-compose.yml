@@ -6,8 +6,10 @@ services:
       POSTGRES_DB: vanitas
       POSTGRES_USER: vanitas
       # Single source of truth for the DB password: POSTGRES_PASSWORD in .env.
-      # Production: POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?set a strong password}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-dev-only}
+      # `:?` (not `:-`) makes `docker compose up` FAIL FAST when it is missing
+      # or empty. The old `:-change-me-dev-only` fallback silently booted
+      # Postgres with a well-known password straight out of the repository.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD missing - copy .env.example to .env and set it}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./supabase/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
@@ -36,7 +38,7 @@ services:
       # Derived from POSTGRES_PASSWORD so the app can never drift from the
       # password Postgres was initialised with (env_file's localhost URL is
       # for `npm run dev` outside Docker; this entry overrides it in-container).
-      DATABASE_URL: postgresql://vanitas:${POSTGRES_PASSWORD:-change-me-dev-only}@postgres:5432/vanitas
+      DATABASE_URL: postgresql://vanitas:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD missing - copy .env.example to .env and set it}@postgres:5432/vanitas
       # Set ADMIN_API_TOKEN / FRONTEND_URL in .env (never commit .env)
     depends_on:
       postgres:
