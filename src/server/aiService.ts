@@ -1,5 +1,5 @@
 import { GoogleGenAI } from '@google/genai';
-import { AiToneStyle, CodeDiagnosisRequest, CodeDiagnosisResult } from '../types.ts';
+import { AiToneStyle, CodeDiagnosisRequest, CodeDiagnosisResult, BotIntegration, ApiKey } from '../types.ts';
 
 let aiClient: GoogleGenAI | null = null;
 
@@ -1138,9 +1138,9 @@ export async function performSemanticSearch(
   query: string,
   corpus: {
     docs: any[];
-    keys: any[];
+    keys: ApiKey[];
     status: any[];
-    bots: any[];
+    bots: BotIntegration[];
     threats: any[];
     releases: any[];
   }
@@ -1220,13 +1220,13 @@ export async function performSemanticSearch(
     for (const bot of corpus.bots) {
       indexedItems.push({
         id: `bot_${bot.id}`,
-        title: `Bot: ${bot.name} (${bot.type.toUpperCase()})`,
+        title: `Bot: ${bot.name} (${bot.platform.toUpperCase()})`,
         category: 'bot_gateway',
-        snippet: `Status: ${bot.status} | Handlers: ${bot.eventHandlers?.join(', ')} | Rate: ${bot.rateLimitPerMin} RPM`,
+        snippet: `Status: ${bot.status} | Commands executed: ${bot.commandsExecuted} | Last ping: ${bot.lastPingAt}`,
         targetView: 'bot-gateway',
         actionLabel: 'Open Bot Gateway',
-        tags: ['bot', bot.type, bot.status, ...(bot.eventHandlers || [])],
-        rawText: `${bot.name} ${bot.type} ${bot.status} ${bot.eventHandlers?.join(' ')}`.toLowerCase(),
+        tags: ['bot', bot.platform, bot.status],
+        rawText: `${bot.name} ${bot.platform} ${bot.status} ${bot.apiKeyId || ''}`.toLowerCase(),
       });
     }
   }

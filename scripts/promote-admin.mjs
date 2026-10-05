@@ -22,9 +22,11 @@ if (!url) {
   process.exit(1);
 }
 
+const needsSsl = /supabase\.co|neon\.tech|sslmode=require/.test(url);
 const pool = new Pool({
   connectionString: url,
-  ssl: /supabase\.co|neon\.tech|sslmode=require/.test(url) ? { rejectUnauthorized: false } : undefined,
+  // Verify the certificate unless explicitly opted out (see src/server/pg.ts).
+  ssl: needsSsl ? { rejectUnauthorized: process.env.PG_INSECURE_SSL !== 'true' } : undefined,
 });
 
 const mask = (email) => {

@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  lint:
+    name: Type check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript (tsc --noEmit)
+        run: npm run lint
+
+      - name: Build (vite + esbuild bundles)
+        run: npm run build
+
+  # Fails the build if a tracked .env (or any other ignore-pattern file)
+  # ever gets committed again. See .gitignore.
+  secrets:
+    name: No tracked secrets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assert .env / build output are not tracked
+        run: |
+          set -eu
+          bad=$(git ls-files \
+            | grep -E '^(\.env($|\..+)|dist/|vanitas \(1\)/|node_modules/)' \
+            | grep -v '^\.env\.example$' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::Secret or generated files are tracked by git:
+          $bad"
+            exit 1
+          fi
+          echo "OK - no tracked secrets or generated artifacts."

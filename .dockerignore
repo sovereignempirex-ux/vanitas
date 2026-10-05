@@ -1,0 +1,16 @@
+# Keep the image small, the build reproducible and secrets out of the layers.
+# `COPY . .` would otherwise ship .env, .git and a Windows node_modules tree.
+
+node_modules
+dist
+build
+coverage
+.git
+.vercel
+.env
+.env.*
+!.env.example
+vanitas (1)
+*.log
+.DS_Store
+.github

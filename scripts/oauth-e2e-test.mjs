@@ -68,11 +68,28 @@ const mock = http.createServer((req, res) => {
 });
 
 /** Walk the redirect chain until it reaches the SPA (#vnt_oauth / #vnt_error). */
-async function walk(url) {
+// Minimal cookie jar: a browser would send the HttpOnly state cookie back on
+// the provider's top-level redirect, so the harness has to as well.
+async function walk(url, jar = new Map()) {
   let current = url;
   const hops = [];
   for (let i = 0; i < 8; i++) {
-    const res = await fetch(current, { redirect: 'manual' });
+    const cookieHeader = [...jar.entries()].map(([n, v]) => `${n}=${v}`).join('; ');
+    const res = await fetch(current, {
+      redirect: 'manual',
+      headers: cookieHeader ? { cookie: cookieHeader } : {},
+    });
+    const setCookies =
+      typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
+    for (const sc of setCookies) {
+      const pair = sc.split(';')[0];
+      const eq = pair.indexOf('=');
+      if (eq < 0) continue;
+      const name = pair.slice(0, eq).trim();
+      const value = pair.slice(eq + 1).trim();
+      if (!value || /max-age=0\b/i.test(sc)) jar.delete(name);
+      else jar.set(name, value);
+    }
     if (res.status >= 300 && res.status < 400) {
       const loc = res.headers.get('location');
       hops.push(loc);
@@ -207,11 +224,20 @@ async function main() {
     check('OAuth links to SAME account by verified email', userC?.user?.id === regJson?.user?.id, { oauth: userC?.user?.id, pw: regJson?.user?.id });
 
     console.log('— tampered state rejected —');
-    hops = await walk(`${appBase}/api/v1/social/discord`);
+    const jar = new Map();
+    hops = await walk(`${appBase}/api/v1/social/discord`, jar);
     const tampered = hops[0].replace(/state=([^&]+)/, (m, s) => `state=${s.slice(0, -2)}xx`);
-    const hops2 = await walk(tampered);
+    const hops2 = await walk(tampered, jar); // same browser, so the nonce cookie IS present
     check('tampered state → invalid_state', oauthErrorFrom(hops2) === 'invalid_state', hops2);
     check('tampered state issued NO token', tokenFrom(hops2) === null, hops2);
+
+    console.log('— Login CSRF: a state is useless in another browser —');
+    hops = await walk(`${appBase}/api/v1/social/discord`, jar);
+    // Replay the attacker-obtained callback URL in a DIFFERENT browser (empty
+    // jar = no vnt_oauth_state cookie). It must not produce a session.
+    const hops3 = await walk(hops[0], new Map());
+    check('state without the starting browser cookie → invalid_state', oauthErrorFrom(hops3) === 'invalid_state', hops3);
+    check('cross-browser replay issued NO token', tokenFrom(hops3) === null, hops3);
 
     console.log('— unverified email never takes over an account —');
     await setMockProfile({ ...currentProfile, id: 'disc_777', email: 'unverified_target@example.com', verified: false });

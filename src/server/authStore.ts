@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { databasePool } from './pg.ts';
+import { databasePool, ensureSchema } from './pg.ts';
 import { db } from './db.ts';
 import { secureId } from './security.ts';
 import type { User, UserRole, PublicProfile, ProfileLink } from '../types.ts';
@@ -18,23 +18,39 @@ const DEFAULT_AVATAR = '/images/avatar-default.svg';
 
 export type AuthOutcome = { ok: true; user: User } | { ok: false; status: number; error: string };
 
+/** In-memory only: the single "first account bootstraps as ADMIN" claim. */
+let bootstrapRoleClaimed = false;
+
 /**
  * ADMIN if the email is listed in ADMIN_EMAILS; otherwise USER — except the
  * very first account on a fresh database, which bootstraps as ADMIN.
  * Shared by password registration and OAuth sign-in.
+ *
+ * `queryable` MUST already hold `pg_advisory_xact_lock('vanitas.user_bootstrap')`
+ * when the caller is about to INSERT: the count and the insert have to happen
+ * under the same lock, otherwise two signups racing on an empty database both
+ * read 0 rows and BOTH come out as ADMIN. In-memory mode uses a synchronous
+ * claim flag for exactly the same reason (JS is single-threaded, so checking
+ * and claiming in one tick is atomic).
  */
-async function pickInitialRole(email: string): Promise<UserRole> {
+async function pickInitialRole(email: string, queryable?: { query: (sql: string, params?: unknown[]) => Promise<any> }): Promise<UserRole> {
   if (isAdminEmail(email)) return 'ADMIN';
   if (databasePool) {
-    const count = await databasePool.query('select count(*)::int as n from public.users');
+    const source = queryable || databasePool;
+    const count = await source.query('select count(*)::int as n from public.users');
     if ((count.rows[0]?.n ?? 0) === 0) return 'ADMIN';
-  } else if (db.users.length === 0) {
+  } else if (db.users.length === 0 && !bootstrapRoleClaimed) {
     // In-memory mode mirrors PostgreSQL: the very first account bootstraps
-    // as ADMIN so a fresh install always has an owner.
+    // as ADMIN so a fresh install always has an owner. The flag makes the
+    // check-and-claim atomic within one event-loop turn.
+    bootstrapRoleClaimed = true;
     return 'ADMIN';
   }
   return 'USER';
 }
+
+/** Serialises the "who is the first ADMIN" decision across concurrent signups. */
+const BOOTSTRAP_LOCK = "select pg_advisory_xact_lock(hashtext('vanitas.user_bootstrap'))";
 
 // ---- password hashing -----------------------------------------------------
 
@@ -185,34 +201,50 @@ const memoryPasswords = new Map<string, { userId: string; hash: string }>();
 const memorySessions = new Map<string, { userId: string; expiresAt: number; ip?: string; userAgent?: string; createdAt?: number }>();
 /** Short-lived cache so a session token costs one map lookup per request. */
 const resolveCache = new Map<string, { user: User | null; until: number }>();
+/** Hard ceiling so a burst of distinct tokens can never grow the map without bound. */
+const RESOLVE_CACHE_MAX = 5000;
 
 // ---- accounts -------------------------------------------------------------
 
 export async function createAccount(params: { email: string; password: string; name: string }): Promise<AuthOutcome> {
   const email = params.email.trim().toLowerCase();
   const passwordHash = await hashPassword(params.password);
-  const role = await pickInitialRole(email);
 
   if (databasePool) {
+    const client = await databasePool.connect();
     try {
-      const existing = await databasePool.query('select 1 from public.users where lower(email) = $1', [email]);
-      if (existing.rowCount) return { ok: false, status: 409, error: 'An account with this email already exists' };
+      await client.query('begin');
+      // Serialise the bootstrap decision WITH the insert. Without the lock two
+      // signups racing on a fresh database both read 0 users and both become
+      // ADMIN — a silent privilege-escalation race.
+      await client.query(BOOTSTRAP_LOCK);
 
+      const existing = await client.query('select 1 from public.users where lower(email) = $1', [email]);
+      if (existing.rowCount) {
+        await client.query('rollback');
+        return { ok: false, status: 409, error: 'An account with this email already exists' };
+      }
+
+      const role = await pickInitialRole(email, client);
       const id = secureId('usr');
       const username = await uniqueUsernameFromEmailPg(email);
-      const result = await databasePool.query(
+      const result = await client.query(
         `insert into public.users (id, email, name, username, avatar_url, role, password_hash, created_at, last_login_at)
          values ($1, lower($2), $3, $4, $5, $6, $7, now(), now())
          returning *`,
         [id, email, params.name, username, DEFAULT_AVATAR, role, passwordHash],
       );
+      await client.query('commit');
       return { ok: true, user: rowToUser(result.rows[0]) };
     } catch (err: any) {
+      await client.query('rollback').catch(() => undefined);
       if (err?.code === '23505') return { ok: false, status: 409, error: 'An account with this email already exists' };
       if (err?.code === '42P01' || err?.code === '42703') {
         throw new Error('users table missing — run: npm run db:migrate (supabase/schema.sql)');
       }
       throw err;
+    } finally {
+      client.release();
     }
   }
 
@@ -220,6 +252,8 @@ export async function createAccount(params: { email: string; password: string; n
   if (db.users.some((u) => u.email.toLowerCase() === email)) {
     return { ok: false, status: 409, error: 'An account with this email already exists' };
   }
+  // Picked only now: a rejected registration must not consume the bootstrap claim.
+  const role = await pickInitialRole(email);
   const user: User = {
     id: secureId('usr'),
     email,
@@ -335,8 +369,21 @@ export async function findPublicProfile(username: string): Promise<PublicProfile
  */
 export async function forgetAccount(userId: string): Promise<void> {
   if (databasePool) {
-    await databasePool.query('delete from public.api_keys where owner_id = $1', [userId]);
-    await databasePool.query('delete from public.users where id = $1', [userId]);
+    // One transaction: keys and the account row must go together. Two separate
+    // statements could split (keys deleted, user still alive) on a failure or
+    // a concurrent write.
+    const client = await databasePool.connect();
+    try {
+      await client.query('begin');
+      await client.query('delete from public.api_keys where owner_id = $1', [userId]);
+      await client.query('delete from public.users where id = $1', [userId]);
+      await client.query('commit');
+    } catch (err) {
+      await client.query('rollback').catch(() => undefined);
+      throw err;
+    } finally {
+      client.release();
+    }
   } else {
     const idx = db.users.findIndex((u) => u.id === userId);
     if (idx !== -1) {
@@ -347,6 +394,8 @@ export async function forgetAccount(userId: string): Promise<void> {
     for (const [key, rec] of memorySessions) if (rec.userId === userId) memorySessions.delete(key);
     for (const [key, uid] of memoryIdentities) if (uid === userId) memoryIdentities.delete(key);
     memoryTwoFactor.delete(userId);
+    memoryTotpStep.delete(userId);
+    memoryTotpFailures.delete(userId);
   }
   // Cached session resolutions must not outlive the account they point to.
   resolveCache.clear();
@@ -368,8 +417,12 @@ export async function getTotpLastStep(userId: string): Promise<number> {
       const result = await databasePool.query('select totp_last_step from public.users where id = $1', [userId]);
       return Number(result.rows[0]?.totp_last_step || 0);
     } catch (err) {
-      console.error('[auth] totp step read failed:', (err as Error).message);
-      return 0; // fail open on the watermark only — the code itself still verifies
+      // Fail CLOSED. Returning 0 (the old behaviour) meant that during any
+      // storage blip an already-spent code was accepted again — turning a
+      // read error into a replay window. A rejected login costs one retry;
+      // a replayed code costs the guarantee 2FA is there for.
+      console.error('[auth] totp step read failed — rejecting login:', (err as Error).message);
+      return Number.MAX_SAFE_INTEGER;
     }
   }
   return memoryTotpStep.get(userId) || 0;
@@ -384,6 +437,103 @@ export async function setTotpLastStep(userId: string, step: number): Promise<voi
     }
   } else {
     memoryTotpStep.set(userId, step);
+  }
+}
+
+// ---- TOTP brute-force lockout ---------------------------------------------
+// A 6-digit code inside the +/-1 drift window has only ~3 valid values, so
+// "reject wrong codes" alone does not protect 2FA: at 60 attempts/min/IP an
+// attacker reaches a 63% chance in a few days. After TOTP_MAX_ATTEMPTS wrong
+// codes the account is cooled down for a growing window (5m → 10m → 20m → 30m
+// cap). Counters live in users.totp_failed_attempts / totp_locked_until in PG
+// mode and in-process otherwise.
+const TOTP_MAX_ATTEMPTS = 5;
+const TOTP_MAX_LOCK_MS = 30 * 60_000;
+
+const memoryTotpFailures = new Map<string, { attempts: number; lockedUntil: number }>();
+
+function totpLockDurationMs(attempts: number): number {
+  // 5th failure locks for 5 minutes, each further one doubles it, capped.
+  const step = Math.max(1, attempts - TOTP_MAX_ATTEMPTS + 1);
+  return Math.min(5 * 60_000 * 2 ** (step - 1), TOTP_MAX_LOCK_MS);
+}
+
+function toIso(value: unknown): string {
+  if (value instanceof Date) return value.toISOString();
+  return String(value || '');
+}
+
+/** Milliseconds left on this account's 2FA lockout (0 = not locked). */
+export async function getTotpLockoutMs(userId: string): Promise<number> {
+  if (databasePool) {
+    try {
+      await ensureSchema(); // columns may not exist on a legacy database yet
+      const result = await databasePool.query(
+        'select totp_locked_until from public.users where id = $1',
+        [userId],
+      );
+      const raw = result.rows[0]?.totp_locked_until;
+      if (!raw) return 0;
+      const until = Date.parse(toIso(raw));
+      return Number.isFinite(until) && until > Date.now() ? until - Date.now() : 0;
+    } catch (err) {
+      // Fail CLOSED: an unreadable lockout state must not become a free pass
+      // to keep guessing codes while storage is degraded.
+      console.error('[auth] totp lockout read failed:', (err as Error).message);
+      return 60_000;
+    }
+  }
+  const state = memoryTotpFailures.get(userId);
+  return state && state.lockedUntil > Date.now() ? state.lockedUntil - Date.now() : 0;
+}
+
+/** Count one wrong code; returns the new attempt total and lockout (ms). */
+export async function registerTotpFailure(
+  userId: string,
+): Promise<{ attempts: number; lockedUntilMs: number }> {
+  if (databasePool) {
+    try {
+      await ensureSchema();
+      const r = await databasePool.query(
+        `update public.users
+            set totp_failed_attempts = totp_failed_attempts + 1
+          where id = $1
+          returning totp_failed_attempts`,
+        [userId],
+      );
+      const attempts = Number(r.rows[0]?.totp_failed_attempts ?? 0);
+      let lockedUntilMs = 0;
+      if (attempts >= TOTP_MAX_ATTEMPTS) {
+        lockedUntilMs = Date.now() + totpLockDurationMs(attempts);
+        await databasePool.query('update public.users set totp_locked_until = $2 where id = $1', [
+          userId,
+          new Date(lockedUntilMs),
+        ]);
+      }
+      return { attempts, lockedUntilMs };
+    } catch (err) {
+      console.error('[auth] totp failure persist failed:', (err as Error).message);
+      return { attempts: TOTP_MAX_ATTEMPTS, lockedUntilMs: TOTP_MAX_LOCK_MS };
+    }
+  }
+  const state = memoryTotpFailures.get(userId) || { attempts: 0, lockedUntil: 0 };
+  state.attempts += 1;
+  if (state.attempts >= TOTP_MAX_ATTEMPTS) state.lockedUntil = Date.now() + totpLockDurationMs(state.attempts);
+  memoryTotpFailures.set(userId, state);
+  return { attempts: state.attempts, lockedUntilMs: Math.max(0, state.lockedUntil - Date.now()) };
+}
+
+/** A correct code resets the counter — the lockout is a rate limit, not a ban. */
+export async function clearTotpFailures(userId: string): Promise<void> {
+  memoryTotpFailures.delete(userId);
+  if (!databasePool) return;
+  try {
+    await databasePool.query(
+      'update public.users set totp_failed_attempts = 0, totp_locked_until = null where id = $1',
+      [userId],
+    );
+  } catch (err) {
+    console.error('[auth] totp failure reset failed:', (err as Error).message);
   }
 }
 
@@ -525,8 +675,32 @@ export async function resolveSession(token: string): Promise<User | null> {
     user = db.users.find((u) => u.id === rec.userId) || null;
   }
 
-  resolveCache.set(hash, { user, until: Date.now() + RESOLVE_CACHE_TTL_MS });
+  // Cache POSITIVE resolutions only. Storing `user: null` meant that any peer
+  // spraying random `vnt_sess_` bearers created one unbounded map entry per
+  // distinct value (a memory-leak DoS) while the rate limiter only saw a few
+  // hundred requests per minute — and negative entries would also mask a
+  // freshly revoked session for the whole TTL.
+  if (user) {
+    if (resolveCache.size >= RESOLVE_CACHE_MAX) sweepResolveCache();
+    resolveCache.set(hash, { user, until: Date.now() + RESOLVE_CACHE_TTL_MS });
+  } else {
+    resolveCache.delete(hash);
+  }
   return user;
+}
+
+/** Drop expired entries, then evict the oldest half if the map is still full. */
+function sweepResolveCache(): void {
+  const now = Date.now();
+  for (const [key, rec] of resolveCache) {
+    if (rec.until <= now) resolveCache.delete(key);
+  }
+  if (resolveCache.size < RESOLVE_CACHE_MAX) return;
+  let toDrop = Math.ceil(RESOLVE_CACHE_MAX / 2);
+  for (const key of resolveCache.keys()) {
+    resolveCache.delete(key);
+    if (--toDrop <= 0) break;
+  }
 }
 
 export async function revokeSession(token: string): Promise<void> {
@@ -763,20 +937,36 @@ export async function upsertOAuthUser(p: OAuthIdentityParams): Promise<User> {
         }
       }
 
-      // 3) Brand new account + identity, created atomically (CTE).
-      const finalRole = await pickInitialRole(email || 'oauth@unknown');
-      const id = secureId('usr');
-      const username = await uniqueUsernameFromEmailPg(email || `${provider}${providerId}`);
-      await databasePool.query(
-        `with new_user as (
-           insert into public.users (id, email, name, username, avatar_url, role, password_hash, created_at, last_login_at)
-           values ($1, lower($2), $3, $4, $5, $6, '', now(), now())
-           returning id
-         )
-         insert into public.user_identities (provider, provider_id, user_id)
-         select $7, $8, id from new_user`,
-        [id, email || fallbackOAuthEmail(provider, providerId), name, username, avatarUrl, finalRole, provider, providerId],
-      );
+      // 3) Brand new account + identity, created atomically (CTE) — and under
+      //    the same bootstrap lock as createAccount, so a fresh database can
+      //    never mint two ADMINs from two racing signups (password + OAuth).
+      const client = await databasePool.connect();
+      let finalRole: UserRole;
+      let id: string;
+      let username: string;
+      try {
+        await client.query('begin');
+        await client.query(BOOTSTRAP_LOCK);
+        finalRole = await pickInitialRole(email || 'oauth@unknown', client);
+        id = secureId('usr');
+        username = await uniqueUsernameFromEmailPg(email || `${provider}${providerId}`);
+        await client.query(
+          `with new_user as (
+             insert into public.users (id, email, name, username, avatar_url, role, password_hash, created_at, last_login_at)
+             values ($1, lower($2), $3, $4, $5, $6, '', now(), now())
+             returning id
+           )
+           insert into public.user_identities (provider, provider_id, user_id)
+           select $7, $8, id from new_user`,
+          [id, email || fallbackOAuthEmail(provider, providerId), name, username, avatarUrl, finalRole, provider, providerId],
+        );
+        await client.query('commit');
+      } catch (err) {
+        await client.query('rollback').catch(() => undefined);
+        throw err;
+      } finally {
+        client.release();
+      }
       const created = await databasePool.query('select * from public.users where id = $1', [id]);
       return withConnectedAccount(rowToUser(created.rows[0]), provider);
     } catch (err: any) {

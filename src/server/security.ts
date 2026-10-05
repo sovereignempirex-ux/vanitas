@@ -104,15 +104,26 @@ export function csvCell(value: unknown): string {
 // In-memory sliding-window rate limiter (per-IP). For multi-instance prod,
 // put Redis/Upstash in front — this prevents single-node abuse + DoS.
 //
-// Keyed by ip + path by default. Dynamic segments (`/invites/<token>`,
-// `/profiles/<name>`) would otherwise mint a fresh bucket per value, letting
-// an attacker spray thousands of distinct URLs past any per-route ceiling —
-// those routes opt in with `perIpOnly`, which buckets purely per IP. The map
-// is also swept periodically so unique-path spraying cannot grow it forever.
+// Bucket keys
+// ----------
+// Every limiter INSTANCE gets its own namespace. Without it, two per-IP
+// limiters (invite preview + public profile) shared one `${ip}:*` bucket, so
+// hitting one route silently consumed the other's budget.
+//
+// By default the bucket includes the request path. That is only correct for
+// STATIC paths: with a dynamic segment (`/invites/<token>`, `/profiles/<name>`,
+// `/comments/<docId>`) every distinct value mints a brand-new bucket, which
+// lets an attacker spray unlimited distinct URLs past any ceiling. Routes whose
+// path contains a `:param` therefore opt in with `perIpOnly: true` — their
+// ceiling is then purely per IP, whatever the path looks like.
+//
+// The map is swept periodically so unique-path spraying cannot grow it forever.
 // ---------------------------------------------------------------------------
 const hits = new Map<string, number[]>();
 let sweepCounter = 0;
 let maxWindowMs = 60_000;
+let limiterSeq = 0;
+
 function pruneHits(): void {
   const now = Date.now();
   for (const [key, arr] of hits) {
@@ -121,11 +132,13 @@ function pruneHits(): void {
     else hits.set(key, kept);
   }
 }
+
 export function rateLimit({ windowMs = 60_000, max = 120, perIpOnly = false }: { windowMs?: number; max?: number; perIpOnly?: boolean }) {
   if (windowMs > maxWindowMs) maxWindowMs = windowMs;
+  const namespace = ++limiterSeq;
   return (req: Request, res: Response, next: NextFunction) => {
     const ip = req.ip || req.socket.remoteAddress || 'unknown';
-    const key = perIpOnly ? `${ip}:*` : `${ip}:${req.path}`;
+    const key = perIpOnly ? `${ip}:*:l${namespace}` : `${ip}:l${namespace}:${req.path}`;
     const now = Date.now();
     if (++sweepCounter % 1000 === 0) pruneHits();
     const arr = (hits.get(key) || []).filter((t) => now - t < windowMs);

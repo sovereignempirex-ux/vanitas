@@ -391,8 +391,48 @@ class ApiClient {
     return this.request<{ total: number; limit: number; offset: number; logs: AuditLog[] }>(`/admin/logs?${query.toString()}`);
   }
 
-  getAdminLogsExportUrl() {
-    return `${this.baseUrl}/admin/logs/export`;
+  /**
+   * CSV export needs the Bearer header, which a plain `<a download>` cannot
+   * carry (no cookies in this app) — so we fetch the bytes ourselves and hand
+   * the browser a blob. Resolves only after the download actually starts.
+   */
+  async downloadAdminLogsCsv(): Promise<{ bytes: number; filename: string }> {
+    const token = this.getAuthToken();
+    const headers = new Headers();
+    headers.set('Accept', 'text/csv');
+    if (token) headers.set('Authorization', `Bearer ${token}`);
+
+    const res = await fetch(`${this.baseUrl}/admin/logs/export`, { headers });
+    if (!res.ok) {
+      let errMsg = `Export failed: ${res.status} ${res.statusText}`;
+      try {
+        const body = (await res.json()) as { error?: string };
+        if (body?.error) errMsg = body.error;
+      } catch {
+        // non-JSON error body (e.g. HTML) — keep the status text
+      }
+      const error: Error & { status?: number } = new Error(errMsg);
+      error.status = res.status;
+      throw error;
+    }
+
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const filename =
+      disposition.match(/filename="([^"]+)"/)?.[1] || `vanitas_audit_logs_${Date.now()}.csv`;
+
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    // Revoke on the next tick: revoking synchronously can cancel the download
+    // in some browsers.
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+    return { bytes: blob.size, filename };
   }
 
   async deleteAdminUser(id: string) {

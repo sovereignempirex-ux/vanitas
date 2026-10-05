@@ -19,6 +19,7 @@
 import crypto from 'crypto';
 import type { NextFunction, Request, Response } from 'express';
 import { db, hashApiKeySecret } from './db.ts';
+import { scheduleUsageFlush } from './apiKeyStore.ts';
 import type { ApiKey, PermissionScope } from '../types.ts';
 
 const MAX_KEY_LENGTH = 300;
@@ -360,6 +361,10 @@ async function runApiKeyAuth(req: Request, res: Response, next: NextFunction): P
   key.currentUsageThisMonth = (key.currentUsageThisMonth || 0) + 1;
   key.currentRpmUsage = decision.windowCount;
   key.lastUsedAt = new Date().toISOString();
+  // Mirror the counters to PostgreSQL so a deploy does not reset every key's
+  // monthly quota to zero. Throttled to once per minute per key and patched
+  // with jsonb_set(), so it can never undo a concurrent revoke/rotate.
+  scheduleUsageFlush(key);
 
   (req as any).apiKey = key;
   next();

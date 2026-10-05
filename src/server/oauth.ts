@@ -93,18 +93,44 @@ export function listConfiguredProviders(): Record<OAuthProvider, boolean> {
 
 // ---------------------------------------------------------------------------
 // Signed state (CSRF protection) — HMAC-SHA256 keyed on the client_secret
+//
+// The signature alone only proves WE issued this state and that it is fresh.
+// It does not prove it was issued to THIS browser: an attacker who completes
+// the provider flow with their own account can hand the victim a ready-made
+// `?code&state` URL, and the victim's browser would then be signed into the
+// ATTACKER's account (classic "Login CSRF" — used to log a target into a
+// poisoned session, or to silently link an attacker identity to a victim's
+// account).
+//
+// So the state also carries a per-flow `nonce` that is written to an HttpOnly
+// cookie on the browser that started the flow and demanded back on the
+// callback. Without the matching cookie the state verifies as invalid. A
+// cookie keeps this stateless across serverless instances (no shared storage)
+// while still binding the round-trip to one browser.
 // ---------------------------------------------------------------------------
 
 const STATE_TTL_MS = 10 * 60 * 1000;
+const NONCE_BYTES = 32;
 
-export function signState(provider: OAuthProvider, clientSecret: string): string {
-  const payload = `${provider}.${Date.now() + STATE_TTL_MS}`;
+/** Fresh per-flow nonce; store it in the HttpOnly state cookie. */
+export function newOAuthNonce(): string {
+  return crypto.randomBytes(NONCE_BYTES).toString('base64url');
+}
+
+export function signState(provider: OAuthProvider, clientSecret: string, nonce: string): string {
+  const payload = `${provider}.${Date.now() + STATE_TTL_MS}.${nonce}`;
   const sig = crypto.createHmac('sha256', clientSecret).update(payload).digest('base64url');
   return `${Buffer.from(payload, 'utf8').toString('base64url')}.${sig}`;
 }
 
-export function verifyState(provider: OAuthProvider, clientSecret: string, state: string): boolean {
+export function verifyState(
+  provider: OAuthProvider,
+  clientSecret: string,
+  state: string,
+  nonce: string,
+): boolean {
   if (typeof state !== 'string' || state.length < 8 || state.length > 512) return false;
+  if (typeof nonce !== 'string' || nonce.length < 32) return false; // cookie missing/expired
   const [p64, sig] = state.split('.');
   if (!p64 || !sig) return false;
   const payload = Buffer.from(p64, 'base64url').toString('utf8');
@@ -112,9 +138,16 @@ export function verifyState(provider: OAuthProvider, clientSecret: string, state
   const a = Buffer.from(sig, 'utf8');
   const b = Buffer.from(expected, 'utf8');
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return false;
-  const [p, expStr] = payload.split('.');
+
+  const [p, expStr, stateNonce] = payload.split('.');
   const exp = Number(expStr);
-  return p === provider && Number.isFinite(exp) && exp > Date.now();
+  if (p !== provider || !Number.isFinite(exp) || exp <= Date.now()) return false;
+
+  // Constant-time compare against the cookie of the browser that started it.
+  const nb = Buffer.from(stateNonce || '', 'utf8');
+  const cb = Buffer.from(nonce, 'utf8');
+  if (nb.length !== cb.length || nb.length === 0) return false;
+  return crypto.timingSafeEqual(nb, cb);
 }
 
 // ---------------------------------------------------------------------------

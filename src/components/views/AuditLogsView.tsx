@@ -27,6 +27,11 @@ export const AuditLogsView: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // CSV export state — the request needs the Bearer header, so it runs through
+  // the api client (blob download) instead of a bare <a href>.
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+
   // Filter states
   const [timeframe, setTimeframe] = useState<'24h' | '7d' | '30d' | 'all'>('24h');
   const [category, setCategory] = useState<string>('ALL');
@@ -67,6 +72,19 @@ export const AuditLogsView: React.FC = () => {
     e.preventDefault();
     setPage(0);
     fetchLogs();
+  };
+
+  const handleExportCsv = async () => {
+    if (exporting) return;
+    setExporting(true);
+    setExportError(null);
+    try {
+      await api.downloadAdminLogsCsv();
+    } catch (err: any) {
+      setExportError(err.message || 'CSV export failed');
+    } finally {
+      setExporting(false);
+    }
   };
 
   if (role !== 'ADMIN') {
@@ -111,16 +129,38 @@ export const AuditLogsView: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-3">
-          <a
-            href={api.getAdminLogsExportUrl()}
-            download
-            className="flex items-center gap-2 rounded-xl bg-blue-600/20 border border-blue-500/30 px-4 py-2.5 text-xs font-semibold text-blue-300 hover:bg-blue-600/30 transition-all"
+          <button
+            type="button"
+            onClick={handleExportCsv}
+            disabled={exporting || loading}
+            className="flex items-center gap-2 rounded-xl bg-blue-600/20 border border-blue-500/30 px-4 py-2.5 text-xs font-semibold text-blue-300 hover:bg-blue-600/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            <Download className="h-4 w-4" />
-            <span>Export CSV</span>
-          </a>
+            <Download className={`h-4 w-4 ${exporting ? 'animate-spin' : ''}`} />
+            <span>{exporting ? 'Exporting…' : 'Export CSV'}</span>
+          </button>
         </div>
       </div>
+
+      {/* Failures must be visible: a silent 401/500 used to look like
+          "no matching records", which is a very different thing. */}
+      {(error || exportError) && (
+        <div className="flex items-start gap-3 rounded-2xl border border-rose-500/30 bg-rose-500/10 p-4 text-xs text-rose-300">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <div className="space-y-1">
+            <p className="font-semibold">{exportError ? 'CSV export failed' : 'Failed to load audit logs'}</p>
+            <p className="text-rose-200/80">{exportError || error}</p>
+            {!exportError && (
+              <button
+                type="button"
+                onClick={() => fetchLogs()}
+                className="mt-1 rounded-lg border border-rose-400/30 px-3 py-1 font-semibold text-rose-200 hover:bg-rose-500/20"
+              >
+                Retry
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Filter Controls Bar */}
       <div className="rounded-3xl border border-white/10 bg-slate-950/70 p-4 sm:p-5 backdrop-blur-xl shadow-2xl space-y-4">
@@ -203,7 +243,9 @@ export const AuditLogsView: React.FC = () => {
               ) : logs.length === 0 ? (
                 <tr>
                   <td colSpan={8} className="py-12 text-center text-xs text-slate-500 font-sans">
-                    No matching audit records found for selected filters.
+                    {error
+                      ? 'Audit logs could not be loaded — see the error above.'
+                      : 'No matching audit records found for selected filters.'}
                   </td>
                 </tr>
               ) : (

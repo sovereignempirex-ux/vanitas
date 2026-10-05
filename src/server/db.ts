@@ -65,6 +65,14 @@ export const ALL_SCOPES: { scope: PermissionScope; label: string; group: string;
   { scope: 'settings.write', label: 'Update Platform Settings', group: 'System', adminOnly: true },
 ];
 
+// A scope is grantable only if it is declared above. Kept next to the list so
+// the allow-list and the catalog can never drift apart.
+const KNOWN_SCOPES = new Set<string>(ALL_SCOPES.map((s) => s.scope));
+
+export function isKnownScope(s: unknown): s is PermissionScope {
+  return typeof s === 'string' && KNOWN_SCOPES.has(s);
+}
+
 // ---------------------------------------------------------------------------
 // API key secret hashing
 // Raw secrets (sk_live_vanitas_…) are NEVER persisted. We keep only sha256 hex.
@@ -415,6 +423,13 @@ export class VanitasDatabase {
   }
 
   assertGrantableScopes(requesterRole: UserRole, requestedScopes: PermissionScope[]): void {
+    // Allow-list first: a scope that does not exist in ALL_SCOPES can never be
+    // granted, regardless of role. (Previously only adminOnly scopes were
+    // rejected, so any well-formed but unknown string sailed through.)
+    const unknown = requestedScopes.filter((s) => !isKnownScope(s));
+    if (unknown.length > 0) {
+      throw new Error(`Permission Denied: unknown scope(s): [${unknown.join(', ')}]`);
+    }
     if (requesterRole === 'ADMIN') return;
     const adminOnlyScopes = ALL_SCOPES.filter((s) => s.adminOnly).map((s) => s.scope);
     const forbidden = requestedScopes.filter((s) => adminOnlyScopes.includes(s));

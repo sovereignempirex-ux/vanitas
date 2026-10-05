@@ -1,9 +1,14 @@
+// Load .env BEFORE anything else: pg.ts reads process.env.DATABASE_URL while
+// this module's imports are evaluated, and dotenv never overrides variables
+// already provided by the platform (Vercel/Render/Docker). No .env file → no-op.
+import 'dotenv/config';
+
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import crypto from 'crypto';
-import { db, ALL_SCOPES } from './src/server/db.ts';
+import { db, ALL_SCOPES, isKnownScope } from './src/server/db.ts';
 import { databasePool, ensureSchema } from './src/server/pg.ts';
-import { createAccount, verifyAccount, createSession, resolveSession, revokeSession, upsertOAuthUser, updateProfile, forgetAccount, getTwoFactorSecret, setTwoFactor, findUserById, invalidateResolveCache, rowToUser, usernameValidationError, isUsernameTaken, findPublicProfile, hashPassword, verifyPasswordFor, setPassword, listUserSessions, revokeUserSession, revokeOtherSessions, getTotpLastStep, setTotpLastStep } from './src/server/authStore.ts';
+import { createAccount, verifyAccount, createSession, resolveSession, revokeSession, upsertOAuthUser, updateProfile, forgetAccount, getTwoFactorSecret, setTwoFactor, findUserById, invalidateResolveCache, rowToUser, usernameValidationError, isUsernameTaken, findPublicProfile, hashPassword, verifyPasswordFor, setPassword, listUserSessions, revokeUserSession, revokeOtherSessions, getTotpLastStep, setTotpLastStep, getTotpLockoutMs, registerTotpFailure, clearTotpFailures } from './src/server/authStore.ts';
 import { generateTotpSecret, verifyTotp, verifyTotpStep, totpOtpauthUrl } from './src/server/totp.ts';
 import {
   getProviderConfig,
@@ -11,6 +16,7 @@ import {
   listConfiguredProviders,
   signState,
   verifyState,
+  newOAuthNonce,
   buildAuthorizeUrl,
   callbackUrl,
   appBaseUrl,
@@ -19,6 +25,7 @@ import {
 } from './src/server/oauth.ts';
 import { processAiQuery, processAiQueryStream, diagnoseAndFixCode, performSemanticSearch, searchYouTubeVideos, getLastAiUpstream } from './src/server/aiService.ts';
 import { authenticateApiKey, requireScope, rateWindowStatus, nextQuotaReset } from './src/server/apiKeyAuth.ts';
+import { loadApiKeys, saveApiKey, flushAllUsage } from './src/server/apiKeyStore.ts';
 import { ClientSource, UserRole, PermissionScope, ProductSuggestion, ApiKey, User, AuditLog, VerificationType, AdminInvite, WebhookEndpoint, WebhookDeliveryLog, PublicUserComment, ProfileLink } from './src/types.ts';
 import { getActorUser, requireAdmin, rateLimit, sanitizeText, sanitizeUrl, csvCell, parsePagination, secureToken, secureId, isValidScope } from './src/server/security.ts';
 
@@ -328,8 +335,29 @@ export async function buildApp() {
   // hardening rounds (users.totp_last_step, admin_invites.token_hash, …)
   // exist before the first request that needs them. Per-route
   // ensureSchema() calls remain as the lazy fallback.
+  //
+  // API keys are hydrated AFTER the migration resolves: without this, every
+  // restart silently emptied db.apiKeys and invalidated every key you had
+  // issued. Deliberately not awaited — a slow migration must not delay boot,
+  // and requests that arrive first simply see an empty list for a moment.
   if (databasePool) {
-    ensureSchema().catch((err: Error) => console.error('[schema] boot migrate failed:', err.message));
+    ensureSchema()
+      .then(() => loadApiKeys())
+      .catch((err: Error) => console.error('[schema] boot migrate failed:', err.message));
+  }
+
+  // Best-effort drain of pending API-key usage counters on graceful shutdown
+  // (SIGINT/SIGTERM in Docker/PM2). Serverless instances have no such hook, so
+  // they can lose at most the last minute of usage — never a key.
+  if (databasePool) {
+    let flushed = false;
+    const drain = () => {
+      if (flushed) return;
+      flushed = true;
+      void flushAllUsage();
+    };
+    process.once('SIGINT', drain);
+    process.once('SIGTERM', drain);
   }
 
   // Express 4 does NOT catch rejected promises from async handlers: a
@@ -343,6 +371,37 @@ export async function buildApp() {
         if (!res.headersSent) res.status(500).json({ error: 'Internal server error' });
       });
     };
+  }
+
+  // ---- API key durability (see src/server/apiKeyStore.ts) -------------------
+  // db.apiKeys is the runtime list authenticateApiKey reads; PostgreSQL is what
+  // survives a restart. A mutation may only be reported as successful when both
+  // agree — otherwise we would hand out a secret that no longer authenticates
+  // after the next deploy.
+  async function persistOrRollbackKey(key: ApiKey, res: Response): Promise<boolean> {
+    try {
+      await saveApiKey(key);
+      return true;
+    } catch {
+      db.apiKeys = db.apiKeys.filter((k) => k.id !== key.id);
+      db.systemStats.activeApiKeys = db.apiKeys.filter((k) => k.status === 'active').length;
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Could not persist the API key — nothing was created' });
+      }
+      return false;
+    }
+  }
+
+  async function persistKeyOr500(key: ApiKey, res: Response): Promise<boolean> {
+    try {
+      await saveApiKey(key);
+      return true;
+    } catch {
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'The change was applied in memory but could not be saved — please retry' });
+      }
+      return false;
+    }
   }
 
   // Hardened CORS — same-origin by default, allowlist via FRONTEND_URL.
@@ -369,7 +428,15 @@ export async function buildApp() {
   // Global abuse protection. /api/v1/public/* is the machine-to-machine
   // surface (one key can legitimately burst), so it gets a wider per-IP
   // backstop; per-key limits are enforced by authenticateApiKey itself.
-  const defaultLimiter = rateLimit({ windowMs: 60_000, max: 300 });
+  //
+  // The DEFAULT limiter is deliberately per-IP (not per-path): /api/ contains
+  // many dynamic routes (`/profiles/:username`, `/invites/:token`,
+  // `/comments/:docId`, `/admin/users/:id/role`, …) and a path-keyed bucket
+  // would mint a fresh 300/min budget for every distinct value — i.e. no
+  // ceiling at all for anyone willing to vary the URL. A backstop must be a
+  // per-IP ceiling. The per-route limiters below then add the finer-grained,
+  // static-path budgets on top.
+  const defaultLimiter = rateLimit({ windowMs: 60_000, max: 300, perIpOnly: true });
   const publicLimiter = rateLimit({ windowMs: 60_000, max: 1200 });
   app.use('/api/', (req, res, next) =>
     (req.originalUrl || req.url).startsWith('/api/v1/public/')
@@ -381,7 +448,9 @@ export async function buildApp() {
   // tight enough to make sustained abuse uneconomic, loose enough for the UI.
   app.use('/api/v1/ai/', rateLimit({ windowMs: 60_000, max: 30 }));
   app.use('/api/v1/bot/', rateLimit({ windowMs: 60_000, max: 120 }));
-  app.use('/api/v1/comments/', rateLimit({ windowMs: 60_000, max: 30 }));
+  // Comments are path-parameterised (/comments/:docId and /comments/:id), so a
+  // path-keyed bucket would reset on every distinct doc id — per IP only.
+  app.use('/api/v1/comments/', rateLimit({ windowMs: 60_000, max: 30, perIpOnly: true }));
   app.use('/api/v1/youtube/', rateLimit({ windowMs: 60_000, max: 60 }));
   app.use('/api/v1/search/', rateLimit({ windowMs: 60_000, max: 60 }));
   app.use('/api/v1/semantic-search', rateLimit({ windowMs: 60_000, max: 60 }));
@@ -598,6 +667,38 @@ export async function buildApp() {
 
   function permissionsFor(actor: { role: UserRole }): string[] {
     return actor.role === 'ADMIN' ? ALL_SCOPES.map((s) => s.scope) : ['api.read', 'keys.read', 'keys.create', 'bot.execute'];
+  }
+
+  // ---- 2FA brute-force protection (shared by /auth/login and /2fa/complete) ----
+  // Rejects BEFORE any code comparison while the account is cooling down, and
+  // counts every wrong code. A correct code clears the counter.
+  async function twoFactorLockoutGuard(userId: string): Promise<number> {
+    const lockedMs = await getTotpLockoutMs(userId);
+    return lockedMs > 0 ? Math.ceil(lockedMs / 1000) : 0;
+  }
+
+  function sendLockout(res: Response, seconds: number): void {
+    res.setHeader('Retry-After', String(seconds));
+    res
+      .status(429)
+      .json({
+        twoFactorRequired: true,
+        error: `Too many incorrect codes. Try again in ${formatWait(seconds)}.`,
+        retryAfterSec: seconds,
+      });
+  }
+
+  function formatWait(seconds: number): string {
+    if (seconds < 60) return `${seconds} seconds`;
+    const minutes = Math.ceil(seconds / 60);
+    return `${minutes} minute${minutes === 1 ? '' : 's'}`;
+  }
+
+  /** Count a wrong 2FA code and answer with 429 (locked) or 401 (retry). */
+  async function rejectTwoFactorCode(res: Response, userId: string): Promise<void> {
+    const { lockedUntilMs } = await registerTotpFailure(userId);
+    if (lockedUntilMs > 0) return sendLockout(res, Math.ceil(lockedUntilMs / 1000));
+    res.status(401).json({ twoFactorRequired: true, error: 'Enter the 6-digit code from your authenticator app' });
   }
 
   // Auth Current User — REAL sessions only. No token → 401 (never a fake persona).
@@ -877,13 +978,16 @@ export async function buildApp() {
       // Real 2FA (RFC 6238): once TOTP is enabled the password alone is no
       // longer enough — a valid 6-digit authenticator code is required too.
       if (outcome.user.twoFactorEnabled) {
+        // Lockout first: while an account is cooling down we must not even
+        // attempt a comparison (the counter only moves on a real guess).
+        const lockedSeconds = await twoFactorLockoutGuard(outcome.user.id);
+        if (lockedSeconds > 0) return sendLockout(res, lockedSeconds);
+
         const secret = await getTwoFactorSecret(outcome.user.id);
         const code = sanitizeText(req.body?.code, 16);
         const step = secret ? verifyTotpStep(secret, code) : null;
         if (step === null) {
-          return res
-            .status(401)
-            .json({ twoFactorRequired: true, error: 'Enter the 6-digit code from your authenticator app' });
+          return rejectTwoFactorCode(res, outcome.user.id);
         }
         // Replay protection: one code buys exactly one session. A code that
         // was already spent (or an older step still inside the ±1 drift
@@ -898,6 +1002,7 @@ export async function buildApp() {
         // Burn the step BEFORE creating the session (fail closed: a session
         // error costs the user one refresh cycle, a race costs a second login).
         await setTotpLastStep(outcome.user.id, step);
+        await clearTotpFailures(outcome.user.id);
       }
 
       const token = await createSession(outcome.user, { ip: req.ip, userAgent: String(req.headers['user-agent'] || '') });
@@ -1114,15 +1219,22 @@ export async function buildApp() {
       const result = await findUserById(userId);
       if (!result) return res.status(401).json({ error: 'Two-factor challenge expired — sign in again' });
       if (!result.twoFactorEnabled) return res.status(400).json({ error: 'Two-factor authentication is not enabled' });
+
+      // Same brute-force lockout as /auth/login: this endpoint is reachable
+      // without a session, so an unbounded retry loop here would also defeat 2FA.
+      const lockedSeconds = await twoFactorLockoutGuard(result.id);
+      if (lockedSeconds > 0) return sendLockout(res, lockedSeconds);
+
       const secret = await getTwoFactorSecret(result.id);
       const step = secret ? verifyTotpStep(secret, code) : null;
-      if (step === null) return res.status(400).json({ error: 'Invalid 6-digit code' });
+      if (step === null) return rejectTwoFactorCode(res, result.id);
       // Replay protection: this challenge consumes one code, exactly once.
       const lastStep = await getTotpLastStep(result.id);
       if (step <= lastStep) {
         return res.status(401).json({ error: 'That code was already used — wait for the next one' });
       }
       await setTotpLastStep(result.id, step);
+      await clearTotpFailures(result.id);
       const token = await createSession(result, { ip: req.ip, userAgent: String(req.headers['user-agent'] || '') });
       persistAuditLog({
         actorId: result.id,
@@ -1215,6 +1327,42 @@ export async function buildApp() {
     res.json({ providers: listConfiguredProviders() });
   });
 
+  // ---- OAuth state cookie: binds the provider round-trip to ONE browser ----
+  // Without it, a signed state is transferable — see src/server/oauth.ts.
+  const OAUTH_STATE_COOKIE = 'vnt_oauth_state';
+
+  function isHttpsRequest(req: Request): boolean {
+    if (req.secure) return true;
+    const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+    return proto === 'https' || !!process.env.VERCEL;
+  }
+
+  function readCookie(req: Request, name: string): string {
+    const header = String(req.headers.cookie || '');
+    for (const part of header.split(';')) {
+      const i = part.indexOf('=');
+      if (i < 0 || part.slice(0, i).trim() !== name) continue;
+      try {
+        return decodeURIComponent(part.slice(i + 1).trim());
+      } catch {
+        return '';
+      }
+    }
+    return '';
+  }
+
+  function oauthStateCookie(req: Request, nonce: string): string {
+    const secure = isHttpsRequest(req) ? '; Secure' : '';
+    // SameSite=Lax: the provider returns via a top-level GET navigation, which
+    // still carries Lax cookies — but a cross-site POST/iframe would not.
+    return `${OAUTH_STATE_COOKIE}=${encodeURIComponent(nonce)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600${secure}`;
+  }
+
+  function clearOAuthStateCookie(req: Request): string {
+    const secure = isHttpsRequest(req) ? '; Secure' : '';
+    return `${OAUTH_STATE_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`;
+  }
+
   // Step 1: send the browser to the provider's consent screen.
   // (Path kept OUT of /auth/oauth on purpose: Vercel's edge intercepts
   // "/oauth/<seg>" GETs before the lambda — see comment in oauth.ts.)
@@ -1224,7 +1372,9 @@ export async function buildApp() {
     if (!isOAuthProvider(provider)) return res.redirect(`${base}/login#vnt_error=unknown_provider`);
     const cfg = getProviderConfig(provider);
     if (!cfg) return res.redirect(`${base}/login#vnt_error=not_configured`);
-    const state = signState(provider, cfg.clientSecret);
+    const nonce = newOAuthNonce();
+    const state = signState(provider, cfg.clientSecret, nonce);
+    res.setHeader('Set-Cookie', oauthStateCookie(req, nonce));
     return res.redirect(buildAuthorizeUrl(cfg, state, callbackUrl(req, provider)));
   });
 
@@ -1239,9 +1389,15 @@ export async function buildApp() {
     const code = typeof req.query.code === 'string' ? req.query.code : '';
     const state = typeof req.query.state === 'string' ? req.query.state : '';
     if (typeof req.query.error === 'string' && req.query.error) {
+      res.setHeader('Set-Cookie', clearOAuthStateCookie(req));
       return res.redirect(`${base}/login#vnt_error=provider_denied`);
     }
-    if (!code || !verifyState(provider, cfg.clientSecret, state)) {
+    // Consumed exactly once: signature + freshness + the nonce cookie of the
+    // browser that started this flow. A missing cookie (blocked by the
+    // browser, or a state captured from someone else) fails verification.
+    const nonce = readCookie(req, OAUTH_STATE_COOKIE);
+    res.setHeader('Set-Cookie', clearOAuthStateCookie(req));
+    if (!code || !verifyState(provider, cfg.clientSecret, state, nonce)) {
       return res.redirect(`${base}/login#vnt_error=invalid_state`);
     }
 
@@ -1445,7 +1601,7 @@ export async function buildApp() {
   });
 
   // API Key Create (with assertGrantableScopes + strict validation)
-  app.post('/api/v1/api-keys', (req, res) => {
+  app.post('/api/v1/api-keys', async (req, res) => {
     try {
       const actor = getActorUser(req);
       if (!actor) return res.status(401).json({ error: 'Authentication required' });
@@ -1457,8 +1613,8 @@ export async function buildApp() {
       if (!name || name.length < 3 || !scopes || !Array.isArray(scopes) || scopes.length === 0 || scopes.length > 30) {
         return res.status(400).json({ error: 'Invalid parameters. "name" (3-80 chars) and "scopes" array (1-30) are required.' });
       }
-      if (!scopes.every(isValidScope)) {
-        return res.status(400).json({ error: 'Invalid scope format detected.' });
+      if (!scopes.every((s: unknown) => isValidScope(s) && isKnownScope(s))) {
+        return res.status(400).json({ error: 'Invalid or unknown scope.' });
       }
 
       const result = db.createApiKey({
@@ -1472,6 +1628,12 @@ export async function buildApp() {
         expiresAt: typeof req.body?.expiresAt === 'string' ? req.body.expiresAt.slice(0, 64) : null,
       });
 
+      // Durable before we answer 201. A key that exists only in this process
+      // would evaporate on the next deploy and we would have handed out a
+      // secret that no longer authenticates — so on failure we undo the
+      // in-memory create and say so.
+      if (!(await persistOrRollbackKey(result.key, res))) return;
+
       res.status(201).json({
         key: result.key,
         rawSecret: result.rawSecret,
@@ -1483,12 +1645,15 @@ export async function buildApp() {
   });
 
   // API Key Rotate (Safe Rotation)
-  app.post('/api/v1/api-keys/:id/rotate', (req, res) => {
+  app.post('/api/v1/api-keys/:id/rotate', async (req, res) => {
     try {
       const actor = getActorUser(req);
       if (!actor) return res.status(401).json({ error: 'Authentication required' });
       const id = sanitizeText(req.params.id, 128);
       const result = db.rotateApiKey(id, actor);
+      // Persist BEFORE revealing the new secret: if the write fails, the old
+      // secret must not be left invalidated on disk.
+      if (!(await persistKeyOr500(result.key, res))) return;
       dispatchWebhooks('key.rotated', { keyId: result.key.id, keyName: result.key.name, ownerId: result.key.ownerId, keyPrefix: result.key.keyPrefix });
       res.json({
         key: result.key,
@@ -1501,13 +1666,15 @@ export async function buildApp() {
   });
 
   // API Key Revoke (Safe Revoke)
-  app.delete('/api/v1/api-keys/:id', (req, res) => {
+  app.delete('/api/v1/api-keys/:id', async (req, res) => {
     try {
       const actor = getActorUser(req);
       if (!actor) return res.status(401).json({ error: 'Authentication required' });
       const id = sanitizeText(req.params.id, 128);
       const reason = sanitizeText(req.body?.reason, 200);
       const key = db.revokeApiKey(id, actor, reason || undefined);
+      // Revocation is a security control: never 2xx it unless it is durable.
+      if (!(await persistKeyOr500(key, res))) return;
       dispatchWebhooks('key.revoked', { keyId: key.id, keyName: key.name, ownerId: key.ownerId, reason: reason || 'revoked' });
       res.json({ success: true, key });
     } catch (err: any) {
@@ -1516,16 +1683,17 @@ export async function buildApp() {
   });
 
   // API Key Update Scopes
-  app.patch('/api/v1/api-keys/:id/scopes', (req, res) => {
+  app.patch('/api/v1/api-keys/:id/scopes', async (req, res) => {
     try {
       const actor = getActorUser(req);
       if (!actor) return res.status(401).json({ error: 'Authentication required' });
       const id = sanitizeText(req.params.id, 128);
       const { scopes } = req.body;
-      if (!scopes || !Array.isArray(scopes) || scopes.length > 30 || !scopes.every(isValidScope)) {
+      if (!scopes || !Array.isArray(scopes) || scopes.length > 30 || !scopes.every((s: unknown) => isValidScope(s) && isKnownScope(s))) {
         return res.status(400).json({ error: 'Valid scopes array required (max 30)' });
       }
       const key = db.updateApiKeyScopes(id, scopes, actor);
+      if (!(await persistKeyOr500(key, res))) return;
       res.json({ success: true, key });
     } catch (err: any) {
       res.status(403).json({ error: 'Scope update denied' });
@@ -1533,7 +1701,7 @@ export async function buildApp() {
   });
 
   // API Key Update Rate Limit & Resource Policy
-  app.patch('/api/v1/api-keys/:id/rate-limit', (req, res) => {
+  app.patch('/api/v1/api-keys/:id/rate-limit', async (req, res) => {
     try {
       const actor = getActorUser(req);
       if (!actor) return res.status(401).json({ error: 'Authentication required' });
@@ -1560,6 +1728,7 @@ export async function buildApp() {
         },
         actor
       );
+      if (!(await persistKeyOr500(key, res))) return;
       res.json({ success: true, key });
     } catch (err: any) {
       res.status(400).json({ error: 'Rate limit update failed' });
@@ -1788,11 +1957,18 @@ export async function buildApp() {
   // An invite token IS a credential (some grant ADMIN), so in PostgreSQL mode
   // we never store it raw: lookup goes through sha256(token), display goes
   // through AES-256-GCM ciphertext in the token column (`enc:v1:…`). A database
-  // dump alone can no longer be redeemed. The key derives from DATABASE_URL so
-  // every serverless instance decrypts identically. Memory mode keeps the token
-  // plainly in RAM — process-local, nothing "at rest".
-  const inviteCryptoKey = databasePool && process.env.DATABASE_URL
-    ? crypto.createHash('sha256').update(`vanitas.invite.v1|${process.env.DATABASE_URL}`).digest()
+  // dump alone can no longer be redeemed.
+  //
+  // The key prefers INVITE_ENC_KEY (independent, survives a password rotation).
+  // Deriving it from DATABASE_URL was the old fallback — workable, but it meant
+  // that anyone who read the connection string could decrypt every stored
+  // invite, and rotating the DB password silently invalidated all of them.
+  const inviteCryptoKey = databasePool
+    ? process.env.INVITE_ENC_KEY && process.env.INVITE_ENC_KEY.length >= 32
+      ? crypto.createHash('sha256').update(`vanitas.invite.v1|${process.env.INVITE_ENC_KEY}`).digest()
+      : process.env.DATABASE_URL
+        ? crypto.createHash('sha256').update(`vanitas.invite.v1|${process.env.DATABASE_URL}`).digest()
+        : null
     : null;
 
   function sha256Hex(value: string): string {
@@ -2843,6 +3019,9 @@ export async function buildApp() {
       if (!query || query.length < 2) {
         return res.status(400).json({ error: 'Search query (2-300 chars) is required' });
       }
+      // Optional: resolves the caller so the corpus can be scoped (see below).
+      // The endpoint stays reachable anonymously for public documentation search.
+      const actor = getActorUser(req);
 
       // Documentation endpoints corpus
       const docsCorpus = [
@@ -2886,7 +3065,11 @@ export async function buildApp() {
 
       const result = await performSemanticSearch(query, {
         docs: docsCorpus,
-        keys: db.apiKeys,
+        // API keys and security threats are NOT public corpus material:
+        // a caller only ever searches their OWN keys, and threats (internal
+        // telemetry) are indexed for administrators alone. Anonymous callers
+        // search docs/status/bots/releases only — no cross-tenant metadata.
+        keys: actor ? db.apiKeys.filter((k) => actor.role === 'ADMIN' || k.ownerId === actor.id) : [],
         status: db.systemStats.requestBreakdown.map((r) => ({
           name: r.endpoint,
           uptime: '99.99%',
@@ -2894,7 +3077,7 @@ export async function buildApp() {
           status: r.errorCount > 0 ? 'degraded' : 'operational',
         })),
         bots: db.bots,
-        threats: db.securityThreats,
+        threats: actor?.role === 'ADMIN' ? db.securityThreats : [],
         releases: db.releases,
       });
 

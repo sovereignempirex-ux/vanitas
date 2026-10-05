@@ -3,11 +3,22 @@ import { Pool } from 'pg';
 // PostgreSQL pool with SSL auto-detect (required for Supabase / Neon).
 // Lives in its own module so both server.ts and authStore.ts can use it
 // without circular imports. Server-side only — never expose DATABASE_URL.
+//
+// Certificate verification is ON by default. The previous build passed
+// `rejectUnauthorized: false`, which accepts ANY certificate for the TLS
+// connection — an on-path attacker can present their own cert, terminate the
+// connection and read DATABASE_URL plus every password hash, session hash and
+// API-key hash that crosses it, with no warning anywhere. Only set
+// PG_INSECURE_SSL=true for a self-signed development server you control.
+const sslInsecure = process.env.PG_INSECURE_SSL === 'true';
+
 export const databasePool = process.env.DATABASE_URL
   ? new Pool({
       connectionString: process.env.DATABASE_URL,
       max: 8,
-      ssl: /supabase\.co|neon\.tech|sslmode=require/.test(process.env.DATABASE_URL) ? { rejectUnauthorized: false } : undefined,
+      ssl: /supabase\.co|neon\.tech|sslmode=require/.test(process.env.DATABASE_URL)
+        ? { rejectUnauthorized: !sslInsecure }
+        : undefined,
     })
   : null;
 
@@ -75,6 +86,17 @@ alter table if exists public.users add column if not exists status_line text not
 alter table if exists public.users add column if not exists profile_links jsonb not null default '[]';
 -- TOTP replay watermark: highest time-step already spent on a login.
 alter table if exists public.users add column if not exists totp_last_step bigint not null default 0;
+-- TOTP brute-force lockout: failed 2FA attempts and the resulting cooldown.
+-- A 6-digit code with a +/-1 step window is only ~3 candidate codes, so an
+-- unlimited retry loop would defeat 2FA in days. (see authStore.ts)
+alter table if exists public.users add column if not exists totp_failed_attempts int not null default 0;
+alter table if exists public.users add column if not exists totp_locked_until timestamptz;
+-- API keys: the "record" column is the full ApiKey snapshot (apiKeyStore.ts).
+-- db.apiKeys used to be process-local only, so every restart wiped every key
+-- you had created; hydration + this column make them durable. "masked_secret"
+-- is the display-only prefix-suffix string the dashboard renders.
+alter table if exists public.api_keys add column if not exists record jsonb;
+alter table if exists public.api_keys add column if not exists masked_secret text;
 -- Invite tokens are live credentials (some grant ADMIN): look them up by
 -- sha256 hash, never by the raw value. The token column itself only ever
 -- holds either the legacy plaintext (pre-hardening rows) or the enc:v1:

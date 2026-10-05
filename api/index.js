@@ -10,6 +10,9 @@ var __export = (target, all) => {
 
 // src/server/db.ts
 import crypto from "crypto";
+function isKnownScope(s) {
+  return typeof s === "string" && KNOWN_SCOPES.has(s);
+}
 function hashApiKeySecret(rawSecret) {
   return crypto.createHash("sha256").update(rawSecret, "utf8").digest("hex");
 }
@@ -75,7 +78,7 @@ function finalizeRelease(base) {
     // only real downloads ever increment this
   };
 }
-var ALL_SCOPES, RELEASE_BASE, VanitasDatabase, db;
+var ALL_SCOPES, KNOWN_SCOPES, RELEASE_BASE, VanitasDatabase, db;
 var init_db = __esm({
   "src/server/db.ts"() {
     ALL_SCOPES = [
@@ -105,6 +108,7 @@ var init_db = __esm({
       { scope: "settings.read", label: "Read Platform Settings", group: "System", adminOnly: false },
       { scope: "settings.write", label: "Update Platform Settings", group: "System", adminOnly: true }
     ];
+    KNOWN_SCOPES = new Set(ALL_SCOPES.map((s) => s.scope));
     RELEASE_BASE = [
       {
         id: "rel_android_apk",
@@ -345,6 +349,10 @@ var init_db = __esm({
         return suggestion;
       }
       assertGrantableScopes(requesterRole, requestedScopes) {
+        const unknown = requestedScopes.filter((s) => !isKnownScope(s));
+        if (unknown.length > 0) {
+          throw new Error(`Permission Denied: unknown scope(s): [${unknown.join(", ")}]`);
+        }
         if (requesterRole === "ADMIN") return;
         const adminOnlyScopes = ALL_SCOPES.filter((s) => s.adminOnly).map((s) => s.scope);
         const forbidden = requestedScopes.filter((s) => adminOnlyScopes.includes(s));
@@ -874,13 +882,14 @@ function ensureSchema() {
   }
   return schemaReady;
 }
-var databasePool, SCHEMA_DDL, schemaReady;
+var sslInsecure, databasePool, SCHEMA_DDL, schemaReady;
 var init_pg = __esm({
   "src/server/pg.ts"() {
+    sslInsecure = process.env.PG_INSECURE_SSL === "true";
     databasePool = process.env.DATABASE_URL ? new Pool({
       connectionString: process.env.DATABASE_URL,
       max: 8,
-      ssl: /supabase\.co|neon\.tech|sslmode=require/.test(process.env.DATABASE_URL) ? { rejectUnauthorized: false } : void 0
+      ssl: /supabase\.co|neon\.tech|sslmode=require/.test(process.env.DATABASE_URL) ? { rejectUnauthorized: !sslInsecure } : void 0
     }) : null;
     if (databasePool) {
       databasePool.on("error", (err) => console.error("[db] pool error:", err.message));
@@ -938,6 +947,17 @@ alter table if exists public.users add column if not exists status_line text not
 alter table if exists public.users add column if not exists profile_links jsonb not null default '[]';
 -- TOTP replay watermark: highest time-step already spent on a login.
 alter table if exists public.users add column if not exists totp_last_step bigint not null default 0;
+-- TOTP brute-force lockout: failed 2FA attempts and the resulting cooldown.
+-- A 6-digit code with a +/-1 step window is only ~3 candidate codes, so an
+-- unlimited retry loop would defeat 2FA in days. (see authStore.ts)
+alter table if exists public.users add column if not exists totp_failed_attempts int not null default 0;
+alter table if exists public.users add column if not exists totp_locked_until timestamptz;
+-- API keys: the "record" column is the full ApiKey snapshot (apiKeyStore.ts).
+-- db.apiKeys used to be process-local only, so every restart wiped every key
+-- you had created; hydration + this column make them durable. "masked_secret"
+-- is the display-only prefix-suffix string the dashboard renders.
+alter table if exists public.api_keys add column if not exists record jsonb;
+alter table if exists public.api_keys add column if not exists masked_secret text;
 -- Invite tokens are live credentials (some grant ADMIN): look them up by
 -- sha256 hash, never by the raw value. The token column itself only ever
 -- holds either the legacy plaintext (pre-hardening rows) or the enc:v1:
@@ -1027,9 +1047,10 @@ function pruneHits() {
 }
 function rateLimit({ windowMs = 6e4, max = 120, perIpOnly = false }) {
   if (windowMs > maxWindowMs) maxWindowMs = windowMs;
+  const namespace = ++limiterSeq;
   return (req, res, next) => {
     const ip = req.ip || req.socket.remoteAddress || "unknown";
-    const key = perIpOnly ? `${ip}:*` : `${ip}:${req.path}`;
+    const key = perIpOnly ? `${ip}:*:l${namespace}` : `${ip}:l${namespace}:${req.path}`;
     const now = Date.now();
     if (++sweepCounter % 1e3 === 0) pruneHits();
     const arr = (hits.get(key) || []).filter((t) => now - t < windowMs);
@@ -1115,24 +1136,27 @@ function parsePagination(query) {
 function isValidScope(s) {
   return typeof s === "string" && /^[a-z.]+\.[a-z.]+$/.test(s) && s.length <= 40;
 }
-var hits, sweepCounter, maxWindowMs;
+var hits, sweepCounter, maxWindowMs, limiterSeq;
 var init_security = __esm({
   "src/server/security.ts"() {
     init_db();
     hits = /* @__PURE__ */ new Map();
     sweepCounter = 0;
     maxWindowMs = 6e4;
+    limiterSeq = 0;
   }
 });
 
 // src/server/authStore.ts
 import crypto3 from "crypto";
-async function pickInitialRole(email) {
+async function pickInitialRole(email, queryable) {
   if (isAdminEmail(email)) return "ADMIN";
   if (databasePool) {
-    const count = await databasePool.query("select count(*)::int as n from public.users");
+    const source = queryable || databasePool;
+    const count = await source.query("select count(*)::int as n from public.users");
     if ((count.rows[0]?.n ?? 0) === 0) return "ADMIN";
-  } else if (db.users.length === 0) {
+  } else if (db.users.length === 0 && !bootstrapRoleClaimed) {
+    bootstrapRoleClaimed = true;
     return "ADMIN";
   }
   return "USER";
@@ -1243,31 +1267,42 @@ function rowToUser(row) {
 async function createAccount(params) {
   const email = params.email.trim().toLowerCase();
   const passwordHash = await hashPassword(params.password);
-  const role = await pickInitialRole(email);
   if (databasePool) {
+    const client = await databasePool.connect();
     try {
-      const existing = await databasePool.query("select 1 from public.users where lower(email) = $1", [email]);
-      if (existing.rowCount) return { ok: false, status: 409, error: "An account with this email already exists" };
+      await client.query("begin");
+      await client.query(BOOTSTRAP_LOCK);
+      const existing = await client.query("select 1 from public.users where lower(email) = $1", [email]);
+      if (existing.rowCount) {
+        await client.query("rollback");
+        return { ok: false, status: 409, error: "An account with this email already exists" };
+      }
+      const role2 = await pickInitialRole(email, client);
       const id = secureId("usr");
       const username = await uniqueUsernameFromEmailPg(email);
-      const result = await databasePool.query(
+      const result = await client.query(
         `insert into public.users (id, email, name, username, avatar_url, role, password_hash, created_at, last_login_at)
          values ($1, lower($2), $3, $4, $5, $6, $7, now(), now())
          returning *`,
-        [id, email, params.name, username, DEFAULT_AVATAR, role, passwordHash]
+        [id, email, params.name, username, DEFAULT_AVATAR, role2, passwordHash]
       );
+      await client.query("commit");
       return { ok: true, user: rowToUser(result.rows[0]) };
     } catch (err) {
+      await client.query("rollback").catch(() => void 0);
       if (err?.code === "23505") return { ok: false, status: 409, error: "An account with this email already exists" };
       if (err?.code === "42P01" || err?.code === "42703") {
         throw new Error("users table missing \u2014 run: npm run db:migrate (supabase/schema.sql)");
       }
       throw err;
+    } finally {
+      client.release();
     }
   }
   if (db.users.some((u) => u.email.toLowerCase() === email)) {
     return { ok: false, status: 409, error: "An account with this email already exists" };
   }
+  const role = await pickInitialRole(email);
   const user = {
     id: secureId("usr"),
     email,
@@ -1356,8 +1391,18 @@ async function findPublicProfile(username) {
 }
 async function forgetAccount(userId) {
   if (databasePool) {
-    await databasePool.query("delete from public.api_keys where owner_id = $1", [userId]);
-    await databasePool.query("delete from public.users where id = $1", [userId]);
+    const client = await databasePool.connect();
+    try {
+      await client.query("begin");
+      await client.query("delete from public.api_keys where owner_id = $1", [userId]);
+      await client.query("delete from public.users where id = $1", [userId]);
+      await client.query("commit");
+    } catch (err) {
+      await client.query("rollback").catch(() => void 0);
+      throw err;
+    } finally {
+      client.release();
+    }
   } else {
     const idx = db.users.findIndex((u) => u.id === userId);
     if (idx !== -1) {
@@ -1368,6 +1413,8 @@ async function forgetAccount(userId) {
     for (const [key, rec] of memorySessions) if (rec.userId === userId) memorySessions.delete(key);
     for (const [key, uid] of memoryIdentities) if (uid === userId) memoryIdentities.delete(key);
     memoryTwoFactor.delete(userId);
+    memoryTotpStep.delete(userId);
+    memoryTotpFailures.delete(userId);
   }
   resolveCache.clear();
 }
@@ -1377,8 +1424,8 @@ async function getTotpLastStep(userId) {
       const result = await databasePool.query("select totp_last_step from public.users where id = $1", [userId]);
       return Number(result.rows[0]?.totp_last_step || 0);
     } catch (err) {
-      console.error("[auth] totp step read failed:", err.message);
-      return 0;
+      console.error("[auth] totp step read failed \u2014 rejecting login:", err.message);
+      return Number.MAX_SAFE_INTEGER;
     }
   }
   return memoryTotpStep.get(userId) || 0;
@@ -1392,6 +1439,78 @@ async function setTotpLastStep(userId, step) {
     }
   } else {
     memoryTotpStep.set(userId, step);
+  }
+}
+function totpLockDurationMs(attempts) {
+  const step = Math.max(1, attempts - TOTP_MAX_ATTEMPTS + 1);
+  return Math.min(5 * 6e4 * 2 ** (step - 1), TOTP_MAX_LOCK_MS);
+}
+function toIso(value) {
+  if (value instanceof Date) return value.toISOString();
+  return String(value || "");
+}
+async function getTotpLockoutMs(userId) {
+  if (databasePool) {
+    try {
+      await ensureSchema();
+      const result = await databasePool.query(
+        "select totp_locked_until from public.users where id = $1",
+        [userId]
+      );
+      const raw = result.rows[0]?.totp_locked_until;
+      if (!raw) return 0;
+      const until = Date.parse(toIso(raw));
+      return Number.isFinite(until) && until > Date.now() ? until - Date.now() : 0;
+    } catch (err) {
+      console.error("[auth] totp lockout read failed:", err.message);
+      return 6e4;
+    }
+  }
+  const state = memoryTotpFailures.get(userId);
+  return state && state.lockedUntil > Date.now() ? state.lockedUntil - Date.now() : 0;
+}
+async function registerTotpFailure(userId) {
+  if (databasePool) {
+    try {
+      await ensureSchema();
+      const r = await databasePool.query(
+        `update public.users
+            set totp_failed_attempts = totp_failed_attempts + 1
+          where id = $1
+          returning totp_failed_attempts`,
+        [userId]
+      );
+      const attempts = Number(r.rows[0]?.totp_failed_attempts ?? 0);
+      let lockedUntilMs = 0;
+      if (attempts >= TOTP_MAX_ATTEMPTS) {
+        lockedUntilMs = Date.now() + totpLockDurationMs(attempts);
+        await databasePool.query("update public.users set totp_locked_until = $2 where id = $1", [
+          userId,
+          new Date(lockedUntilMs)
+        ]);
+      }
+      return { attempts, lockedUntilMs };
+    } catch (err) {
+      console.error("[auth] totp failure persist failed:", err.message);
+      return { attempts: TOTP_MAX_ATTEMPTS, lockedUntilMs: TOTP_MAX_LOCK_MS };
+    }
+  }
+  const state = memoryTotpFailures.get(userId) || { attempts: 0, lockedUntil: 0 };
+  state.attempts += 1;
+  if (state.attempts >= TOTP_MAX_ATTEMPTS) state.lockedUntil = Date.now() + totpLockDurationMs(state.attempts);
+  memoryTotpFailures.set(userId, state);
+  return { attempts: state.attempts, lockedUntilMs: Math.max(0, state.lockedUntil - Date.now()) };
+}
+async function clearTotpFailures(userId) {
+  memoryTotpFailures.delete(userId);
+  if (!databasePool) return;
+  try {
+    await databasePool.query(
+      "update public.users set totp_failed_attempts = 0, totp_locked_until = null where id = $1",
+      [userId]
+    );
+  } catch (err) {
+    console.error("[auth] totp failure reset failed:", err.message);
   }
 }
 async function getTwoFactorSecret(userId) {
@@ -1514,8 +1633,25 @@ async function resolveSession(token) {
     }
     user = db.users.find((u) => u.id === rec.userId) || null;
   }
-  resolveCache.set(hash, { user, until: Date.now() + RESOLVE_CACHE_TTL_MS });
+  if (user) {
+    if (resolveCache.size >= RESOLVE_CACHE_MAX) sweepResolveCache();
+    resolveCache.set(hash, { user, until: Date.now() + RESOLVE_CACHE_TTL_MS });
+  } else {
+    resolveCache.delete(hash);
+  }
   return user;
+}
+function sweepResolveCache() {
+  const now = Date.now();
+  for (const [key, rec] of resolveCache) {
+    if (rec.until <= now) resolveCache.delete(key);
+  }
+  if (resolveCache.size < RESOLVE_CACHE_MAX) return;
+  let toDrop = Math.ceil(RESOLVE_CACHE_MAX / 2);
+  for (const key of resolveCache.keys()) {
+    resolveCache.delete(key);
+    if (--toDrop <= 0) break;
+  }
 }
 async function revokeSession(token) {
   if (!token) return;
@@ -1689,19 +1825,33 @@ async function upsertOAuthUser(p) {
           return withConnectedAccount(rowToUser({ ...row, last_login_at: nowIso }), provider);
         }
       }
-      const finalRole = await pickInitialRole(email || "oauth@unknown");
-      const id = secureId("usr");
-      const username = await uniqueUsernameFromEmailPg(email || `${provider}${providerId}`);
-      await databasePool.query(
-        `with new_user as (
-           insert into public.users (id, email, name, username, avatar_url, role, password_hash, created_at, last_login_at)
-           values ($1, lower($2), $3, $4, $5, $6, '', now(), now())
-           returning id
-         )
-         insert into public.user_identities (provider, provider_id, user_id)
-         select $7, $8, id from new_user`,
-        [id, email || fallbackOAuthEmail(provider, providerId), name, username, avatarUrl, finalRole, provider, providerId]
-      );
+      const client = await databasePool.connect();
+      let finalRole;
+      let id;
+      let username;
+      try {
+        await client.query("begin");
+        await client.query(BOOTSTRAP_LOCK);
+        finalRole = await pickInitialRole(email || "oauth@unknown", client);
+        id = secureId("usr");
+        username = await uniqueUsernameFromEmailPg(email || `${provider}${providerId}`);
+        await client.query(
+          `with new_user as (
+             insert into public.users (id, email, name, username, avatar_url, role, password_hash, created_at, last_login_at)
+             values ($1, lower($2), $3, $4, $5, $6, '', now(), now())
+             returning id
+           )
+           insert into public.user_identities (provider, provider_id, user_id)
+           select $7, $8, id from new_user`,
+          [id, email || fallbackOAuthEmail(provider, providerId), name, username, avatarUrl, finalRole, provider, providerId]
+        );
+        await client.query("commit");
+      } catch (err) {
+        await client.query("rollback").catch(() => void 0);
+        throw err;
+      } finally {
+        client.release();
+      }
       const created = await databasePool.query("select * from public.users where id = $1", [id]);
       return withConnectedAccount(rowToUser(created.rows[0]), provider);
     } catch (err) {
@@ -1756,7 +1906,7 @@ async function markSocialLogin(userId, provider) {
     [userId, provider]
   );
 }
-var SESSION_TTL_MS, RESOLVE_CACHE_TTL_MS, DEFAULT_AVATAR, dummyHashPromise, RESERVED_USERNAMES, memoryPasswords, memorySessions, resolveCache, memoryTwoFactor, memoryTotpStep, memoryIdentities;
+var SESSION_TTL_MS, RESOLVE_CACHE_TTL_MS, DEFAULT_AVATAR, bootstrapRoleClaimed, BOOTSTRAP_LOCK, dummyHashPromise, RESERVED_USERNAMES, memoryPasswords, memorySessions, resolveCache, RESOLVE_CACHE_MAX, memoryTwoFactor, memoryTotpStep, TOTP_MAX_ATTEMPTS, TOTP_MAX_LOCK_MS, memoryTotpFailures, memoryIdentities;
 var init_authStore = __esm({
   "src/server/authStore.ts"() {
     init_pg();
@@ -1765,6 +1915,8 @@ var init_authStore = __esm({
     SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1e3;
     RESOLVE_CACHE_TTL_MS = 6e4;
     DEFAULT_AVATAR = "/images/avatar-default.svg";
+    bootstrapRoleClaimed = false;
+    BOOTSTRAP_LOCK = "select pg_advisory_xact_lock(hashtext('vanitas.user_bootstrap'))";
     dummyHashPromise = null;
     RESERVED_USERNAMES = /* @__PURE__ */ new Set([
       "admin",
@@ -1806,8 +1958,12 @@ var init_authStore = __esm({
     memoryPasswords = /* @__PURE__ */ new Map();
     memorySessions = /* @__PURE__ */ new Map();
     resolveCache = /* @__PURE__ */ new Map();
+    RESOLVE_CACHE_MAX = 5e3;
     memoryTwoFactor = /* @__PURE__ */ new Map();
     memoryTotpStep = /* @__PURE__ */ new Map();
+    TOTP_MAX_ATTEMPTS = 5;
+    TOTP_MAX_LOCK_MS = 30 * 6e4;
+    memoryTotpFailures = /* @__PURE__ */ new Map();
     memoryIdentities = /* @__PURE__ */ new Map();
   }
 });
@@ -1910,13 +2066,17 @@ function listConfiguredProviders() {
   for (const p of OAUTH_PROVIDERS) out[p] = getProviderConfig(p) !== null;
   return out;
 }
-function signState(provider, clientSecret) {
-  const payload = `${provider}.${Date.now() + STATE_TTL_MS}`;
+function newOAuthNonce() {
+  return crypto5.randomBytes(NONCE_BYTES).toString("base64url");
+}
+function signState(provider, clientSecret, nonce) {
+  const payload = `${provider}.${Date.now() + STATE_TTL_MS}.${nonce}`;
   const sig = crypto5.createHmac("sha256", clientSecret).update(payload).digest("base64url");
   return `${Buffer.from(payload, "utf8").toString("base64url")}.${sig}`;
 }
-function verifyState(provider, clientSecret, state) {
+function verifyState(provider, clientSecret, state, nonce) {
   if (typeof state !== "string" || state.length < 8 || state.length > 512) return false;
+  if (typeof nonce !== "string" || nonce.length < 32) return false;
   const [p64, sig] = state.split(".");
   if (!p64 || !sig) return false;
   const payload = Buffer.from(p64, "base64url").toString("utf8");
@@ -1924,9 +2084,13 @@ function verifyState(provider, clientSecret, state) {
   const a = Buffer.from(sig, "utf8");
   const b = Buffer.from(expected, "utf8");
   if (a.length !== b.length || !crypto5.timingSafeEqual(a, b)) return false;
-  const [p, expStr] = payload.split(".");
+  const [p, expStr, stateNonce] = payload.split(".");
   const exp = Number(expStr);
-  return p === provider && Number.isFinite(exp) && exp > Date.now();
+  if (p !== provider || !Number.isFinite(exp) || exp <= Date.now()) return false;
+  const nb = Buffer.from(stateNonce || "", "utf8");
+  const cb = Buffer.from(nonce, "utf8");
+  if (nb.length !== cb.length || nb.length === 0) return false;
+  return crypto5.timingSafeEqual(nb, cb);
 }
 function appBaseUrl(req) {
   const configured = (process.env.FRONTEND_URL || "").trim().replace(/\/+$/, "");
@@ -2051,7 +2215,7 @@ async function fetchProfile(cfg, accessToken) {
     avatarUrl: String(data.avatar_url || "")
   };
 }
-var OAUTH_PROVIDERS, DEFAULTS, STATE_TTL_MS;
+var OAUTH_PROVIDERS, DEFAULTS, STATE_TTL_MS, NONCE_BYTES;
 var init_oauth = __esm({
   "src/server/oauth.ts"() {
     OAUTH_PROVIDERS = ["discord", "google", "github"];
@@ -2079,6 +2243,7 @@ var init_oauth = __esm({
       }
     };
     STATE_TTL_MS = 10 * 60 * 1e3;
+    NONCE_BYTES = 32;
   }
 });
 
@@ -3071,13 +3236,13 @@ async function performSemanticSearch(query, corpus) {
     for (const bot of corpus.bots) {
       indexedItems.push({
         id: `bot_${bot.id}`,
-        title: `Bot: ${bot.name} (${bot.type.toUpperCase()})`,
+        title: `Bot: ${bot.name} (${bot.platform.toUpperCase()})`,
         category: "bot_gateway",
-        snippet: `Status: ${bot.status} | Handlers: ${bot.eventHandlers?.join(", ")} | Rate: ${bot.rateLimitPerMin} RPM`,
+        snippet: `Status: ${bot.status} | Commands executed: ${bot.commandsExecuted} | Last ping: ${bot.lastPingAt}`,
         targetView: "bot-gateway",
         actionLabel: "Open Bot Gateway",
-        tags: ["bot", bot.type, bot.status, ...bot.eventHandlers || []],
-        rawText: `${bot.name} ${bot.type} ${bot.status} ${bot.eventHandlers?.join(" ")}`.toLowerCase()
+        tags: ["bot", bot.platform, bot.status],
+        rawText: `${bot.name} ${bot.platform} ${bot.status} ${bot.apiKeyId || ""}`.toLowerCase()
       });
     }
   }
@@ -3396,6 +3561,139 @@ DOCS UI SECTIONS: overview, authentication, scopes, endpoints, webhooks, bots, e
   }
 });
 
+// src/server/apiKeyStore.ts
+function toRecord2(key) {
+  return { ...key };
+}
+async function loadApiKeys() {
+  if (!databasePool) return;
+  await ensureSchema();
+  try {
+    const res = await databasePool.query(
+      "select id, secret_hash, status, record from public.api_keys order by created_at desc nulls last"
+    );
+    const keys = [];
+    for (const row of res.rows) {
+      const record = row.record;
+      if (!record || typeof record !== "object" || !record.id) continue;
+      const key = { ...record, id: String(record.id) };
+      if (row.status) key.status = row.status;
+      attachSecretHash(key, row.secret_hash || "");
+      keys.push(key);
+    }
+    db.apiKeys = keys;
+    db.systemStats.activeApiKeys = keys.filter((k) => k.status === "active").length;
+    if (keys.length > 0) console.log(`[apikeys] hydrated ${keys.length} key(s) from PostgreSQL`);
+  } catch (err) {
+    console.error("[apikeys] hydration failed \u2014 starting with an empty list:", err.message);
+  }
+}
+async function saveApiKey(key) {
+  if (!databasePool) return;
+  await ensureSchema();
+  try {
+    await databasePool.query(UPSERT_SQL, [
+      key.id,
+      key.name,
+      key.keyPrefix,
+      key.secretHash || "",
+      key.ownerId,
+      key.ownerName,
+      key.scopes,
+      key.status,
+      key.environment,
+      key.rateLimitPerMin,
+      key.monthlyQuota || 0,
+      key.usageCount || 0,
+      key.createdAt,
+      key.lastUsedAt,
+      key.expiresAt,
+      key.maskedSecret,
+      toRecord2(key)
+    ]);
+  } catch (err) {
+    console.error("[apikeys] persist failed for", key.id, err.message);
+    throw err;
+  }
+}
+function scheduleUsageFlush(key) {
+  if (!databasePool) return;
+  const now = Date.now();
+  const last = lastUsageFlush.get(key.id) || 0;
+  if (now - last < USAGE_FLUSH_INTERVAL_MS) return;
+  lastUsageFlush.set(key.id, now);
+  void flushUsage(key).catch(
+    (err) => console.error("[apikeys] usage flush failed for", key.id, err.message)
+  );
+}
+async function flushUsage(key) {
+  if (!databasePool) return;
+  await ensureSchema();
+  await databasePool.query(USAGE_SQL, [
+    key.id,
+    key.usageCount || 0,
+    key.lastUsedAt,
+    key.currentUsageThisMonth || 0,
+    key.usagePeriod || null,
+    key.lastUsedAt || null
+  ]);
+}
+async function flushAllUsage() {
+  if (!databasePool) return;
+  lastUsageFlush.clear();
+  for (const key of db.apiKeys) {
+    try {
+      await flushUsage(key);
+    } catch (err) {
+      console.error("[apikeys] shutdown flush failed for", key.id, err.message);
+    }
+  }
+}
+var UPSERT_SQL, USAGE_SQL, USAGE_FLUSH_INTERVAL_MS, lastUsageFlush;
+var init_apiKeyStore = __esm({
+  "src/server/apiKeyStore.ts"() {
+    init_pg();
+    init_db();
+    UPSERT_SQL = `
+insert into public.api_keys (
+  id, name, key_prefix, secret_hash, owner_id, owner_name, scopes, status,
+  environment, rate_limit_per_min, monthly_quota, usage_count,
+  created_at, last_used_at, expires_at, masked_secret, record
+) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+on conflict (id) do update set
+  name             = excluded.name,
+  key_prefix       = excluded.key_prefix,
+  secret_hash      = excluded.secret_hash,
+  owner_id         = excluded.owner_id,
+  owner_name       = excluded.owner_name,
+  scopes           = excluded.scopes,
+  status           = excluded.status,
+  environment      = excluded.environment,
+  rate_limit_per_min = excluded.rate_limit_per_min,
+  monthly_quota    = excluded.monthly_quota,
+  usage_count      = excluded.usage_count,
+  last_used_at     = excluded.last_used_at,
+  expires_at       = excluded.expires_at,
+  masked_secret    = excluded.masked_secret,
+  record           = excluded.record`;
+    USAGE_SQL = `
+update public.api_keys
+   set usage_count = $2,
+       last_used_at = $3,
+       record = jsonb_set(
+         jsonb_set(
+           jsonb_set(
+             jsonb_set(coalesce(record, '{}'::jsonb),
+               '{usageCount}',          to_jsonb($2::bigint)),
+             '{currentUsageThisMonth}', to_jsonb($4::int)),
+           '{usagePeriod}',             to_jsonb($5::text)),
+         '{lastUsedAt}',                to_jsonb($6::text))
+ where id = $1`;
+    USAGE_FLUSH_INTERVAL_MS = 6e4;
+    lastUsageFlush = /* @__PURE__ */ new Map();
+  }
+});
+
 // src/server/apiKeyAuth.ts
 import crypto6 from "crypto";
 function stateFor(key) {
@@ -3642,6 +3940,7 @@ async function runApiKeyAuth(req, res, next) {
   key.currentUsageThisMonth = (key.currentUsageThisMonth || 0) + 1;
   key.currentRpmUsage = decision.windowCount;
   key.lastUsedAt = (/* @__PURE__ */ new Date()).toISOString();
+  scheduleUsageFlush(key);
   req.apiKey = key;
   next();
 }
@@ -3678,6 +3977,7 @@ var MAX_KEY_LENGTH, WINDOW_MS, MAX_THROTTLE_SLEEP_MS, ALERT_THROTTLE_MS, sleep, 
 var init_apiKeyAuth = __esm({
   "src/server/apiKeyAuth.ts"() {
     init_db();
+    init_apiKeyStore();
     MAX_KEY_LENGTH = 300;
     WINDOW_MS = 6e4;
     MAX_THROTTLE_SLEEP_MS = 2e3;
@@ -3694,6 +3994,7 @@ __export(server_exports, {
   buildApp: () => buildApp,
   default: () => server_default
 });
+import "dotenv/config";
 import express from "express";
 import path from "path";
 import crypto7 from "crypto";
@@ -3919,7 +4220,17 @@ async function buildApp() {
   app.use(express.json({ limit: "256kb" }));
   app.use(express.urlencoded({ extended: true, limit: "256kb" }));
   if (databasePool) {
-    ensureSchema().catch((err) => console.error("[schema] boot migrate failed:", err.message));
+    ensureSchema().then(() => loadApiKeys()).catch((err) => console.error("[schema] boot migrate failed:", err.message));
+  }
+  if (databasePool) {
+    let flushed = false;
+    const drain = () => {
+      if (flushed) return;
+      flushed = true;
+      void flushAllUsage();
+    };
+    process.once("SIGINT", drain);
+    process.once("SIGTERM", drain);
   }
   function wrap(fn) {
     return (req, res) => {
@@ -3928,6 +4239,30 @@ async function buildApp() {
         if (!res.headersSent) res.status(500).json({ error: "Internal server error" });
       });
     };
+  }
+  async function persistOrRollbackKey(key, res) {
+    try {
+      await saveApiKey(key);
+      return true;
+    } catch {
+      db.apiKeys = db.apiKeys.filter((k) => k.id !== key.id);
+      db.systemStats.activeApiKeys = db.apiKeys.filter((k) => k.status === "active").length;
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Could not persist the API key \u2014 nothing was created" });
+      }
+      return false;
+    }
+  }
+  async function persistKeyOr500(key, res) {
+    try {
+      await saveApiKey(key);
+      return true;
+    } catch {
+      if (!res.headersSent) {
+        res.status(500).json({ error: "The change was applied in memory but could not be saved \u2014 please retry" });
+      }
+      return false;
+    }
   }
   app.use((req, res, next) => {
     const allowed = (process.env.FRONTEND_URL || "").split(",").map((s) => s.trim()).filter((s) => s && s !== "*");
@@ -3942,7 +4277,7 @@ async function buildApp() {
     if (req.method === "OPTIONS") return res.status(204).end();
     next();
   });
-  const defaultLimiter = rateLimit({ windowMs: 6e4, max: 300 });
+  const defaultLimiter = rateLimit({ windowMs: 6e4, max: 300, perIpOnly: true });
   const publicLimiter = rateLimit({ windowMs: 6e4, max: 1200 });
   app.use(
     "/api/",
@@ -3951,7 +4286,7 @@ async function buildApp() {
   app.use("/api/v1/auth/", rateLimit({ windowMs: 6e4, max: 60 }));
   app.use("/api/v1/ai/", rateLimit({ windowMs: 6e4, max: 30 }));
   app.use("/api/v1/bot/", rateLimit({ windowMs: 6e4, max: 120 }));
-  app.use("/api/v1/comments/", rateLimit({ windowMs: 6e4, max: 30 }));
+  app.use("/api/v1/comments/", rateLimit({ windowMs: 6e4, max: 30, perIpOnly: true }));
   app.use("/api/v1/youtube/", rateLimit({ windowMs: 6e4, max: 60 }));
   app.use("/api/v1/search/", rateLimit({ windowMs: 6e4, max: 60 }));
   app.use("/api/v1/semantic-search", rateLimit({ windowMs: 6e4, max: 60 }));
@@ -4125,6 +4460,28 @@ async function buildApp() {
   });
   function permissionsFor(actor) {
     return actor.role === "ADMIN" ? ALL_SCOPES.map((s) => s.scope) : ["api.read", "keys.read", "keys.create", "bot.execute"];
+  }
+  async function twoFactorLockoutGuard(userId) {
+    const lockedMs = await getTotpLockoutMs(userId);
+    return lockedMs > 0 ? Math.ceil(lockedMs / 1e3) : 0;
+  }
+  function sendLockout(res, seconds) {
+    res.setHeader("Retry-After", String(seconds));
+    res.status(429).json({
+      twoFactorRequired: true,
+      error: `Too many incorrect codes. Try again in ${formatWait(seconds)}.`,
+      retryAfterSec: seconds
+    });
+  }
+  function formatWait(seconds) {
+    if (seconds < 60) return `${seconds} seconds`;
+    const minutes = Math.ceil(seconds / 60);
+    return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  }
+  async function rejectTwoFactorCode(res, userId) {
+    const { lockedUntilMs } = await registerTotpFailure(userId);
+    if (lockedUntilMs > 0) return sendLockout(res, Math.ceil(lockedUntilMs / 1e3));
+    res.status(401).json({ twoFactorRequired: true, error: "Enter the 6-digit code from your authenticator app" });
   }
   app.get("/api/v1/auth/me", (req, res) => {
     const actor = getActorUser(req);
@@ -4341,11 +4698,13 @@ async function buildApp() {
         return res.status(outcome.status).json({ error: outcome.error });
       }
       if (outcome.user.twoFactorEnabled) {
+        const lockedSeconds = await twoFactorLockoutGuard(outcome.user.id);
+        if (lockedSeconds > 0) return sendLockout(res, lockedSeconds);
         const secret = await getTwoFactorSecret(outcome.user.id);
         const code = sanitizeText(req.body?.code, 16);
         const step = secret ? verifyTotpStep(secret, code) : null;
         if (step === null) {
-          return res.status(401).json({ twoFactorRequired: true, error: "Enter the 6-digit code from your authenticator app" });
+          return rejectTwoFactorCode(res, outcome.user.id);
         }
         const lastStep = await getTotpLastStep(outcome.user.id);
         if (step <= lastStep) {
@@ -4353,6 +4712,7 @@ async function buildApp() {
           return res.status(401).json({ twoFactorRequired: true, error: "That code was already used \u2014 wait for the next one" });
         }
         await setTotpLastStep(outcome.user.id, step);
+        await clearTotpFailures(outcome.user.id);
       }
       const token = await createSession(outcome.user, { ip: req.ip, userAgent: String(req.headers["user-agent"] || "") });
       persistAuditLog({
@@ -4531,14 +4891,17 @@ async function buildApp() {
       const result = await findUserById(userId);
       if (!result) return res.status(401).json({ error: "Two-factor challenge expired \u2014 sign in again" });
       if (!result.twoFactorEnabled) return res.status(400).json({ error: "Two-factor authentication is not enabled" });
+      const lockedSeconds = await twoFactorLockoutGuard(result.id);
+      if (lockedSeconds > 0) return sendLockout(res, lockedSeconds);
       const secret = await getTwoFactorSecret(result.id);
       const step = secret ? verifyTotpStep(secret, code) : null;
-      if (step === null) return res.status(400).json({ error: "Invalid 6-digit code" });
+      if (step === null) return rejectTwoFactorCode(res, result.id);
       const lastStep = await getTotpLastStep(result.id);
       if (step <= lastStep) {
         return res.status(401).json({ error: "That code was already used \u2014 wait for the next one" });
       }
       await setTotpLastStep(result.id, step);
+      await clearTotpFailures(result.id);
       const token = await createSession(result, { ip: req.ip, userAgent: String(req.headers["user-agent"] || "") });
       persistAuditLog({
         actorId: result.id,
@@ -4612,13 +4975,42 @@ async function buildApp() {
   app.get("/api/v1/auth/providers", (_req, res) => {
     res.json({ providers: listConfiguredProviders() });
   });
+  const OAUTH_STATE_COOKIE = "vnt_oauth_state";
+  function isHttpsRequest(req) {
+    if (req.secure) return true;
+    const proto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
+    return proto === "https" || !!process.env.VERCEL;
+  }
+  function readCookie(req, name) {
+    const header = String(req.headers.cookie || "");
+    for (const part of header.split(";")) {
+      const i = part.indexOf("=");
+      if (i < 0 || part.slice(0, i).trim() !== name) continue;
+      try {
+        return decodeURIComponent(part.slice(i + 1).trim());
+      } catch {
+        return "";
+      }
+    }
+    return "";
+  }
+  function oauthStateCookie(req, nonce) {
+    const secure = isHttpsRequest(req) ? "; Secure" : "";
+    return `${OAUTH_STATE_COOKIE}=${encodeURIComponent(nonce)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600${secure}`;
+  }
+  function clearOAuthStateCookie(req) {
+    const secure = isHttpsRequest(req) ? "; Secure" : "";
+    return `${OAUTH_STATE_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`;
+  }
   app.get("/api/v1/social/:provider", (req, res) => {
     const base = appBaseUrl(req);
     const provider = sanitizeText(req.params.provider, 20).toLowerCase();
     if (!isOAuthProvider(provider)) return res.redirect(`${base}/login#vnt_error=unknown_provider`);
     const cfg = getProviderConfig(provider);
     if (!cfg) return res.redirect(`${base}/login#vnt_error=not_configured`);
-    const state = signState(provider, cfg.clientSecret);
+    const nonce = newOAuthNonce();
+    const state = signState(provider, cfg.clientSecret, nonce);
+    res.setHeader("Set-Cookie", oauthStateCookie(req, nonce));
     return res.redirect(buildAuthorizeUrl(cfg, state, callbackUrl(req, provider)));
   });
   app.get("/api/v1/social/:provider/callback", async (req, res) => {
@@ -4630,9 +5022,12 @@ async function buildApp() {
     const code = typeof req.query.code === "string" ? req.query.code : "";
     const state = typeof req.query.state === "string" ? req.query.state : "";
     if (typeof req.query.error === "string" && req.query.error) {
+      res.setHeader("Set-Cookie", clearOAuthStateCookie(req));
       return res.redirect(`${base}/login#vnt_error=provider_denied`);
     }
-    if (!code || !verifyState(provider, cfg.clientSecret, state)) {
+    const nonce = readCookie(req, OAUTH_STATE_COOKIE);
+    res.setHeader("Set-Cookie", clearOAuthStateCookie(req));
+    if (!code || !verifyState(provider, cfg.clientSecret, state, nonce)) {
       return res.redirect(`${base}/login#vnt_error=invalid_state`);
     }
     try {
@@ -4794,7 +5189,7 @@ async function buildApp() {
     const data = db.getKeyUsageAnalytics(period, actor.role === "ADMIN" ? null : actor.id);
     res.json(data);
   });
-  app.post("/api/v1/api-keys", (req, res) => {
+  app.post("/api/v1/api-keys", async (req, res) => {
     try {
       const actor = getActorUser(req);
       if (!actor) return res.status(401).json({ error: "Authentication required" });
@@ -4805,8 +5200,8 @@ async function buildApp() {
       if (!name || name.length < 3 || !scopes || !Array.isArray(scopes) || scopes.length === 0 || scopes.length > 30) {
         return res.status(400).json({ error: 'Invalid parameters. "name" (3-80 chars) and "scopes" array (1-30) are required.' });
       }
-      if (!scopes.every(isValidScope)) {
-        return res.status(400).json({ error: "Invalid scope format detected." });
+      if (!scopes.every((s) => isValidScope(s) && isKnownScope(s))) {
+        return res.status(400).json({ error: "Invalid or unknown scope." });
       }
       const result = db.createApiKey({
         name,
@@ -4818,6 +5213,7 @@ async function buildApp() {
         rateLimitPerMin,
         expiresAt: typeof req.body?.expiresAt === "string" ? req.body.expiresAt.slice(0, 64) : null
       });
+      if (!await persistOrRollbackKey(result.key, res)) return;
       res.status(201).json({
         key: result.key,
         rawSecret: result.rawSecret,
@@ -4827,12 +5223,13 @@ async function buildApp() {
       res.status(403).json({ error: "Request denied" });
     }
   });
-  app.post("/api/v1/api-keys/:id/rotate", (req, res) => {
+  app.post("/api/v1/api-keys/:id/rotate", async (req, res) => {
     try {
       const actor = getActorUser(req);
       if (!actor) return res.status(401).json({ error: "Authentication required" });
       const id = sanitizeText(req.params.id, 128);
       const result = db.rotateApiKey(id, actor);
+      if (!await persistKeyOr500(result.key, res)) return;
       dispatchWebhooks("key.rotated", { keyId: result.key.id, keyName: result.key.name, ownerId: result.key.ownerId, keyPrefix: result.key.keyPrefix });
       res.json({
         key: result.key,
@@ -4843,35 +5240,37 @@ async function buildApp() {
       res.status(400).json({ error: "Rotation failed" });
     }
   });
-  app.delete("/api/v1/api-keys/:id", (req, res) => {
+  app.delete("/api/v1/api-keys/:id", async (req, res) => {
     try {
       const actor = getActorUser(req);
       if (!actor) return res.status(401).json({ error: "Authentication required" });
       const id = sanitizeText(req.params.id, 128);
       const reason = sanitizeText(req.body?.reason, 200);
       const key = db.revokeApiKey(id, actor, reason || void 0);
+      if (!await persistKeyOr500(key, res)) return;
       dispatchWebhooks("key.revoked", { keyId: key.id, keyName: key.name, ownerId: key.ownerId, reason: reason || "revoked" });
       res.json({ success: true, key });
     } catch (err) {
       res.status(400).json({ error: "Revocation failed" });
     }
   });
-  app.patch("/api/v1/api-keys/:id/scopes", (req, res) => {
+  app.patch("/api/v1/api-keys/:id/scopes", async (req, res) => {
     try {
       const actor = getActorUser(req);
       if (!actor) return res.status(401).json({ error: "Authentication required" });
       const id = sanitizeText(req.params.id, 128);
       const { scopes } = req.body;
-      if (!scopes || !Array.isArray(scopes) || scopes.length > 30 || !scopes.every(isValidScope)) {
+      if (!scopes || !Array.isArray(scopes) || scopes.length > 30 || !scopes.every((s) => isValidScope(s) && isKnownScope(s))) {
         return res.status(400).json({ error: "Valid scopes array required (max 30)" });
       }
       const key = db.updateApiKeyScopes(id, scopes, actor);
+      if (!await persistKeyOr500(key, res)) return;
       res.json({ success: true, key });
     } catch (err) {
       res.status(403).json({ error: "Scope update denied" });
     }
   });
-  app.patch("/api/v1/api-keys/:id/rate-limit", (req, res) => {
+  app.patch("/api/v1/api-keys/:id/rate-limit", async (req, res) => {
     try {
       const actor = getActorUser(req);
       if (!actor) return res.status(401).json({ error: "Authentication required" });
@@ -4898,6 +5297,7 @@ async function buildApp() {
         },
         actor
       );
+      if (!await persistKeyOr500(key, res)) return;
       res.json({ success: true, key });
     } catch (err) {
       res.status(400).json({ error: "Rate limit update failed" });
@@ -5078,7 +5478,7 @@ async function buildApp() {
   function inviteUsable(invite) {
     return !invite.revoked && invite.uses < invite.maxUses && Date.parse(invite.expiresAt) > Date.now();
   }
-  const inviteCryptoKey = databasePool && process.env.DATABASE_URL ? crypto7.createHash("sha256").update(`vanitas.invite.v1|${process.env.DATABASE_URL}`).digest() : null;
+  const inviteCryptoKey = databasePool ? process.env.INVITE_ENC_KEY && process.env.INVITE_ENC_KEY.length >= 32 ? crypto7.createHash("sha256").update(`vanitas.invite.v1|${process.env.INVITE_ENC_KEY}`).digest() : process.env.DATABASE_URL ? crypto7.createHash("sha256").update(`vanitas.invite.v1|${process.env.DATABASE_URL}`).digest() : null : null;
   function sha256Hex(value) {
     return crypto7.createHash("sha256").update(value).digest("hex");
   }
@@ -5967,6 +6367,7 @@ async function buildApp() {
       if (!query || query.length < 2) {
         return res.status(400).json({ error: "Search query (2-300 chars) is required" });
       }
+      const actor = getActorUser(req);
       const docsCorpus = [
         {
           id: "doc_auth_scopes",
@@ -6007,7 +6408,11 @@ async function buildApp() {
       ];
       const result = await performSemanticSearch(query, {
         docs: docsCorpus,
-        keys: db.apiKeys,
+        // API keys and security threats are NOT public corpus material:
+        // a caller only ever searches their OWN keys, and threats (internal
+        // telemetry) are indexed for administrators alone. Anonymous callers
+        // search docs/status/bots/releases only — no cross-tenant metadata.
+        keys: actor ? db.apiKeys.filter((k) => actor.role === "ADMIN" || k.ownerId === actor.id) : [],
         status: db.systemStats.requestBreakdown.map((r) => ({
           name: r.endpoint,
           uptime: "99.99%",
@@ -6015,7 +6420,7 @@ async function buildApp() {
           status: r.errorCount > 0 ? "degraded" : "operational"
         })),
         bots: db.bots,
-        threats: db.securityThreats,
+        threats: actor?.role === "ADMIN" ? db.securityThreats : [],
         releases: db.releases
       });
       res.json(result);
@@ -6301,6 +6706,7 @@ var init_server = __esm({
     init_oauth();
     init_aiService();
     init_apiKeyAuth();
+    init_apiKeyStore();
     init_security();
     memoryComments = [];
     memoryAiChat = [];

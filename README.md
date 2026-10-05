@@ -580,11 +580,16 @@ Bot             ● Operational
 
 ### Prerequisites
 
-- Node.js 18+
-- npm or yarn
-- Supabase account
-- Redis (Upstash recommended)
-- OAuth app credentials (Google, GitHub, Discord)
+- Node.js 20+ (22 LTS recommended)
+- npm
+- PostgreSQL 16 — **optional**: without it the app runs on its in-memory store
+  (`docker compose up` starts Postgres for you)
+- OAuth app credentials (Google, GitHub, Discord) — optional, social login only
+
+> This README describes the **Express + Vite + PostgreSQL** application in this
+> repository. Earlier revisions of this file documented a Next.js/Supabase/Redis
+> stack that does not exist here. See `DEPLOY_AR.md` for the full deployment
+> guide.
 
 ### Installation
 
@@ -596,63 +601,86 @@ cd vanitas
 # Install dependencies
 npm install
 
-# Set up environment variables
-cp .env.example .env.local
-# Edit .env.local with your credentials
+# Set up environment variables (the server reads .env at boot)
+cp .env.example .env
+# Edit .env with your credentials
 
-# Run database migrations
-npx supabase migration up
+# Optional: create PostgreSQL tables (only if you set DATABASE_URL)
+npm run db:migrate
 
 # Start development server
 npm run dev
 ```
+
+Leave `DATABASE_URL` empty in `.env` to run without a database.
 
 ### Build for Production
 
 ```bash
 npm run build
 npm start
+
+# or, containerised
+docker compose up --build
 ```
 
 ### Run Tests
 
 ```bash
+# Type check + SQL/DDL checks against a real (WASM) PostgreSQL
 npm run test
+
+# Full end-to-end OAuth flow against a mock provider (builds first)
 npm run test:e2e
 ```
+
+Other checks: `npm run lint` / `npm run typecheck` (both run `tsc --noEmit`).
 
 ---
 
 ## 🔧 Environment Variables
 
-Create a `.env.local` file:
+Copy `.env.example` to `.env` — that file is the authoritative, commented
+reference. The server loads it at boot (`import 'dotenv/config'` in
+`server.ts`) and never overrides variables already provided by the platform.
 
 ```env
-# Supabase
-NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
-SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+# AI (ollama = local, gemini = optional paid)
+AI_PROVIDER=ollama
+OLLAMA_BASE_URL=http://ollama:11434
+OLLAMA_MODEL=llama3.2
+GEMINI_API_KEY=
 
-# OAuth
-GOOGLE_CLIENT_ID=your-google-client-id
-GOOGLE_CLIENT_SECRET=your-google-client-secret
-GITHUB_CLIENT_ID=your-github-client-id
-GITHUB_CLIENT_SECRET=your-github-client-secret
-DISCORD_CLIENT_ID=your-discord-client-id
-DISCORD_CLIENT_SECRET=your-discord-client-secret
+# Database — EMPTY = in-memory mode (works out of the box)
+DATABASE_URL=
+POSTGRES_PASSWORD=CHANGE_ME_STRONG_PASSWORD
 
-# Redis (Upstash)
-REDIS_URL=redis://your-redis-url
+# Crypto / bootstrap
+INVITE_ENC_KEY=            # openssl rand -hex 32
+ADMIN_API_TOKEN=           # openssl rand -base64 32
+ADMIN_EMAILS=
 
-# OpenAI
-OPENAI_API_KEY=your-openai-api-key
+# Server
+FRONTEND_URL=http://localhost:3000
+PORT=3000
+DEMO_MODE=false
 
-# App
-NEXT_PUBLIC_APP_URL=https://vanitas-bot.vercel.app
-APP_SECRET=your-app-secret-min-32-chars
+# Optional social login (leave a provider empty to hide its button)
+DISCORD_CLIENT_ID=...
+DISCORD_CLIENT_SECRET=
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=
+GITHUB_CLIENT_ID=...
+GITHUB_CLIENT_SECRET=
 ```
 
-> **⚠️ Security Warning:** Never commit `.env.local` to version control. Use Vercel environment variables for production.
+> **⚠️ Security:** never commit `.env`. It is covered by `.gitignore` and CI
+> (`.github/workflows/ci.yml`) fails the build if any `.env` file other than
+> `.env.example` is ever tracked again. On Vercel/Render, set these as platform
+> environment variables instead.
+>
+> Never prefix a secret with `VITE_` — Vite inlines any `VITE_*` variable into
+> the browser bundle.
 
 ---
 
@@ -660,99 +688,131 @@ APP_SECRET=your-app-secret-min-32-chars
 
 ```
 vanitas/
+├── server.ts                 # Express app — every /api/v1 route, auth, rate limits
+├── api/index.js              # Vercel serverless bundle (built from src/server/vercelEntry.ts)
+├── index.html                # Vite SPA entry point
+├── vite.config.ts            # Vite + React + Tailwind v4
+├── vercel.json               # Build/output, SPA rewrites, security headers
+├── Dockerfile                # Multi-stage build → node dist/server.cjs
+├── docker-compose.yml        # postgres + ollama + app
 ├── src/
-│   ├── app/                    # Next.js App Router
-│   │   ├── (auth)/             # Auth routes (login, register, callback)
-│   │   ├── (dashboard)/        # User dashboard
-│   │   ├── admin/              # Admin center
-│   │   ├── api/                # API routes
-│   │   │   ├── v1/             # API v1 endpoints
-│   │   │   ├── auth/           # Auth callbacks
-│   │   │   └── webhooks/       # Webhook handlers
-│   │   ├── ai/                 # AI assistant interface
-│   │   ├── docs/               # Developer documentation
-│   │   └── layout.tsx          # Root layout
-│   ├── components/             # Reusable UI components
-│   │   ├── ui/                 # Base UI primitives
-│   │   ├── auth/               # Auth-related components
-│   │   ├── admin/              # Admin dashboard components
-│   │   ├── dashboard/          # User dashboard components
-│   │   ├── api-keys/           # API key management
-│   │   ├── security/           # Security center components
-│   │   └── ai/                 # AI assistant components
-│   ├── lib/                    # Utilities and helpers
-│   │   ├── supabase/           # Supabase client & server
-│   │   ├── auth/               # Auth utilities
-│   │   ├── api/                # API client
-│   │   ├── permissions/        # Permission checks
-│   │   ├── security/           # Security engine
-│   │   └── ai/                 # AI integration
-│   ├── hooks/                  # Custom React hooks
-│   ├── types/                  # TypeScript type definitions
-│   ├── styles/                 # Global styles
-│   └── middleware.ts           # Next.js middleware (auth, rate limit)
-├── supabase/
-│   ├── migrations/             # Database migrations
-│   ├── functions/              # Edge functions
-│   └── policies/               # RLS policies
-├── public/                     # Static assets
-├── tests/                      # Test suites
-├── .env.example                # Environment template
-├── next.config.js              # Next.js configuration
-├── tailwind.config.ts          # Tailwind CSS configuration
-├── tsconfig.json               # TypeScript configuration
-└── package.json
+│   ├── main.tsx / App.tsx    # React entry + app shell
+│   ├── types.ts              # Shared domain types (User, ApiKey, …)
+│   ├── components/           # Views, CommandPalette, charts, modals
+│   ├── pages/                # AuthPage and other top-level screens
+│   ├── context/              # AuthContext (client session state)
+│   ├── lib/                  # apiClient (Bearer-aware fetch), client helpers
+│   ├── data/                 # Static fixture content (docs, releases)
+│   └── server/               # Server-only modules (never bundled into the SPA)
+│       ├── security.ts       # getActorUser, requireAdmin, rateLimit, sanitizers
+│       ├── db.ts             # In-memory store, ALL_SCOPES, API-key hashing
+│       ├── pg.ts             # PostgreSQL pool + idempotent SCHEMA_DDL upgrades
+│       ├── authStore.ts      # Accounts, sessions, TOTP, 2FA brute-force lockout
+│       ├── apiKeyAuth.ts     # x-api-key auth, scope checks, per-key rate limits
+│       ├── apiKeyStore.ts    # Durable api_keys persistence (jsonb record)
+│       ├── oauth.ts          # Signed state + code exchange
+│       ├── totp.ts           # TOTP secret generation / verification
+│       ├── aiService.ts      # AI provider client + semantic search
+│       └── vercelEntry.ts    # Serverless wrapper → api/index.js
+├── scripts/                  # migrate.js, sql-check.mjs, e2e + smoke tests
+├── supabase/schema.sql       # Canonical PostgreSQL schema (npm run db:migrate)
+├── public/                   # Self-hosted static assets
+├── .github/workflows/        # ci.yml (typecheck + build + secret scan), codeql.yml
+└── .env.example              # Every supported variable, annotated
 ```
 
 ---
 
 ## 🔌 API Endpoints
 
+All routes are served by `server.ts` (Express). Unless noted, authentication is
+`Authorization: Bearer <session token>`; the `/public/*` surface uses
+`x-api-key: sk_live_vanitas_…` instead.
+
+### Health & meta
+
+| Method | Endpoint | Description | Auth |
+|--------|----------|-------------|------|
+| `GET` | `/api/v1/health` | Liveness probe | — |
+| `GET` | `/api/v1/ready` | Readiness (DB reachable?) | — |
+| `GET` | `/api/v1/status` | Public status snapshot | — |
+
 ### Authentication
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/api/auth/providers` | List OAuth providers |
-| `GET` | `/api/auth/callback/[provider]` | OAuth callback |
-| `POST` | `/api/auth/logout` | Sign out |
-| `GET` | `/api/auth/session` | Get current session |
+| Method | Endpoint | Description | Auth |
+|--------|----------|-------------|------|
+| `POST` | `/api/v1/auth/register` | Create an account (first one bootstraps as ADMIN) | — |
+| `POST` | `/api/v1/auth/login` | Password login (may require 2FA) | — |
+| `POST` | `/api/v1/auth/logout` | Revoke the current session | Bearer |
+| `GET` | `/api/v1/auth/me` | Current user + permissions | Bearer |
+| `PATCH` | `/api/v1/auth/profile` | Update own profile | Bearer |
+| `POST` | `/api/v1/auth/password` | Change password | Bearer |
+| `DELETE` | `/api/v1/auth/account` | Delete own account | Bearer |
+| `GET` | `/api/v1/auth/sessions` | List active sessions | Bearer |
+| `DELETE` | `/api/v1/auth/sessions/:id` | Revoke one session | Bearer |
+| `POST` | `/api/v1/auth/2fa/{setup,enable,disable,complete}` | TOTP lifecycle | Bearer / challenge |
+| `GET` | `/api/v1/auth/providers` | Which OAuth providers are configured | — |
+| `GET` | `/api/v1/social/:provider` | Start OAuth (sets the state cookie) | — |
+| `GET` | `/api/v1/social/:provider/callback` | OAuth callback | state + cookie |
 
-### Users
+### API keys
 
 | Method | Endpoint | Description | Auth |
 |--------|----------|-------------|------|
-| `GET` | `/api/v1/users/me` | Get current user | API Key |
-| `GET` | `/api/v1/users` | List users | Admin |
-| `GET` | `/api/v1/users/:id` | Get user by ID | Admin |
-| `PATCH` | `/api/v1/users/:id` | Update user | Admin |
-| `DELETE` | `/api/v1/users/:id` | Delete user | Admin |
+| `GET` | `/api/v1/api-keys` | List keys (own, or all for ADMIN) | Bearer |
+| `POST` | `/api/v1/api-keys` | Create a key → returns `rawSecret` once | Bearer |
+| `POST` | `/api/v1/api-keys/:id/rotate` | Rotate the secret | Bearer |
+| `DELETE` | `/api/v1/api-keys/:id` | Revoke | Bearer |
+| `PATCH` | `/api/v1/api-keys/:id/scopes` | Change scopes | Bearer |
+| `PATCH` | `/api/v1/api-keys/:id/rate-limit` | Change rate/quota policy | Bearer |
+| `GET` | `/api/v1/api-keys/usage-analytics` | Time-series usage | Bearer |
 
-### API Keys
+### Public API (key-authenticated)
 
-| Method | Endpoint | Description | Auth |
-|--------|----------|-------------|------|
-| `GET` | `/api/v1/keys` | List API keys | API Key |
-| `POST` | `/api/v1/keys` | Create API key | API Key |
-| `PATCH` | `/api/v1/keys/:id` | Update key scopes | API Key |
-| `POST` | `/api/v1/keys/:id/rotate` | Rotate key | API Key |
-| `DELETE` | `/api/v1/keys/:id` | Revoke key | API Key |
+| Method | Endpoint | Scope | Description |
+|--------|----------|-------|-------------|
+| `GET` | `/api/v1/public/ping` | — | Liveness for machine clients |
+| `GET` | `/api/v1/public/me` | — | This key's identity + usage |
+| `GET` | `/api/v1/public/quota` | — | This key's quota + rate window |
+| `GET` | `/api/v1/public/status` | `api.read` | Aggregated platform status |
 
 ### Admin
 
 | Method | Endpoint | Description | Auth |
 |--------|----------|-------------|------|
-| `GET` | `/api/v1/admin/stats` | Platform statistics | Admin |
-| `GET` | `/api/v1/admin/logs` | Audit logs | Admin |
-| `GET` | `/api/v1/admin/logs/export` | Export CSV | Admin |
-| `GET` | `/api/v1/admin/health` | System health | Admin |
+| `GET` | `/api/v1/admin/users` | List accounts | ADMIN |
+| `PATCH` | `/api/v1/admin/users/:id/role` | Change role | ADMIN |
+| `PATCH` | `/api/v1/admin/users/:id/verification` | Set verification badge | ADMIN |
+| `DELETE` | `/api/v1/admin/users/:id` | Delete account | ADMIN |
+| `GET/POST/DELETE` | `/api/v1/admin/invites[/:id]` | Invite links | ADMIN |
+| `GET` | `/api/v1/admin/logs` | Audit logs (paginated) | ADMIN |
+| `GET` | `/api/v1/admin/logs/export` | Audit logs as CSV | ADMIN |
+| `GET` | `/api/v1/admin/statistics` | Platform statistics | ADMIN |
+| `GET/PATCH` | `/api/v1/admin/feature-flags[/:id]` | Feature flags | ADMIN |
+| `GET/PATCH` | `/api/v1/admin/suggestions[/:id]` | Product suggestions | ADMIN |
+| `POST` | `/api/v1/admin/emergency` | Emergency controls | ADMIN |
 
-### AI
+### AI, bots, webhooks
 
 | Method | Endpoint | Description | Auth |
 |--------|----------|-------------|------|
-| `POST` | `/api/v1/ai/chat` | AI assistant chat | API Key |
-| `POST` | `/api/v1/ai/code` | Code assistant | API Key |
-| `POST` | `/api/v1/ai/search` | Web search | API Key |
+| `POST` | `/api/v1/ai/chat` | Assistant chat (streaming supported) | Bearer |
+| `POST` | `/api/v1/ai/diagnose-fix` | Code diagnosis | Bearer |
+| `GET/DELETE` | `/api/v1/ai/history` | Chat history | Bearer |
+| `GET` | `/api/v1/search/semantic` | Documentation search | — |
+| `POST` | `/api/v1/bot/execute` | Bot gateway execution | ADMIN |
+| `GET/POST` | `/api/v1/webhooks[/:id/test]` | Webhook endpoints | ADMIN |
+
+### Other
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/v1/comments/:docId` · `POST` · `DELETE /:id` | Doc comments |
+| `GET` | `/api/v1/profiles/:username` | Public profile (per-IP rate limited) |
+| `GET` | `/api/v1/invites/:token` | Invite preview (per-IP rate limited) |
+| `POST` | `/api/v1/suggestions` | Submit product feedback |
+| `GET` | `/api/v1/youtube/search` | Video search proxy |
+| `GET` | `/api/v1/download/:type` | Signed client artifacts |
 
 ---
 
@@ -794,21 +854,21 @@ If you discover a security vulnerability, please email **security@vanitas.dev** 
 ### Running Tests
 
 ```bash
-# Unit tests
+# Type check + SQL/DDL checks (self-contained, no server needed)
 npm run test
 
-# E2E tests
+# End-to-end OAuth flow against a mock provider (runs npm run build first)
 npm run test:e2e
 
-# Type checking
+# Type checking only
 npm run typecheck
 
-# Linting
+# Alias of typecheck
 npm run lint
-
-# Full verification
-npm run verify
 ```
+
+> Earlier revisions of this file listed `npm run verify` and a unit-test suite
+> that do not exist in this repository.
 
 ---
 
