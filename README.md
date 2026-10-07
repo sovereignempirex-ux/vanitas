@@ -182,6 +182,7 @@ Open `http://localhost:3000`. This uses free/open-source software locally; hosti
 - Developer portal and documentation
 - Activity feed and notifications
 - Connected accounts management
+- Account directory search and private messaging (real accounts only — never seeded)
 
 ### 🔔 Notifications
 - New login / new device alerts
@@ -813,6 +814,24 @@ All routes are served by `server.ts` (Express). Unless noted, authentication is
 | `POST` | `/api/v1/suggestions` | Submit product feedback |
 | `GET` | `/api/v1/youtube/search` | Video search proxy |
 | `GET` | `/api/v1/download/:type` | Signed client artifacts |
+| `GET` | `/api/v1/members/accounts?q=` | Search real accounts by name or @username (Bearer) |
+| `GET` | `/api/v1/members/conversations` | Inbox: peers, last message, unread count (Bearer) |
+| `GET` | `/api/v1/members/conversations/:username` | Thread with an account — marks it read (Bearer) |
+| `POST` | `/api/v1/members/messages` | Send a private message to a real account (Bearer) |
+| `GET` | `/api/v1/github/status` | Is the account connected to GitHub? (Bearer) |
+| `GET` | `/api/v1/github/repos` | The user's own GitHub repositories (Bearer) |
+| `POST` | `/api/v1/github/import` | Import a repo as a published project (Bearer) |
+| `GET` | `/api/v1/publish/projects` | The signed-in user's published projects (Bearer) |
+| `GET` | `/api/v1/publish/projects/public` | Public project gallery |
+| `GET` | `/api/v1/publish/projects/:id` | Project detail with files |
+| `DELETE` | `/api/v1/publish/projects/:id` | Delete own project (owner/admin) |
+| `GET` | `/api/v1/publish/projects/:id/preview` | Sandboxed web preview (sandboxed iframe) |
+| `POST` | `/api/v1/publish/snippets` | Publish an individual code file (Bearer) |
+| `GET` | `/api/v1/publish/snippets` | The signed-in user's snippets (Bearer) |
+| `GET` | `/api/v1/publish/snippets/public` | Public snippet gallery |
+| `GET` | `/api/v1/publish/snippets/:id` | Snippet detail |
+| `DELETE` | `/api/v1/publish/snippets/:id` | Delete own snippet (owner/admin) |
+| `GET` | `/api/v1/publish/snippets/:id/preview` | Sandboxed preview (HTML snippets) |
 
 ---
 

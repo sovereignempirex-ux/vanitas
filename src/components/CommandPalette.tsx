@@ -31,6 +31,7 @@ import {
   Layers,
   HelpCircle,
   MessageSquare,
+  Rocket,
 } from 'lucide-react';
 
 interface CommandPaletteProps {
@@ -114,6 +115,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({ isOpen, onClose 
     { id: 'webhooks', label: 'Configure Webhook Dispatcher', category: 'Ecosystem', icon: Webhook, view: 'webhooks' },
     { id: 'status', label: 'View Public System Uptime & Cloud DB Status', category: 'Platform', icon: Activity, view: 'status' },
     { id: 'profile', label: 'Change Identity & Character Preset', category: 'Account', icon: User, view: 'profile' },
+    { id: 'publish', label: 'Publish GitHub Projects & Code Sandbox', category: 'Community', icon: Rocket, view: 'publish' },
     ...(role === 'ADMIN'
       ? [
           { id: 'admin-center', label: 'Manage Users & RBAC Matrix', category: 'Admin Center', icon: Users, view: 'admin-center' },

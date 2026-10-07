@@ -56,6 +56,20 @@ create table if not exists public.ai_chat_messages (
 );
 create index if not exists ai_chat_user_created_idx on public.ai_chat_messages (user_id, created_at desc);
 alter table public.ai_chat_messages enable row level security;
+create table if not exists public.direct_messages (
+  id text primary key,
+  sender_id text not null references public.users(id) on delete cascade,
+  recipient_id text not null references public.users(id) on delete cascade,
+  content text not null check (char_length(content) between 1 and 4000),
+  created_at timestamptz not null default now(),
+  read_at timestamptz,
+  check (sender_id <> recipient_id)
+);
+create index if not exists direct_messages_pair_created_idx
+  on public.direct_messages (sender_id, recipient_id, created_at desc);
+create index if not exists direct_messages_recipient_unread_idx
+  on public.direct_messages (recipient_id, created_at desc) where read_at is null;
+alter table public.direct_messages enable row level security;
 create table if not exists public.admin_invites (
   id text primary key,
   token text not null unique,
@@ -102,6 +116,41 @@ alter table if exists public.users add column if not exists totp_locked_until ti
 -- is the display-only prefix-suffix string the dashboard renders.
 alter table if exists public.api_keys add column if not exists record jsonb;
 alter table if exists public.api_keys add column if not exists masked_secret text;
+-- Publishing & sandbox: the user's GitHub grant (AES-256-GCM
+-- ciphertext, never the raw token), published projects and
+-- individual code snippets. All FK-cascade with the account.
+create table if not exists public.github_tokens (
+  user_id text primary key references public.users(id) on delete cascade,
+  access_token text not null,
+  granted_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create table if not exists public.published_projects (
+  id text primary key,
+  owner_id text not null references public.users(id) on delete cascade,
+  source text not null check (source in ('github', 'manual')),
+  title text not null check (char_length(title) between 1 and 120),
+  description text not null default '',
+  repo_url text not null default '',
+  language text not null default '',
+  is_web boolean not null default false,
+  files jsonb not null default '[]',
+  created_at timestamptz not null default now()
+);
+create index if not exists published_projects_owner_idx on public.published_projects (owner_id, created_at desc);
+create index if not exists published_projects_created_idx on public.published_projects (created_at desc);
+alter table public.published_projects enable row level security;
+create table if not exists public.published_snippets (
+  id text primary key,
+  owner_id text not null references public.users(id) on delete cascade,
+  title text not null check (char_length(title) between 1 and 120),
+  language text not null default 'text',
+  content text not null check (char_length(content) between 1 and 100000),
+  created_at timestamptz not null default now()
+);
+create index if not exists published_snippets_owner_idx on public.published_snippets (owner_id, created_at desc);
+create index if not exists published_snippets_created_idx on public.published_snippets (created_at desc);
+alter table public.published_snippets enable row level security;
 -- Invite tokens are live credentials (some grant ADMIN): look them up by
 -- sha256 hash, never by the raw value. The token column itself only ever
 -- holds either the legacy plaintext (pre-hardening rows) or the enc:v1:

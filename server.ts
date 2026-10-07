@@ -26,7 +26,9 @@ import {
 import { processAiQuery, processAiQueryStream, diagnoseAndFixCode, performSemanticSearch, searchYouTubeVideos, getLastAiUpstream } from './src/server/aiService.ts';
 import { authenticateApiKey, requireScope, rateWindowStatus, nextQuotaReset } from './src/server/apiKeyAuth.ts';
 import { loadApiKeys, saveApiKey, flushAllUsage } from './src/server/apiKeyStore.ts';
-import { ClientSource, UserRole, PermissionScope, ProductSuggestion, ApiKey, User, AuditLog, VerificationType, AdminInvite, WebhookEndpoint, WebhookDeliveryLog, PublicUserComment, ProfileLink } from './src/types.ts';
+import { saveGitHubToken, getGitHubToken, clearGitHubToken, listUserRepos, importRepoFiles, GITHUB_ERRORS } from './src/server/githubStore.ts';
+import { createProject, getProject, listProjects, listPublicProjects, deleteProject, createSnippet, getSnippet, listSnippets, listPublicSnippets, deleteSnippet, purgePublishedData, projectDetail, snippetDetail, MAX_TITLE, MAX_DESCRIPTION, MAX_SNIPPET } from './src/server/publishStore.ts';
+import { ClientSource, UserRole, PermissionScope, ProductSuggestion, ApiKey, User, AuditLog, VerificationType, AdminInvite, WebhookEndpoint, WebhookDeliveryLog, PublicUserComment, ProfileLink, SocialAccount, SocialConversation, DirectMessage } from './src/types.ts';
 import { getActorUser, requireAdmin, rateLimit, sanitizeText, sanitizeUrl, csvCell, parsePagination, secureToken, secureId, isValidScope } from './src/server/security.ts';
 
 function mapSuggestion(row: Record<string, any>): ProductSuggestion {
@@ -314,6 +316,107 @@ async function clearAiChatHistory(userId: string): Promise<number> {
   return Number(result.rowCount || 0);
 }
 
+// ---------------------------------------------------------------------------
+// Direct messages — REAL user-to-user messages between registered
+// accounts. PostgreSQL (public.direct_messages) when DATABASE_URL is
+// set, in-memory otherwise (process-local, resets on restart — exactly
+// like the comment and AI-chat stores above). Only ever contains
+// messages that were actually exchanged; NEVER seeded, so a fresh
+// install always starts with an empty inbox and an empty directory.
+// ---------------------------------------------------------------------------
+interface MemoryDirectMessage {
+  id: string;
+  senderId: string;
+  recipientId: string;
+  content: string;
+  createdAt: string;
+  readAt: string | null;
+}
+
+const memoryMessages: MemoryDirectMessage[] = [];
+const MEMORY_DM_RETAIN = 500; // newest messages kept per account (memory mode)
+
+/** Public-facing account summary shared by search + conversation lists. */
+function toAccountSummary(u: User): SocialAccount {
+  return {
+    username: u.username,
+    name: u.name,
+    avatarUrl: u.avatarUrl || '/images/avatar-default.svg',
+    verification: u.verification || '',
+    statusLine: u.statusLine || undefined,
+  };
+}
+
+/** Resolve a claimable @username to its account. Accounts without a
+ *  claimed username are not directory entries — search and messaging
+ *  only ever address real, named accounts. */
+function findMemoryUserByUsername(username: string): User | undefined {
+  const u = username.trim().toLowerCase();
+  return db.users.find((x) => x.username !== '' && (x.username || '').toLowerCase() === u);
+}
+
+/** Case-insensitive name/username directory search — the in-memory twin
+ *  of the members/accounts SQL. Exact username matches rank first. */
+function searchAccountsMemory(actorId: string, query: string): SocialAccount[] {
+  const q = query.trim().toLowerCase();
+  return db.users
+    .filter((u) => u.id !== actorId && u.username !== '')
+    .filter((u) => u.username.toLowerCase().includes(q) || u.name.toLowerCase().includes(q))
+    .sort((a, b) => {
+      const rank = (x: User) => (x.username.toLowerCase() === q ? 0 : 1);
+      return rank(a) - rank(b) || a.username.toLowerCase().localeCompare(b.username.toLowerCase());
+    })
+    .slice(0, 20)
+    .map(toAccountSummary);
+}
+
+/** Inbox: one row per peer with the newest exchange + unread count. */
+function listConversationsMemory(actorId: string): SocialConversation[] {
+  const byPeer = new Map<string, MemoryDirectMessage[]>();
+  for (const m of memoryMessages) {
+    if (m.senderId !== actorId && m.recipientId !== actorId) continue;
+    const peerId = m.senderId === actorId ? m.recipientId : m.senderId;
+    const list = byPeer.get(peerId);
+    if (list) list.push(m);
+    else byPeer.set(peerId, [m]);
+  }
+  const out: SocialConversation[] = [];
+  for (const [peerId, msgs] of byPeer) {
+    const peer = db.users.find((u) => u.id === peerId);
+    // Deleted or username-less accounts are not directory entries.
+    if (!peer || peer.username === '') continue;
+    msgs.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+    const last = msgs[0];
+    out.push({
+      ...toAccountSummary(peer),
+      lastMessage: last.content,
+      lastMessageAt: last.createdAt,
+      unreadCount: msgs.filter((m) => m.senderId === peerId && m.recipientId === actorId && m.readAt === null).length,
+    });
+  }
+  out.sort((a, b) => (a.lastMessageAt < b.lastMessageAt ? 1 : -1));
+  return out.slice(0, 100);
+}
+
+/** Keep the newest MEMORY_DM_RETAIN messages involving an account so the
+ *  memory store cannot grow without bound (same policy as AI chat). */
+function retainMemoryMessages(userId: string): void {
+  const mine = memoryMessages.filter((m) => m.senderId === userId || m.recipientId === userId);
+  if (mine.length <= MEMORY_DM_RETAIN) return;
+  const excess = new Set(mine.slice(0, mine.length - MEMORY_DM_RETAIN).map((m) => m.id));
+  for (let i = memoryMessages.length - 1; i >= 0; i--) {
+    if (excess.has(memoryMessages[i].id)) memoryMessages.splice(i, 1);
+  }
+}
+
+/** Account deletion sweeps every message the account sent or received. */
+function purgeMemoryMessages(userId: string): void {
+  for (let i = memoryMessages.length - 1; i >= 0; i--) {
+    const m = memoryMessages[i];
+    if (m.senderId === userId || m.recipientId === userId) memoryMessages.splice(i, 1);
+  }
+}
+
 export async function buildApp() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
@@ -451,6 +554,12 @@ export async function buildApp() {
   // Comments are path-parameterised (/comments/:docId and /comments/:id), so a
   // path-keyed bucket would reset on every distinct doc id — per IP only.
   app.use('/api/v1/comments/', rateLimit({ windowMs: 60_000, max: 30, perIpOnly: true }));
+  app.use('/api/v1/members/', rateLimit({ windowMs: 60_000, max: 60, perIpOnly: true }));
+  // GitHub fan-out: every repo listing / import costs real upstream
+  // requests against the user's own token — a tighter per-IP ceiling
+  // keeps a spraying client from burning that quota.
+  app.use('/api/v1/github/', rateLimit({ windowMs: 60_000, max: 30 }));
+  app.use('/api/v1/publish/', rateLimit({ windowMs: 60_000, max: 60, perIpOnly: true }));
   app.use('/api/v1/youtube/', rateLimit({ windowMs: 60_000, max: 60 }));
   app.use('/api/v1/search/', rateLimit({ windowMs: 60_000, max: 60 }));
   app.use('/api/v1/semantic-search', rateLimit({ windowMs: 60_000, max: 60 }));
@@ -1111,6 +1220,13 @@ export async function buildApp() {
         for (let i = memoryAiChat.length - 1; i >= 0; i--) {
           if (memoryAiChat[i].userId === actor.id) memoryAiChat.splice(i, 1);
         }
+        // Private messages go with the account in both storage modes
+        // (PG cascades via FK; memory mode sweeps explicitly).
+        purgeMemoryMessages(actor.id);
+        // Published projects, snippets and the GitHub grant follow
+        // the account (PG: FK cascade; memory: explicit sweeps).
+        purgePublishedData(actor.id);
+        await clearGitHubToken(actor.id);
       }
       res.json({ success: true });
     } catch (err) {
@@ -1445,6 +1561,17 @@ export async function buildApp() {
         name: profile.name,
         avatarUrl: profile.avatarUrl,
       });
+      // Persist the GitHub grant so the publishing system can read
+      // the user's repositories. The token is encrypted at rest and
+      // never returned to any client. A storage hiccup must not
+      // fail the login itself.
+      if (provider === 'github') {
+        try {
+          await saveGitHubToken(user.id, accessToken);
+        } catch (err) {
+          console.error('[auth] github token store failed:', (err as Error).message);
+        }
+      }
       // Real 2FA: an OAuth sign-in must still prove the authenticator code.
       // Issue a short-lived signed challenge instead of a session token; the
       // SPA collects the code and finishes via POST /auth/2fa/complete.
@@ -2399,6 +2526,461 @@ export async function buildApp() {
     }
   });
 
+  // ----------------------------------------------------
+  // ACCOUNT SEARCH + DIRECT MESSAGING — real, DB-backed, written
+  // by registered accounts only. Every route requires a real
+  // session; a message is only ever readable by its two
+  // participants. No fake directory entries, no seeded
+  // conversations, ever — a fresh install starts empty.
+  // ----------------------------------------------------
+  app.get('/api/v1/members/accounts', async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
+    const query = sanitizeText(req.query.q, 80).trim();
+    if (query.length < 2) return res.json({ accounts: [] });
+    try {
+      if (databasePool) {
+        await ensureSchema();
+        const result = await databasePool.query(
+          `select username, name, avatar_url, verification, status_line
+             from public.users
+            where username <> '' and id <> $1
+              and (username ilike $2 escape '\\' or name ilike $2 escape '\\')
+            order by case when lower(username) = lower($3) then 0 else 1 end, lower(username)
+            limit 20`,
+          [actor.id, `%${query.replace(/[\\%_]/g, '\\$&')}%`, query],
+        );
+        return res.json({ accounts: result.rows.map((row) => ({
+          username: row.username, name: row.name, avatarUrl: row.avatar_url || '/images/avatar-default.svg',
+          verification: row.verification || '', statusLine: row.status_line || undefined,
+        })) });
+      }
+      res.json({ accounts: searchAccountsMemory(actor.id, query) });
+    } catch (err) {
+      console.error('[social/accounts]', (err as Error).message);
+      res.status(500).json({ error: 'Account search failed' });
+    }
+  });
+
+  app.get('/api/v1/members/conversations', async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
+    try {
+      if (databasePool) {
+        await ensureSchema();
+        const result = await databasePool.query(
+          `with latest as (
+             select distinct on (peer_id) peer_id, content, created_at,
+               (select count(*)::int from public.direct_messages unread
+                 where unread.sender_id = dm.peer_id and unread.recipient_id = $1 and unread.read_at is null) as unread_count
+             from (
+               select *, case when sender_id = $1 then recipient_id else sender_id end as peer_id
+               from public.direct_messages where sender_id = $1 or recipient_id = $1
+             ) dm order by peer_id, created_at desc
+           )
+           select u.username, u.name, u.avatar_url, u.verification, u.status_line,
+                  latest.content, latest.created_at, latest.unread_count
+             from latest join public.users u on u.id = latest.peer_id
+            where u.username <> '' order by latest.created_at desc limit 100`, [actor.id],
+        );
+        return res.json({ conversations: result.rows.map((row) => ({
+          username: row.username, name: row.name, avatarUrl: row.avatar_url || '/images/avatar-default.svg',
+          verification: row.verification || '', statusLine: row.status_line || undefined,
+          lastMessage: row.content, lastMessageAt: row.created_at, unreadCount: row.unread_count,
+        })) });
+      }
+      res.json({ conversations: listConversationsMemory(actor.id) });
+    } catch (err) {
+      console.error('[social/conversations]', (err as Error).message);
+      res.status(500).json({ error: 'Could not load conversations' });
+    }
+  });
+
+  app.get('/api/v1/members/conversations/:username', async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
+    const username = sanitizeText(req.params.username, 24).trim().toLowerCase();
+    try {
+      if (databasePool) {
+        await ensureSchema();
+        const peer = await databasePool.query('select id, username from public.users where lower(username) = $1 and username <> \'\'', [username]);
+        if (!peer.rows[0]) return res.status(404).json({ error: 'Account not found' });
+        const peerId = peer.rows[0].id;
+        if (peerId === actor.id) return res.status(400).json({ error: 'You cannot message yourself' });
+        await databasePool.query(
+          `update public.direct_messages set read_at = now()
+            where sender_id = $1 and recipient_id = $2 and read_at is null`, [peerId, actor.id],
+        );
+        const result = await databasePool.query(
+          `select m.id, s.username as sender_username, r.username as recipient_username,
+                  m.content, m.created_at, m.read_at
+             from public.direct_messages m
+             join public.users s on s.id = m.sender_id join public.users r on r.id = m.recipient_id
+            where (m.sender_id = $1 and m.recipient_id = $2) or (m.sender_id = $2 and m.recipient_id = $1)
+            order by m.created_at desc limit 100`, [actor.id, peerId],
+        );
+        return res.json({ messages: result.rows.reverse().map((row) => ({
+          id: row.id, senderUsername: row.sender_username, recipientUsername: row.recipient_username,
+          content: row.content, createdAt: row.created_at, readAt: row.read_at,
+        })) });
+      }
+      const peer = findMemoryUserByUsername(username);
+      if (!peer) return res.status(404).json({ error: 'Account not found' });
+      if (peer.id === actor.id) return res.status(400).json({ error: 'You cannot message yourself' });
+      // Opening the thread marks every peer→me message as read.
+      const now = new Date().toISOString();
+      for (const m of memoryMessages) {
+        if (m.senderId === peer.id && m.recipientId === actor.id && m.readAt === null) m.readAt = now;
+      }
+      const usernameOf = (id: string) => db.users.find((u) => u.id === id)?.username || '';
+      const messages: DirectMessage[] = memoryMessages
+        .filter((m) =>
+          (m.senderId === actor.id && m.recipientId === peer.id) ||
+          (m.senderId === peer.id && m.recipientId === actor.id))
+        .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+        .slice(0, 100)
+        .reverse()
+        .map((m) => ({
+          id: m.id,
+          senderUsername: usernameOf(m.senderId),
+          recipientUsername: usernameOf(m.recipientId),
+          content: m.content,
+          createdAt: m.createdAt,
+          readAt: m.readAt,
+        }));
+      res.json({ messages });
+    } catch (err) {
+      console.error('[social/conversation]', (err as Error).message);
+      res.status(500).json({ error: 'Could not load messages' });
+    }
+  });
+
+  app.post('/api/v1/members/messages', async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
+    const username = sanitizeText(req.body?.username, 24).trim().toLowerCase();
+    const content = typeof req.body?.content === 'string' ? req.body.content.trim() : '';
+    if (!/^[a-z0-9_]{3,24}$/.test(username)) return res.status(400).json({ error: 'Enter a valid account username' });
+    if (!content || content.length > 4000) return res.status(400).json({ error: 'Message must be between 1 and 4000 characters' });
+    try {
+      if (databasePool) {
+        await ensureSchema();
+        const peer = await databasePool.query('select id, username from public.users where lower(username) = $1 and username <> \'\'', [username]);
+        if (!peer.rows[0]) return res.status(404).json({ error: 'Account not found' });
+        if (peer.rows[0].id === actor.id) return res.status(400).json({ error: 'You cannot message yourself' });
+        const inserted = await databasePool.query(
+          `insert into public.direct_messages (id, sender_id, recipient_id, content)
+           values ($1, $2, $3, $4) returning id, content, created_at, read_at`,
+          [secureId('msg'), actor.id, peer.rows[0].id, content],
+        );
+        const row = inserted.rows[0];
+        return res.status(201).json({ message: {
+          id: row.id, senderUsername: actor.username, recipientUsername: peer.rows[0].username,
+          content: row.content, createdAt: row.created_at, readAt: row.read_at,
+        } });
+      }
+      const peer = findMemoryUserByUsername(username);
+      if (!peer) return res.status(404).json({ error: 'Account not found' });
+      if (peer.id === actor.id) return res.status(400).json({ error: 'You cannot message yourself' });
+      const message: MemoryDirectMessage = {
+        id: secureId('msg'),
+        senderId: actor.id,
+        recipientId: peer.id,
+        content,
+        createdAt: new Date().toISOString(),
+        readAt: null,
+      };
+      memoryMessages.push(message);
+      retainMemoryMessages(actor.id);
+      res.status(201).json({ message: {
+        id: message.id, senderUsername: actor.username, recipientUsername: peer.username,
+        content: message.content, createdAt: message.createdAt, readAt: message.readAt,
+      } });
+    } catch (err) {
+      console.error('[social/message]', (err as Error).message);
+      res.status(500).json({ error: 'Message could not be saved' });
+    }
+  });
+
+  // ----------------------------------------------------
+  // GITHUB PUBLISHING + SANDBOX — import the user's own
+  // GitHub repositories (only after their real OAuth
+  // consent, token stored encrypted server-side) and
+  // publish individual code files. Every route needs a
+  // real session; when the account has 2FA enabled, the
+  // login itself already demanded the authenticator
+  // code. No fake projects, no seeded gallery.
+  // ----------------------------------------------------
+
+  /** Map GitHub API sentinel errors to precise HTTP statuses. */
+  function githubError(res: Response, err: unknown): void {
+    const msg = (err as Error).message || '';
+    if (msg === GITHUB_ERRORS.TOKEN_EXPIRED) {
+      res.status(401).json({ error: 'GitHub access expired — reconnect your account', code: 'token_expired' });
+    } else if (msg === GITHUB_ERRORS.RATE_LIMITED) {
+      res.status(429).json({ error: 'GitHub API rate limit reached — retry later', code: 'rate_limited' });
+    } else if (msg === GITHUB_ERRORS.NOT_FOUND) {
+      res.status(404).json({ error: 'Repository not found or not accessible with your grant', code: 'not_found' });
+    } else {
+      console.error('[github]', msg);
+      res.status(502).json({ error: 'GitHub API request failed' });
+    }
+  }
+
+  /** Render user HTML inside a sandboxed iframe: opaque origin,
+   *  no same-origin access to this platform, no forms, no
+   *  popups, no top-level navigation. The srcdoc attribute
+   *  value is escaped so the wrapper page itself stays inert. */
+  function serveSandboxPreview(res: Response, title: string, html: string): void {
+    const esc = (s: string) =>
+      s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    // srcdoc needs & and " escaped (attribute context); the
+    // browser then parses the decoded value as the frame document.
+    const srcdoc = html.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.send(
+      `<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n<title>${esc(title)} — Sandbox Preview</title>\n<style>html,body{margin:0;height:100%;background:#0b1120}.bar{display:flex;align-items:center;gap:.5rem;padding:.5rem .75rem;font:12px/1.4 system-ui,sans-serif;color:#94a3b8;border-bottom:1px solid #1e293b}.dot{width:8px;height:8px;border-radius:50%;background:#f59e0b;flex:none}iframe{width:100%;height:calc(100% - 38px);border:0;display:block}</style>\n</head>\n<body>\n<div class="bar"><span class="dot"></span><span>Sandboxed preview — isolated opaque origin, no access to this platform</span></div>\n<iframe title="sandbox" sandbox="allow-scripts" srcdoc="${srcdoc}"></iframe>\n</body>\n</html>`,
+    );
+  }
+
+  // Is this account connected to GitHub? (never returns the token)
+  app.get('/api/v1/github/status', async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
+    try {
+      const token = await getGitHubToken(actor.id);
+      res.json({ connected: !!token, provider: 'github' });
+    } catch (err) {
+      console.error('[github/status]', (err as Error).message);
+      res.status(500).json({ error: 'Could not read connection state' });
+    }
+  });
+
+  // The signed-in user's own repositories — fetched with THEIR
+  // token, straight from the GitHub API.
+  app.get('/api/v1/github/repos', async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
+    try {
+      const token = await getGitHubToken(actor.id);
+      if (!token) return res.status(409).json({ error: 'Connect your GitHub account first', code: 'not_connected' });
+      const repos = await listUserRepos(token);
+      res.json({ repos });
+    } catch (err) {
+      githubError(res, err);
+    }
+  });
+
+  // Import one GitHub repository as a published project.
+  app.post('/api/v1/github/import', async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
+    const fullName = sanitizeText(req.body?.repo, 200).trim();
+    if (!/^[\w.-]+\/[\w.-]+$/.test(fullName)) {
+      return res.status(400).json({ error: 'Enter a repository as owner/name' });
+    }
+    const [owner, repo] = fullName.split('/');
+    try {
+      const token = await getGitHubToken(actor.id);
+      if (!token) return res.status(409).json({ error: 'Connect your GitHub account first', code: 'not_connected' });
+      const imported = await importRepoFiles(token, owner, repo);
+      if (imported.files.length === 0) {
+        return res.status(422).json({ error: 'No readable text files found in that repository' });
+      }
+      const row = await createProject({
+        ownerId: actor.id,
+        source: 'github',
+        title: imported.title,
+        description: imported.description.slice(0, MAX_DESCRIPTION),
+        repoUrl: imported.repoUrl,
+        language: imported.language,
+        isWeb: imported.isWeb,
+        files: imported.files,
+      });
+      persistAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorEmail: actor.email,
+        action: 'PROJECT_IMPORTED',
+        category: 'API',
+        target: `${imported.title} from ${fullName}`,
+        source: detectSource(req),
+        status: 'SUCCESS',
+        ipAddress: req.ip || 'unknown',
+        metadata: { files: imported.files.length, repoUrl: imported.repoUrl },
+      });
+      res.status(201).json({ project: await projectDetail(row) });
+    } catch (err) {
+      githubError(res, err);
+    }
+  });
+
+  // My published projects.
+  app.get('/api/v1/publish/projects', async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
+    try {
+      res.json({ projects: await listProjects(actor.id) });
+    } catch (err) {
+      console.error('[publish/projects]', (err as Error).message);
+      res.status(500).json({ error: 'Could not load your projects' });
+    }
+  });
+
+  // Public gallery — every real published project, newest first.
+  app.get('/api/v1/publish/projects/public', async (_req, res) => {
+    try {
+      res.json({ projects: await listPublicProjects() });
+    } catch (err) {
+      console.error('[publish/gallery]', (err as Error).message);
+      res.status(500).json({ error: 'Could not load the gallery' });
+    }
+  });
+
+  // One project with its full file list (published = readable by anyone).
+  app.get('/api/v1/publish/projects/:id', async (req, res) => {
+    const id = sanitizeText(req.params.id, 64);
+    try {
+      const row = await getProject(id);
+      if (!row) return res.status(404).json({ error: 'Project not found' });
+      res.json({ project: await projectDetail(row) });
+    } catch (err) {
+      console.error('[publish/project]', (err as Error).message);
+      res.status(500).json({ error: 'Could not load the project' });
+    }
+  });
+
+  // Delete — owner or admin only.
+  app.delete('/api/v1/publish/projects/:id', async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
+    const id = sanitizeText(req.params.id, 64);
+    try {
+      const outcome = await deleteProject(id, { id: actor.id, role: actor.role });
+      if (outcome === 'deleted') return res.json({ success: true });
+      if (outcome === 'forbidden') return res.status(403).json({ error: 'You can only delete your own projects' });
+      res.status(404).json({ error: 'Project not found' });
+    } catch (err) {
+      console.error('[publish/project/delete]', (err as Error).message);
+      res.status(500).json({ error: 'Could not delete the project' });
+    }
+  });
+
+  // Sandbox preview of a project's index.html.
+  app.get('/api/v1/publish/projects/:id/preview', async (req, res) => {
+    const id = sanitizeText(req.params.id, 64);
+    try {
+      const row = await getProject(id);
+      if (!row) return res.status(404).send('Project not found');
+      const index = row.files.find((f) => /^(?:[^/]+\/)?index\.html$/.test(f.path));
+      if (!index) return res.status(404).send('This project has no index.html to preview');
+      serveSandboxPreview(res, row.title, index.content);
+    } catch (err) {
+      console.error('[publish/project/preview]', (err as Error).message);
+      res.status(500).send('Preview unavailable');
+    }
+  });
+
+  // Publish an individual code file.
+  app.post('/api/v1/publish/snippets', async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
+    const title = sanitizeText(req.body?.title, MAX_TITLE).trim();
+    const language = sanitizeText(req.body?.language, 40).trim().toLowerCase() || 'text';
+    const content = typeof req.body?.content === 'string' ? req.body.content : '';
+    if (!title) return res.status(400).json({ error: 'A title is required' });
+    if (!content || content.length > MAX_SNIPPET) {
+      return res.status(400).json({ error: `Code must be between 1 and ${MAX_SNIPPET} characters` });
+    }
+    try {
+      const row = await createSnippet({ ownerId: actor.id, title, language, content });
+      persistAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorEmail: actor.email,
+        action: 'SNIPPET_PUBLISHED',
+        category: 'API',
+        target: `${title} (${language})`,
+        source: detectSource(req),
+        status: 'SUCCESS',
+        ipAddress: req.ip || 'unknown',
+        metadata: { language, bytes: Buffer.byteLength(content) },
+      });
+      res.status(201).json({ snippet: await snippetDetail(row) });
+    } catch (err) {
+      console.error('[publish/snippet]', (err as Error).message);
+      res.status(500).json({ error: 'Could not publish the code' });
+    }
+  });
+
+  // My published snippets.
+  app.get('/api/v1/publish/snippets', async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
+    try {
+      res.json({ snippets: await listSnippets(actor.id) });
+    } catch (err) {
+      console.error('[publish/snippets]', (err as Error).message);
+      res.status(500).json({ error: 'Could not load your snippets' });
+    }
+  });
+
+  // Public snippet gallery.
+  app.get('/api/v1/publish/snippets/public', async (_req, res) => {
+    try {
+      res.json({ snippets: await listPublicSnippets() });
+    } catch (err) {
+      console.error('[publish/snippets/public]', (err as Error).message);
+      res.status(500).json({ error: 'Could not load the snippet gallery' });
+    }
+  });
+
+  // One snippet (published = readable by anyone).
+  app.get('/api/v1/publish/snippets/:id', async (req, res) => {
+    const id = sanitizeText(req.params.id, 64);
+    try {
+      const row = await getSnippet(id);
+      if (!row) return res.status(404).json({ error: 'Snippet not found' });
+      res.json({ snippet: await snippetDetail(row) });
+    } catch (err) {
+      console.error('[publish/snippet]', (err as Error).message);
+      res.status(500).json({ error: 'Could not load the snippet' });
+    }
+  });
+
+  // Delete — owner or admin only.
+  app.delete('/api/v1/publish/snippets/:id', async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
+    const id = sanitizeText(req.params.id, 64);
+    try {
+      const outcome = await deleteSnippet(id, { id: actor.id, role: actor.role });
+      if (outcome === 'deleted') return res.json({ success: true });
+      if (outcome === 'forbidden') return res.status(403).json({ error: 'You can only delete your own snippets' });
+      res.status(404).json({ error: 'Snippet not found' });
+    } catch (err) {
+      console.error('[publish/snippet/delete]', (err as Error).message);
+      res.status(500).json({ error: 'Could not delete the snippet' });
+    }
+  });
+
+  // Sandbox preview — HTML snippets only.
+  app.get('/api/v1/publish/snippets/:id/preview', async (req, res) => {
+    const id = sanitizeText(req.params.id, 64);
+    try {
+      const row = await getSnippet(id);
+      if (!row) return res.status(404).send('Snippet not found');
+      if (row.language.toLowerCase() !== 'html') {
+        return res.status(404).send('Only HTML snippets have a sandbox preview');
+      }
+      serveSandboxPreview(res, row.title, row.content);
+    } catch (err) {
+      console.error('[publish/snippet/preview]', (err as Error).message);
+      res.status(500).send('Preview unavailable');
+    }
+  });
+
   // Admin: permanently delete an account. Your own account is off-limits and
   // the last remaining ADMIN can never be removed — one admin always survives.
   app.delete('/api/v1/admin/users/:id', async (req, res) => {
@@ -2442,6 +3024,11 @@ export async function buildApp() {
         for (let i = memoryComments.length - 1; i >= 0; i--) {
           if (memoryComments[i].userId === id) memoryComments.splice(i, 1);
         }
+        // Direct messages cascade with the account (PG: FK; memory: sweep).
+        purgeMemoryMessages(id);
+        // Published work and the GitHub grant go with it too.
+        purgePublishedData(id);
+        await clearGitHubToken(id);
       }
       await clearAiChatHistory(id);
       await forgetAccount(id);

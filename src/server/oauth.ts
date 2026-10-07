@@ -51,7 +51,10 @@ const DEFAULTS: Record<OAuthProvider, ProviderDefaults> = {
     authorizeUrl: 'https://github.com/login/oauth/authorize',
     tokenUrl: 'https://github.com/login/oauth/access_token',
     profileUrl: 'https://api.github.com/user',
-    scope: 'read:user user:email',
+    // public_repo (not full `repo`): the platform only needs to
+    // READ the user's public repositories for import — least
+    // privilege that makes the publishing feature work.
+    scope: 'read:user user:email public_repo',
     scopeInTokenRequest: true,
   },
 };

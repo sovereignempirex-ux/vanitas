@@ -28,6 +28,13 @@ import {
   AdminInvite,
   PublicProfile,
   ProfileLink,
+  SocialAccount,
+  SocialConversation,
+  DirectMessage,
+  GitHubRepoInfo,
+  PublishedProject,
+  PublishedProjectDetail,
+  PublishedSnippet,
 } from '../types.ts';
 
 class ApiClient {
@@ -196,6 +203,77 @@ class ApiClient {
   /** Public, shareable profile for /u/<username>. */
   async getPublicProfile(username: string) {
     return this.request<{ profile: PublicProfile }>(`/profiles/${encodeURIComponent(username)}`);
+  }
+
+  async searchAccounts(query: string) {
+    return this.request<{ accounts: SocialAccount[] }>(`/members/accounts?q=${encodeURIComponent(query)}`);
+  }
+
+  async getConversations() {
+    return this.request<{ conversations: SocialConversation[] }>('/members/conversations');
+  }
+
+  async getDirectMessages(username: string) {
+    return this.request<{ messages: DirectMessage[] }>(`/members/conversations/${encodeURIComponent(username)}`);
+  }
+
+  async sendDirectMessage(username: string, content: string) {
+    return this.request<{ message: DirectMessage }>(`/members/messages`, {
+      method: 'POST', body: JSON.stringify({ username, content }),
+    });
+  }
+
+  // ---- GitHub publishing + sandbox ----
+  /** Is the account connected to GitHub? (never exposes the token) */
+  async getGitHubStatus() {
+    return this.request<{ connected: boolean; provider: string }>('/github/status');
+  }
+
+  /** The signed-in user's own repositories, via their OAuth grant. */
+  async listGitHubRepos() {
+    return this.request<{ repos: GitHubRepoInfo[] }>('/github/repos');
+  }
+
+  /** Import a GitHub repository ("owner/name") as a published project. */
+  async importGitHubRepo(repo: string) {
+    return this.request<{ project: PublishedProjectDetail }>('/github/import', {
+      method: 'POST', body: JSON.stringify({ repo }),
+    });
+  }
+
+  async getMyProjects() {
+    return this.request<{ projects: PublishedProject[] }>('/publish/projects');
+  }
+
+  async getPublicProjects() {
+    return this.request<{ projects: PublishedProject[] }>('/publish/projects/public');
+  }
+
+  async getProject(id: string) {
+    return this.request<{ project: PublishedProjectDetail }>(`/publish/projects/${encodeURIComponent(id)}`);
+  }
+
+  async deleteProject(id: string) {
+    return this.request<{ success: boolean }>(`/publish/projects/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  /** Publish an individual code file. */
+  async publishSnippet(params: { title: string; language: string; content: string }) {
+    return this.request<{ snippet: PublishedSnippet }>('/publish/snippets', {
+      method: 'POST', body: JSON.stringify(params),
+    });
+  }
+
+  async getMySnippets() {
+    return this.request<{ snippets: PublishedSnippet[] }>('/publish/snippets');
+  }
+
+  async getPublicSnippets() {
+    return this.request<{ snippets: PublishedSnippet[] }>('/publish/snippets/public');
+  }
+
+  async deleteSnippet(id: string) {
+    return this.request<{ success: boolean }>(`/publish/snippets/${encodeURIComponent(id)}`, { method: 'DELETE' });
   }
 
   // Real two-factor authentication (RFC 6238 TOTP).

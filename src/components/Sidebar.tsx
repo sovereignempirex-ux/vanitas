@@ -21,6 +21,8 @@ import {
   Radio,
   Globe,
   Download,
+  MessagesSquare,
+  Rocket,
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -60,6 +62,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen, setIsMobileOpen 
       title: 'ACCOUNT & SECURITY',
       items: [
         { id: 'profile', label: 'Identity & Avatars', icon: User, badge: null },
+        { id: 'social', label: 'Accounts & Messages', icon: MessagesSquare, badge: null },
+        { id: 'publish', label: 'Publish & Sandbox', icon: Rocket, badge: 'GitHub' },
         { id: 'security', label: 'Security Center & 2FA', icon: Shield, badge: 'Hardened' },
       ],
     },

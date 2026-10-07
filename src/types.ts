@@ -109,6 +109,30 @@ export interface PublicProfile {
   recentComments?: PublicUserComment[];
 }
 
+/** Minimal account identity returned by authenticated account search. */
+export interface SocialAccount {
+  username: string;
+  name: string;
+  avatarUrl: string;
+  verification: VerificationType;
+  statusLine?: string;
+}
+
+export interface SocialConversation extends SocialAccount {
+  lastMessage: string;
+  lastMessageAt: string;
+  unreadCount: number;
+}
+
+export interface DirectMessage {
+  id: string;
+  senderUsername: string;
+  recipientUsername: string;
+  content: string;
+  createdAt: string;
+  readAt: string | null;
+}
+
 export type PermissionScope =
   | 'users.read'
   | 'users.write'
@@ -515,6 +539,69 @@ export interface AiChatHistoryMessage {
   content: string;
   persona?: string;
   createdAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// Publishing & Sandbox — real GitHub projects and individual code files,
+// published by their signed-in owners. Nothing is ever seeded: the
+// gallery starts empty on a fresh install.
+// ---------------------------------------------------------------------------
+
+/** A single file inside a published project. */
+export interface PublishedFile {
+  path: string;
+  content: string;
+  language: string;
+}
+
+export interface PublishedProject {
+  id: string;
+  ownerId: string;
+  ownerName: string;
+  ownerUsername: string;
+  ownerAvatar: string;
+  /** 'github' = imported from the owner's GitHub account, 'manual' = pasted code. */
+  source: 'github' | 'manual';
+  title: string;
+  description: string;
+  /** Original repository URL (github imports only). */
+  repoUrl: string;
+  language: string;
+  /** True when the project contains an index.html → sandbox preview available. */
+  isWeb: boolean;
+  fileCount: number;
+  createdAt: string;
+}
+
+/** Project detail — includes the full file list. */
+export interface PublishedProjectDetail extends PublishedProject {
+  files: PublishedFile[];
+}
+
+/** A single published code file ("snippet"). */
+export interface PublishedSnippet {
+  id: string;
+  ownerId: string;
+  ownerName: string;
+  ownerUsername: string;
+  ownerAvatar: string;
+  title: string;
+  language: string;
+  content: string;
+  createdAt: string;
+}
+
+/** A repository row from the signed-in user's GitHub account (never includes the token). */
+export interface GitHubRepoInfo {
+  fullName: string;
+  name: string;
+  owner: string;
+  description: string;
+  language: string;
+  htmlUrl: string;
+  isPrivate: boolean;
+  updatedAt: string;
+  sizeKb: number;
 }
 
 export interface ExternalDatabaseConfig {

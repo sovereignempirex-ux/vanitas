@@ -917,6 +917,20 @@ create table if not exists public.ai_chat_messages (
 );
 create index if not exists ai_chat_user_created_idx on public.ai_chat_messages (user_id, created_at desc);
 alter table public.ai_chat_messages enable row level security;
+create table if not exists public.direct_messages (
+  id text primary key,
+  sender_id text not null references public.users(id) on delete cascade,
+  recipient_id text not null references public.users(id) on delete cascade,
+  content text not null check (char_length(content) between 1 and 4000),
+  created_at timestamptz not null default now(),
+  read_at timestamptz,
+  check (sender_id <> recipient_id)
+);
+create index if not exists direct_messages_pair_created_idx
+  on public.direct_messages (sender_id, recipient_id, created_at desc);
+create index if not exists direct_messages_recipient_unread_idx
+  on public.direct_messages (recipient_id, created_at desc) where read_at is null;
+alter table public.direct_messages enable row level security;
 create table if not exists public.admin_invites (
   id text primary key,
   token text not null unique,
@@ -963,6 +977,41 @@ alter table if exists public.users add column if not exists totp_locked_until ti
 -- is the display-only prefix-suffix string the dashboard renders.
 alter table if exists public.api_keys add column if not exists record jsonb;
 alter table if exists public.api_keys add column if not exists masked_secret text;
+-- Publishing & sandbox: the user's GitHub grant (AES-256-GCM
+-- ciphertext, never the raw token), published projects and
+-- individual code snippets. All FK-cascade with the account.
+create table if not exists public.github_tokens (
+  user_id text primary key references public.users(id) on delete cascade,
+  access_token text not null,
+  granted_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create table if not exists public.published_projects (
+  id text primary key,
+  owner_id text not null references public.users(id) on delete cascade,
+  source text not null check (source in ('github', 'manual')),
+  title text not null check (char_length(title) between 1 and 120),
+  description text not null default '',
+  repo_url text not null default '',
+  language text not null default '',
+  is_web boolean not null default false,
+  files jsonb not null default '[]',
+  created_at timestamptz not null default now()
+);
+create index if not exists published_projects_owner_idx on public.published_projects (owner_id, created_at desc);
+create index if not exists published_projects_created_idx on public.published_projects (created_at desc);
+alter table public.published_projects enable row level security;
+create table if not exists public.published_snippets (
+  id text primary key,
+  owner_id text not null references public.users(id) on delete cascade,
+  title text not null check (char_length(title) between 1 and 120),
+  language text not null default 'text',
+  content text not null check (char_length(content) between 1 and 100000),
+  created_at timestamptz not null default now()
+);
+create index if not exists published_snippets_owner_idx on public.published_snippets (owner_id, created_at desc);
+create index if not exists published_snippets_created_idx on public.published_snippets (created_at desc);
+alter table public.published_snippets enable row level security;
 -- Invite tokens are live credentials (some grant ADMIN): look them up by
 -- sha256 hash, never by the raw value. The token column itself only ever
 -- holds either the legacy plaintext (pre-hardening rows) or the enc:v1:
@@ -1250,7 +1299,7 @@ async function isUsernameTaken(username, exceptUserId) {
   return db.users.some((x) => (x.username || "").toLowerCase() === u && x.id !== exceptUserId);
 }
 function rowToUser(row) {
-  const iso = (v) => v instanceof Date ? v.toISOString() : v || void 0;
+  const iso2 = (v) => v instanceof Date ? v.toISOString() : v || void 0;
   return {
     id: row.id,
     email: row.email,
@@ -1266,8 +1315,8 @@ function rowToUser(row) {
     role: row.role === "ADMIN" ? "ADMIN" : "USER",
     verification: ["USER", "DEVELOPER", "ADMIN"].includes(row.verification) ? row.verification : "",
     twoFactorEnabled: !!row.two_factor_enabled,
-    createdAt: iso(row.created_at) || (/* @__PURE__ */ new Date()).toISOString(),
-    lastLoginAt: iso(row.last_login_at) || iso(row.created_at) || (/* @__PURE__ */ new Date()).toISOString(),
+    createdAt: iso2(row.created_at) || (/* @__PURE__ */ new Date()).toISOString(),
+    lastLoginAt: iso2(row.last_login_at) || iso2(row.created_at) || (/* @__PURE__ */ new Date()).toISOString(),
     connectedAccounts: row.connected_accounts || { google: false, github: false, discord: false }
   };
 }
@@ -2254,7 +2303,10 @@ var init_oauth = __esm({
         authorizeUrl: "https://github.com/login/oauth/authorize",
         tokenUrl: "https://github.com/login/oauth/access_token",
         profileUrl: "https://api.github.com/user",
-        scope: "read:user user:email",
+        // public_repo (not full `repo`): the platform only needs to
+        // READ the user's public repositories for import — least
+        // privilege that makes the publishing feature work.
+        scope: "read:user user:email public_repo",
         scopeInTokenRequest: true
       }
     };
@@ -4004,6 +4056,510 @@ var init_apiKeyAuth = __esm({
   }
 });
 
+// src/server/githubStore.ts
+import crypto7 from "crypto";
+function encryptToken(token) {
+  if (!githubCryptoKey) return token;
+  const iv = crypto7.randomBytes(12);
+  const cipher = crypto7.createCipheriv("aes-256-gcm", githubCryptoKey, iv);
+  const ct = Buffer.concat([cipher.update(token, "utf8"), cipher.final()]);
+  return `enc:v1:${Buffer.concat([iv, cipher.getAuthTag(), ct]).toString("base64url")}`;
+}
+function decryptToken(stored) {
+  if (!stored || !stored.startsWith("enc:v1:")) return stored || "";
+  if (!githubCryptoKey) return "";
+  try {
+    const raw = Buffer.from(stored.slice("enc:v1:".length), "base64url");
+    const decipher = crypto7.createDecipheriv("aes-256-gcm", githubCryptoKey, raw.subarray(0, 12));
+    decipher.setAuthTag(raw.subarray(12, 28));
+    return Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString("utf8");
+  } catch {
+    return "";
+  }
+}
+async function saveGitHubToken(userId, token) {
+  if (!token) return;
+  if (databasePool) {
+    await ensureSchema();
+    await databasePool.query(
+      `insert into public.github_tokens (user_id, access_token)
+       values ($1, $2)
+       on conflict (user_id) do update set access_token = $2, updated_at = now()`,
+      [userId, encryptToken(token)]
+    );
+    return;
+  }
+  memoryTokens.set(userId, token);
+}
+async function getGitHubToken(userId) {
+  if (databasePool) {
+    await ensureSchema();
+    const r = await databasePool.query("select access_token from public.github_tokens where user_id = $1", [userId]);
+    const stored = r.rows[0]?.access_token;
+    return stored ? decryptToken(stored) : null;
+  }
+  return memoryTokens.get(userId) || null;
+}
+async function clearGitHubToken(userId) {
+  if (databasePool) {
+    try {
+      await databasePool.query("delete from public.github_tokens where user_id = $1", [userId]);
+    } catch (err) {
+      console.error("[github/token-clear]", err.message);
+    }
+    return;
+  }
+  memoryTokens.delete(userId);
+}
+async function ghFetch(path2, token) {
+  const res = await fetch(`${GITHUB_API}${path2}`, {
+    headers: {
+      accept: "application/vnd.github+json",
+      authorization: `Bearer ${token}`,
+      "user-agent": "Vanitas-Publisher",
+      "x-github-api-version": "2022-11-28"
+    }
+  });
+  if (!res.ok) {
+    if (res.status === 401) throw new Error(GITHUB_ERRORS.TOKEN_EXPIRED);
+    if (res.status === 403) throw new Error(GITHUB_ERRORS.RATE_LIMITED);
+    if (res.status === 404) throw new Error(GITHUB_ERRORS.NOT_FOUND);
+    throw new Error(`GITHUB_API_ERROR_${res.status}`);
+  }
+  return res.json();
+}
+async function listUserRepos(token) {
+  const data = await ghFetch("/user/repos?per_page=100&sort=updated&type=owner", token);
+  if (!Array.isArray(data)) return [];
+  return data.map((r) => ({
+    fullName: String(r.full_name || ""),
+    name: String(r.name || ""),
+    owner: String(r.owner?.login || ""),
+    description: String(r.description || ""),
+    language: String(r.language || ""),
+    htmlUrl: String(r.html_url || ""),
+    isPrivate: !!r.private,
+    updatedAt: String(r.updated_at || ""),
+    sizeKb: Number(r.size || 0)
+  }));
+}
+function languageFromPath(path2) {
+  const ext = path2.split(".").pop()?.toLowerCase() || "";
+  return LANGUAGE_BY_EXT[ext] || (ext ? ext.toUpperCase() : "Text");
+}
+async function importRepoFiles(token, owner, repo) {
+  const meta = await ghFetch(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, token);
+  const branch = String(meta.default_branch || "main");
+  const title = String(meta.name || repo);
+  const description = String(meta.description || "");
+  const language = String(meta.language || "");
+  const repoUrl = String(meta.html_url || `https://github.com/${owner}/${repo}`);
+  const tree = await ghFetch(
+    `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
+    token
+  );
+  const entries = Array.isArray(tree.tree) ? tree.tree : [];
+  const files = [];
+  let totalBytes = 0;
+  for (const entry of entries) {
+    if (files.length >= MAX_FILES || totalBytes >= MAX_TOTAL_BYTES) break;
+    if (entry?.type !== "blob" || typeof entry.path !== "string") continue;
+    const path2 = entry.path;
+    if (path2.includes("..")) continue;
+    const ext = path2.split(".").pop()?.toLowerCase() || "";
+    if (SKIP_EXTENSIONS.has(ext)) continue;
+    const file = await ghFetch(
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${path2.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(branch)}`,
+      token
+    );
+    if (file?.encoding !== "base64" || typeof file.content !== "string") continue;
+    const content = Buffer.from(file.content, "base64").toString("utf8");
+    const bytes = Buffer.byteLength(content);
+    if (bytes === 0 || bytes > MAX_FILE_BYTES) continue;
+    if (content.includes("\0")) continue;
+    totalBytes += bytes;
+    files.push({ path: path2, content, language: languageFromPath(path2) });
+  }
+  const isWeb = files.some((f) => /^(?:[^/]+\/)?index\.html$/.test(f.path));
+  return { title, description, repoUrl, language, isWeb, files };
+}
+var memoryTokens, githubCryptoKey, GITHUB_API, GITHUB_ERRORS, MAX_FILES, MAX_FILE_BYTES, MAX_TOTAL_BYTES, SKIP_EXTENSIONS, LANGUAGE_BY_EXT;
+var init_githubStore = __esm({
+  "src/server/githubStore.ts"() {
+    init_pg();
+    memoryTokens = /* @__PURE__ */ new Map();
+    githubCryptoKey = databasePool ? process.env.INVITE_ENC_KEY && process.env.INVITE_ENC_KEY.length >= 32 ? crypto7.createHash("sha256").update(`vanitas.github.v1|${process.env.INVITE_ENC_KEY}`).digest() : process.env.DATABASE_URL ? crypto7.createHash("sha256").update(`vanitas.github.v1|${process.env.DATABASE_URL}`).digest() : null : null;
+    GITHUB_API = "https://api.github.com";
+    GITHUB_ERRORS = {
+      TOKEN_EXPIRED: "GITHUB_TOKEN_EXPIRED",
+      RATE_LIMITED: "GITHUB_RATE_LIMITED",
+      NOT_FOUND: "GITHUB_NOT_FOUND"
+    };
+    MAX_FILES = 200;
+    MAX_FILE_BYTES = 256 * 1024;
+    MAX_TOTAL_BYTES = 2 * 1024 * 1024;
+    SKIP_EXTENSIONS = /* @__PURE__ */ new Set([
+      "png",
+      "jpg",
+      "jpeg",
+      "gif",
+      "ico",
+      "webp",
+      "bmp",
+      "svgz",
+      "woff",
+      "woff2",
+      "ttf",
+      "otf",
+      "eot",
+      "zip",
+      "tar",
+      "gz",
+      "bz2",
+      "7z",
+      "rar",
+      "mp4",
+      "webm",
+      "mov",
+      "mp3",
+      "wav",
+      "ogg",
+      "pdf",
+      "doc",
+      "docx",
+      "xls",
+      "xlsx",
+      "pptx",
+      "sqlite",
+      "db",
+      "jar",
+      "class",
+      "exe",
+      "dll",
+      "so",
+      "dylib",
+      "bin",
+      "pyc"
+    ]);
+    LANGUAGE_BY_EXT = {
+      ts: "TypeScript",
+      tsx: "TypeScript",
+      js: "JavaScript",
+      jsx: "JavaScript",
+      mjs: "JavaScript",
+      cjs: "JavaScript",
+      vue: "Vue",
+      svelte: "Svelte",
+      css: "CSS",
+      scss: "SCSS",
+      html: "HTML",
+      xml: "XML",
+      json: "JSON",
+      md: "Markdown",
+      mdx: "Markdown",
+      py: "Python",
+      rs: "Rust",
+      go: "Go",
+      java: "Java",
+      rb: "Ruby",
+      php: "PHP",
+      c: "C",
+      h: "C",
+      cpp: "C++",
+      hpp: "C++",
+      cs: "C#",
+      sql: "SQL",
+      sh: "Shell",
+      bash: "Shell",
+      zsh: "Shell",
+      yml: "YAML",
+      yaml: "YAML",
+      txt: "Text",
+      swift: "Swift",
+      kt: "Kotlin",
+      lua: "Lua",
+      r: "R",
+      dart: "Dart",
+      scala: "Scala",
+      hs: "Haskell",
+      ex: "Elixir",
+      exs: "Elixir",
+      clj: "Clojure",
+      elm: "Elm",
+      nim: "Nim",
+      zig: "Zig"
+    };
+  }
+});
+
+// src/server/publishStore.ts
+function mapProjectRow(row) {
+  const files = Array.isArray(row.files) ? row.files : [];
+  return {
+    id: row.id,
+    ownerId: row.owner_id,
+    source: row.source === "manual" ? "manual" : "github",
+    title: row.title,
+    description: row.description || "",
+    repoUrl: row.repo_url || "",
+    language: row.language || "",
+    isWeb: !!row.is_web,
+    files: files.map((f) => ({
+      path: String(f?.path || ""),
+      content: String(f?.content || ""),
+      language: String(f?.language || "")
+    })),
+    createdAt: iso(row.created_at)
+  };
+}
+function mapSnippetRow(row) {
+  return {
+    id: row.id,
+    ownerId: row.owner_id,
+    title: row.title,
+    language: row.language || "text",
+    content: row.content,
+    createdAt: iso(row.created_at)
+  };
+}
+async function ownerInfo(ownerId) {
+  if (databasePool) {
+    const r = await databasePool.query(
+      "select name, username, avatar_url from public.users where id = $1",
+      [ownerId]
+    );
+    const row = r.rows[0];
+    return {
+      name: row?.name || "Unknown",
+      username: row?.username || "",
+      avatarUrl: row?.avatar_url || ""
+    };
+  }
+  const u = db.users.find((x) => x.id === ownerId);
+  return { name: u?.name || "Unknown", username: u?.username || "", avatarUrl: u?.avatarUrl || "" };
+}
+function toProjectCard(row, owner) {
+  return {
+    id: row.id,
+    ownerId: row.ownerId,
+    ownerName: owner.name,
+    ownerUsername: owner.username,
+    ownerAvatar: owner.avatarUrl,
+    source: row.source,
+    title: row.title,
+    description: row.description,
+    repoUrl: row.repoUrl,
+    language: row.language,
+    isWeb: row.isWeb,
+    fileCount: row.files.length,
+    createdAt: row.createdAt
+  };
+}
+function toSnippetCard(row, owner) {
+  return {
+    id: row.id,
+    ownerId: row.ownerId,
+    ownerName: owner.name,
+    ownerUsername: owner.username,
+    ownerAvatar: owner.avatarUrl,
+    title: row.title,
+    language: row.language,
+    content: row.content,
+    createdAt: row.createdAt
+  };
+}
+async function createProject(params) {
+  const row = {
+    id: secureId("prj"),
+    ownerId: params.ownerId,
+    source: params.source,
+    title: params.title,
+    description: params.description,
+    repoUrl: params.repoUrl,
+    language: params.language,
+    isWeb: params.isWeb,
+    files: params.files,
+    createdAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  if (databasePool) {
+    await ensureSchema();
+    const r = await databasePool.query(
+      `insert into public.published_projects
+         (id, owner_id, source, title, description, repo_url, language, is_web, files)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9) returning *`,
+      [
+        row.id,
+        row.ownerId,
+        row.source,
+        row.title,
+        row.description,
+        row.repoUrl,
+        row.language,
+        row.isWeb,
+        JSON.stringify(row.files)
+      ]
+    );
+    return mapProjectRow(r.rows[0]);
+  }
+  memoryProjects.push(row);
+  return row;
+}
+async function getProject(id) {
+  if (databasePool) {
+    await ensureSchema();
+    const r = await databasePool.query("select * from public.published_projects where id = $1", [id]);
+    return r.rows[0] ? mapProjectRow(r.rows[0]) : null;
+  }
+  return memoryProjects.find((p) => p.id === id) || null;
+}
+async function listProjects(ownerId) {
+  let rows;
+  if (databasePool) {
+    await ensureSchema();
+    const r = await databasePool.query(
+      "select * from public.published_projects where owner_id = $1 order by created_at desc limit 100",
+      [ownerId]
+    );
+    rows = r.rows.map(mapProjectRow);
+  } else {
+    rows = memoryProjects.filter((p) => p.ownerId === ownerId);
+  }
+  const out = [];
+  for (const row of rows) out.push(toProjectCard(row, await ownerInfo(row.ownerId)));
+  return out;
+}
+async function listPublicProjects() {
+  let rows;
+  if (databasePool) {
+    await ensureSchema();
+    const r = await databasePool.query(
+      "select * from public.published_projects order by created_at desc limit 100"
+    );
+    rows = r.rows.map(mapProjectRow);
+  } else {
+    rows = [...memoryProjects].reverse();
+  }
+  const out = [];
+  for (const row of rows) out.push(toProjectCard(row, await ownerInfo(row.ownerId)));
+  return out;
+}
+async function deleteProject(id, actor) {
+  const row = await getProject(id);
+  if (!row) return "not_found";
+  if (row.ownerId !== actor.id && actor.role !== "ADMIN") return "forbidden";
+  if (databasePool) {
+    await databasePool.query("delete from public.published_projects where id = $1", [id]);
+  } else {
+    const idx = memoryProjects.findIndex((p) => p.id === id);
+    if (idx !== -1) memoryProjects.splice(idx, 1);
+  }
+  return "deleted";
+}
+async function createSnippet(params) {
+  const row = {
+    id: secureId("snp"),
+    ownerId: params.ownerId,
+    title: params.title,
+    language: params.language,
+    content: params.content,
+    createdAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  if (databasePool) {
+    await ensureSchema();
+    const r = await databasePool.query(
+      `insert into public.published_snippets (id, owner_id, title, language, content)
+       values ($1, $2, $3, $4, $5) returning *`,
+      [row.id, row.ownerId, row.title, row.language, row.content]
+    );
+    return mapSnippetRow(r.rows[0]);
+  }
+  memorySnippets.push(row);
+  return row;
+}
+async function getSnippet(id) {
+  if (databasePool) {
+    await ensureSchema();
+    const r = await databasePool.query("select * from public.published_snippets where id = $1", [id]);
+    return r.rows[0] ? mapSnippetRow(r.rows[0]) : null;
+  }
+  return memorySnippets.find((s) => s.id === id) || null;
+}
+async function listSnippets(ownerId) {
+  let rows;
+  if (databasePool) {
+    await ensureSchema();
+    const r = await databasePool.query(
+      "select * from public.published_snippets where owner_id = $1 order by created_at desc limit 100",
+      [ownerId]
+    );
+    rows = r.rows.map(mapSnippetRow);
+  } else {
+    rows = memorySnippets.filter((s) => s.ownerId === ownerId);
+  }
+  const out = [];
+  for (const row of rows) out.push(toSnippetCard(row, await ownerInfo(row.ownerId)));
+  return out;
+}
+async function listPublicSnippets() {
+  let rows;
+  if (databasePool) {
+    await ensureSchema();
+    const r = await databasePool.query(
+      "select * from public.published_snippets order by created_at desc limit 100"
+    );
+    rows = r.rows.map(mapSnippetRow);
+  } else {
+    rows = [...memorySnippets].reverse();
+  }
+  const out = [];
+  for (const row of rows) out.push(toSnippetCard(row, await ownerInfo(row.ownerId)));
+  return out;
+}
+async function deleteSnippet(id, actor) {
+  const row = await getSnippet(id);
+  if (!row) return "not_found";
+  if (row.ownerId !== actor.id && actor.role !== "ADMIN") return "forbidden";
+  if (databasePool) {
+    await databasePool.query("delete from public.published_snippets where id = $1", [id]);
+  } else {
+    const idx = memorySnippets.findIndex((s) => s.id === id);
+    if (idx !== -1) memorySnippets.splice(idx, 1);
+  }
+  return "deleted";
+}
+function purgePublishedData(userId) {
+  if (databasePool) return;
+  for (let i = memoryProjects.length - 1; i >= 0; i--) {
+    if (memoryProjects[i].ownerId === userId) memoryProjects.splice(i, 1);
+  }
+  for (let i = memorySnippets.length - 1; i >= 0; i--) {
+    if (memorySnippets[i].ownerId === userId) memorySnippets.splice(i, 1);
+  }
+}
+async function projectDetail(row) {
+  const owner = await ownerInfo(row.ownerId);
+  const card = toProjectCard(row, owner);
+  return { ...card, files: row.files };
+}
+async function snippetDetail(row) {
+  const owner = await ownerInfo(row.ownerId);
+  return toSnippetCard(row, owner);
+}
+var memoryProjects, memorySnippets, MAX_TITLE, MAX_DESCRIPTION, MAX_SNIPPET, iso;
+var init_publishStore = __esm({
+  "src/server/publishStore.ts"() {
+    init_pg();
+    init_db();
+    init_security();
+    memoryProjects = [];
+    memorySnippets = [];
+    MAX_TITLE = 120;
+    MAX_DESCRIPTION = 2e3;
+    MAX_SNIPPET = 1e5;
+    iso = (v) => v instanceof Date ? v.toISOString() : String(v || (/* @__PURE__ */ new Date()).toISOString());
+  }
+});
+
 // server.ts
 var server_exports = {};
 __export(server_exports, {
@@ -4013,7 +4569,7 @@ __export(server_exports, {
 import "dotenv/config";
 import express from "express";
 import path from "path";
-import crypto7 from "crypto";
+import crypto8 from "crypto";
 function mapSuggestion(row) {
   return {
     id: row.id,
@@ -4148,10 +4704,10 @@ async function publicCommentActivity(username) {
       [u]
     )
   ]);
-  const iso = (v) => v instanceof Date ? v.toISOString() : String(v);
+  const iso2 = (v) => v instanceof Date ? v.toISOString() : String(v);
   return {
     commentCount: countR.rows[0]?.count ?? 0,
-    recentComments: recentR.rows.map((r) => ({ docSlug: r.doc_id, body: r.body, createdAt: iso(r.created_at) }))
+    recentComments: recentR.rows.map((r) => ({ docSlug: r.doc_id, body: r.body, createdAt: iso2(r.created_at) }))
   };
 }
 function mapAiChatRow(row) {
@@ -4223,6 +4779,65 @@ async function clearAiChatHistory(userId) {
   await ensureSchema();
   const result = await databasePool.query("delete from public.ai_chat_messages where user_id = $1", [userId]);
   return Number(result.rowCount || 0);
+}
+function toAccountSummary(u) {
+  return {
+    username: u.username,
+    name: u.name,
+    avatarUrl: u.avatarUrl || "/images/avatar-default.svg",
+    verification: u.verification || "",
+    statusLine: u.statusLine || void 0
+  };
+}
+function findMemoryUserByUsername(username) {
+  const u = username.trim().toLowerCase();
+  return db.users.find((x) => x.username !== "" && (x.username || "").toLowerCase() === u);
+}
+function searchAccountsMemory(actorId, query) {
+  const q = query.trim().toLowerCase();
+  return db.users.filter((u) => u.id !== actorId && u.username !== "").filter((u) => u.username.toLowerCase().includes(q) || u.name.toLowerCase().includes(q)).sort((a, b) => {
+    const rank = (x) => x.username.toLowerCase() === q ? 0 : 1;
+    return rank(a) - rank(b) || a.username.toLowerCase().localeCompare(b.username.toLowerCase());
+  }).slice(0, 20).map(toAccountSummary);
+}
+function listConversationsMemory(actorId) {
+  const byPeer = /* @__PURE__ */ new Map();
+  for (const m of memoryMessages) {
+    if (m.senderId !== actorId && m.recipientId !== actorId) continue;
+    const peerId = m.senderId === actorId ? m.recipientId : m.senderId;
+    const list = byPeer.get(peerId);
+    if (list) list.push(m);
+    else byPeer.set(peerId, [m]);
+  }
+  const out = [];
+  for (const [peerId, msgs] of byPeer) {
+    const peer = db.users.find((u) => u.id === peerId);
+    if (!peer || peer.username === "") continue;
+    msgs.sort((a, b) => a.createdAt < b.createdAt ? 1 : -1);
+    const last = msgs[0];
+    out.push({
+      ...toAccountSummary(peer),
+      lastMessage: last.content,
+      lastMessageAt: last.createdAt,
+      unreadCount: msgs.filter((m) => m.senderId === peerId && m.recipientId === actorId && m.readAt === null).length
+    });
+  }
+  out.sort((a, b) => a.lastMessageAt < b.lastMessageAt ? 1 : -1);
+  return out.slice(0, 100);
+}
+function retainMemoryMessages(userId) {
+  const mine = memoryMessages.filter((m) => m.senderId === userId || m.recipientId === userId);
+  if (mine.length <= MEMORY_DM_RETAIN) return;
+  const excess = new Set(mine.slice(0, mine.length - MEMORY_DM_RETAIN).map((m) => m.id));
+  for (let i = memoryMessages.length - 1; i >= 0; i--) {
+    if (excess.has(memoryMessages[i].id)) memoryMessages.splice(i, 1);
+  }
+}
+function purgeMemoryMessages(userId) {
+  for (let i = memoryMessages.length - 1; i >= 0; i--) {
+    const m = memoryMessages[i];
+    if (m.senderId === userId || m.recipientId === userId) memoryMessages.splice(i, 1);
+  }
 }
 async function buildApp() {
   const app = express();
@@ -4303,6 +4918,9 @@ async function buildApp() {
   app.use("/api/v1/ai/", rateLimit({ windowMs: 6e4, max: 30 }));
   app.use("/api/v1/bot/", rateLimit({ windowMs: 6e4, max: 120 }));
   app.use("/api/v1/comments/", rateLimit({ windowMs: 6e4, max: 30, perIpOnly: true }));
+  app.use("/api/v1/members/", rateLimit({ windowMs: 6e4, max: 60, perIpOnly: true }));
+  app.use("/api/v1/github/", rateLimit({ windowMs: 6e4, max: 30 }));
+  app.use("/api/v1/publish/", rateLimit({ windowMs: 6e4, max: 60, perIpOnly: true }));
   app.use("/api/v1/youtube/", rateLimit({ windowMs: 6e4, max: 60 }));
   app.use("/api/v1/search/", rateLimit({ windowMs: 6e4, max: 60 }));
   app.use("/api/v1/semantic-search", rateLimit({ windowMs: 6e4, max: 60 }));
@@ -4341,7 +4959,7 @@ async function buildApp() {
   });
   app.use((req, _res, next) => {
     const incoming = sanitizeText(req.headers["x-request-id"], 64);
-    req.requestId = incoming || crypto7.randomUUID();
+    req.requestId = incoming || crypto8.randomUUID();
     next();
   });
   function detectSource(req) {
@@ -4830,6 +5448,9 @@ async function buildApp() {
         for (let i = memoryAiChat.length - 1; i >= 0; i--) {
           if (memoryAiChat[i].userId === actor.id) memoryAiChat.splice(i, 1);
         }
+        purgeMemoryMessages(actor.id);
+        purgePublishedData(actor.id);
+        await clearGitHubToken(actor.id);
       }
       res.json({ success: true });
     } catch (err) {
@@ -4837,25 +5458,25 @@ async function buildApp() {
       res.status(500).json({ error: "Account deletion failed" });
     }
   });
-  const twoFactorStateKey = crypto7.createHash("sha256").update(process.env.DATABASE_URL || process.env.ADMIN_API_TOKEN || `local-${crypto7.randomBytes(32).toString("hex")}`).digest();
+  const twoFactorStateKey = crypto8.createHash("sha256").update(process.env.DATABASE_URL || process.env.ADMIN_API_TOKEN || `local-${crypto8.randomBytes(32).toString("hex")}`).digest();
   function currentSessionHash(req) {
     const auth = req.headers.authorization || "";
     const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
     if (!token.startsWith("vnt_sess_")) return void 0;
-    return crypto7.createHash("sha256").update(token).digest("hex");
+    return crypto8.createHash("sha256").update(token).digest("hex");
   }
   function makeTwoFactorState(userId) {
     const payload = Buffer.from(`${userId}.${Date.now() + 10 * 6e4}`).toString("base64url");
-    const sig = crypto7.createHmac("sha256", twoFactorStateKey).update(payload).digest("base64url");
+    const sig = crypto8.createHmac("sha256", twoFactorStateKey).update(payload).digest("base64url");
     return `${payload}.${sig}`;
   }
   function readTwoFactorState(state) {
     const [payload, sig] = state.split(".");
     if (!payload || !sig) return null;
-    const expect = crypto7.createHmac("sha256", twoFactorStateKey).update(payload).digest("base64url");
+    const expect = crypto8.createHmac("sha256", twoFactorStateKey).update(payload).digest("base64url");
     const a = Buffer.from(sig);
     const b = Buffer.from(expect);
-    if (a.length !== b.length || !crypto7.timingSafeEqual(a, b)) return null;
+    if (a.length !== b.length || !crypto8.timingSafeEqual(a, b)) return null;
     const [userId, expStr] = Buffer.from(payload, "base64url").toString().split(".");
     if (!userId || !expStr || Number(expStr) < Date.now()) return null;
     return userId;
@@ -5091,6 +5712,13 @@ async function buildApp() {
         name: profile.name,
         avatarUrl: profile.avatarUrl
       });
+      if (provider === "github") {
+        try {
+          await saveGitHubToken(user.id, accessToken);
+        } catch (err) {
+          console.error("[auth] github token store failed:", err.message);
+        }
+      }
       if (user.twoFactorEnabled) {
         return res.redirect(`${base}/login#vnt_2fa=${makeTwoFactorState(user.id)}`);
       }
@@ -5472,7 +6100,7 @@ async function buildApp() {
     ).catch((err) => console.error("[audit/persist]", err.message));
   }
   function mapAuditRow(row) {
-    const iso = (v) => v instanceof Date ? v.toISOString() : v || "";
+    const iso2 = (v) => v instanceof Date ? v.toISOString() : v || "";
     let metadata = {};
     try {
       metadata = typeof row.metadata === "string" ? JSON.parse(row.metadata) : row.metadata || {};
@@ -5481,7 +6109,7 @@ async function buildApp() {
     }
     return {
       id: row.id,
-      timestamp: iso(row.timestamp),
+      timestamp: iso2(row.timestamp),
       actorId: row.actor_id,
       actorName: row.actor_name,
       actorEmail: row.actor_email,
@@ -5509,7 +6137,7 @@ async function buildApp() {
   }
   const memoryInvites = [];
   function mapInviteRow(row) {
-    const iso = (v) => v instanceof Date ? v.toISOString() : v || "";
+    const iso2 = (v) => v instanceof Date ? v.toISOString() : v || "";
     return {
       id: row.id,
       token: decryptInviteToken(row.token),
@@ -5521,21 +6149,21 @@ async function buildApp() {
       maxUses: Number(row.max_uses) || 1,
       uses: Number(row.uses) || 0,
       revoked: !!row.revoked,
-      expiresAt: iso(row.expires_at),
-      createdAt: iso(row.created_at)
+      expiresAt: iso2(row.expires_at),
+      createdAt: iso2(row.created_at)
     };
   }
   function inviteUsable(invite) {
     return !invite.revoked && invite.uses < invite.maxUses && Date.parse(invite.expiresAt) > Date.now();
   }
-  const inviteCryptoKey = databasePool ? process.env.INVITE_ENC_KEY && process.env.INVITE_ENC_KEY.length >= 32 ? crypto7.createHash("sha256").update(`vanitas.invite.v1|${process.env.INVITE_ENC_KEY}`).digest() : process.env.DATABASE_URL ? crypto7.createHash("sha256").update(`vanitas.invite.v1|${process.env.DATABASE_URL}`).digest() : null : null;
+  const inviteCryptoKey = databasePool ? process.env.INVITE_ENC_KEY && process.env.INVITE_ENC_KEY.length >= 32 ? crypto8.createHash("sha256").update(`vanitas.invite.v1|${process.env.INVITE_ENC_KEY}`).digest() : process.env.DATABASE_URL ? crypto8.createHash("sha256").update(`vanitas.invite.v1|${process.env.DATABASE_URL}`).digest() : null : null;
   function sha256Hex(value) {
-    return crypto7.createHash("sha256").update(value).digest("hex");
+    return crypto8.createHash("sha256").update(value).digest("hex");
   }
   function encryptInviteToken(token) {
     if (!inviteCryptoKey) return token;
-    const iv = crypto7.randomBytes(12);
-    const cipher = crypto7.createCipheriv("aes-256-gcm", inviteCryptoKey, iv);
+    const iv = crypto8.randomBytes(12);
+    const cipher = crypto8.createCipheriv("aes-256-gcm", inviteCryptoKey, iv);
     const ct = Buffer.concat([cipher.update(token, "utf8"), cipher.final()]);
     return `enc:v1:${Buffer.concat([iv, cipher.getAuthTag(), ct]).toString("base64url")}`;
   }
@@ -5544,7 +6172,7 @@ async function buildApp() {
     if (!inviteCryptoKey) return "";
     try {
       const raw = Buffer.from(stored.slice("enc:v1:".length), "base64url");
-      const decipher = crypto7.createDecipheriv("aes-256-gcm", inviteCryptoKey, raw.subarray(0, 12));
+      const decipher = crypto8.createDecipheriv("aes-256-gcm", inviteCryptoKey, raw.subarray(0, 12));
       decipher.setAuthTag(raw.subarray(12, 28));
       return Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString("utf8");
     } catch {
@@ -5866,6 +6494,428 @@ async function buildApp() {
       res.status(500).json({ error: "Profile lookup failed" });
     }
   });
+  app.get("/api/v1/members/accounts", async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
+    const query = sanitizeText(req.query.q, 80).trim();
+    if (query.length < 2) return res.json({ accounts: [] });
+    try {
+      if (databasePool) {
+        await ensureSchema();
+        const result = await databasePool.query(
+          `select username, name, avatar_url, verification, status_line
+             from public.users
+            where username <> '' and id <> $1
+              and (username ilike $2 escape '\\' or name ilike $2 escape '\\')
+            order by case when lower(username) = lower($3) then 0 else 1 end, lower(username)
+            limit 20`,
+          [actor.id, `%${query.replace(/[\\%_]/g, "\\$&")}%`, query]
+        );
+        return res.json({ accounts: result.rows.map((row) => ({
+          username: row.username,
+          name: row.name,
+          avatarUrl: row.avatar_url || "/images/avatar-default.svg",
+          verification: row.verification || "",
+          statusLine: row.status_line || void 0
+        })) });
+      }
+      res.json({ accounts: searchAccountsMemory(actor.id, query) });
+    } catch (err) {
+      console.error("[social/accounts]", err.message);
+      res.status(500).json({ error: "Account search failed" });
+    }
+  });
+  app.get("/api/v1/members/conversations", async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
+    try {
+      if (databasePool) {
+        await ensureSchema();
+        const result = await databasePool.query(
+          `with latest as (
+             select distinct on (peer_id) peer_id, content, created_at,
+               (select count(*)::int from public.direct_messages unread
+                 where unread.sender_id = dm.peer_id and unread.recipient_id = $1 and unread.read_at is null) as unread_count
+             from (
+               select *, case when sender_id = $1 then recipient_id else sender_id end as peer_id
+               from public.direct_messages where sender_id = $1 or recipient_id = $1
+             ) dm order by peer_id, created_at desc
+           )
+           select u.username, u.name, u.avatar_url, u.verification, u.status_line,
+                  latest.content, latest.created_at, latest.unread_count
+             from latest join public.users u on u.id = latest.peer_id
+            where u.username <> '' order by latest.created_at desc limit 100`,
+          [actor.id]
+        );
+        return res.json({ conversations: result.rows.map((row) => ({
+          username: row.username,
+          name: row.name,
+          avatarUrl: row.avatar_url || "/images/avatar-default.svg",
+          verification: row.verification || "",
+          statusLine: row.status_line || void 0,
+          lastMessage: row.content,
+          lastMessageAt: row.created_at,
+          unreadCount: row.unread_count
+        })) });
+      }
+      res.json({ conversations: listConversationsMemory(actor.id) });
+    } catch (err) {
+      console.error("[social/conversations]", err.message);
+      res.status(500).json({ error: "Could not load conversations" });
+    }
+  });
+  app.get("/api/v1/members/conversations/:username", async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
+    const username = sanitizeText(req.params.username, 24).trim().toLowerCase();
+    try {
+      if (databasePool) {
+        await ensureSchema();
+        const peer2 = await databasePool.query("select id, username from public.users where lower(username) = $1 and username <> ''", [username]);
+        if (!peer2.rows[0]) return res.status(404).json({ error: "Account not found" });
+        const peerId = peer2.rows[0].id;
+        if (peerId === actor.id) return res.status(400).json({ error: "You cannot message yourself" });
+        await databasePool.query(
+          `update public.direct_messages set read_at = now()
+            where sender_id = $1 and recipient_id = $2 and read_at is null`,
+          [peerId, actor.id]
+        );
+        const result = await databasePool.query(
+          `select m.id, s.username as sender_username, r.username as recipient_username,
+                  m.content, m.created_at, m.read_at
+             from public.direct_messages m
+             join public.users s on s.id = m.sender_id join public.users r on r.id = m.recipient_id
+            where (m.sender_id = $1 and m.recipient_id = $2) or (m.sender_id = $2 and m.recipient_id = $1)
+            order by m.created_at desc limit 100`,
+          [actor.id, peerId]
+        );
+        return res.json({ messages: result.rows.reverse().map((row) => ({
+          id: row.id,
+          senderUsername: row.sender_username,
+          recipientUsername: row.recipient_username,
+          content: row.content,
+          createdAt: row.created_at,
+          readAt: row.read_at
+        })) });
+      }
+      const peer = findMemoryUserByUsername(username);
+      if (!peer) return res.status(404).json({ error: "Account not found" });
+      if (peer.id === actor.id) return res.status(400).json({ error: "You cannot message yourself" });
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      for (const m of memoryMessages) {
+        if (m.senderId === peer.id && m.recipientId === actor.id && m.readAt === null) m.readAt = now;
+      }
+      const usernameOf = (id) => db.users.find((u) => u.id === id)?.username || "";
+      const messages = memoryMessages.filter((m) => m.senderId === actor.id && m.recipientId === peer.id || m.senderId === peer.id && m.recipientId === actor.id).sort((a, b) => a.createdAt < b.createdAt ? 1 : -1).slice(0, 100).reverse().map((m) => ({
+        id: m.id,
+        senderUsername: usernameOf(m.senderId),
+        recipientUsername: usernameOf(m.recipientId),
+        content: m.content,
+        createdAt: m.createdAt,
+        readAt: m.readAt
+      }));
+      res.json({ messages });
+    } catch (err) {
+      console.error("[social/conversation]", err.message);
+      res.status(500).json({ error: "Could not load messages" });
+    }
+  });
+  app.post("/api/v1/members/messages", async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
+    const username = sanitizeText(req.body?.username, 24).trim().toLowerCase();
+    const content = typeof req.body?.content === "string" ? req.body.content.trim() : "";
+    if (!/^[a-z0-9_]{3,24}$/.test(username)) return res.status(400).json({ error: "Enter a valid account username" });
+    if (!content || content.length > 4e3) return res.status(400).json({ error: "Message must be between 1 and 4000 characters" });
+    try {
+      if (databasePool) {
+        await ensureSchema();
+        const peer2 = await databasePool.query("select id, username from public.users where lower(username) = $1 and username <> ''", [username]);
+        if (!peer2.rows[0]) return res.status(404).json({ error: "Account not found" });
+        if (peer2.rows[0].id === actor.id) return res.status(400).json({ error: "You cannot message yourself" });
+        const inserted = await databasePool.query(
+          `insert into public.direct_messages (id, sender_id, recipient_id, content)
+           values ($1, $2, $3, $4) returning id, content, created_at, read_at`,
+          [secureId("msg"), actor.id, peer2.rows[0].id, content]
+        );
+        const row = inserted.rows[0];
+        return res.status(201).json({ message: {
+          id: row.id,
+          senderUsername: actor.username,
+          recipientUsername: peer2.rows[0].username,
+          content: row.content,
+          createdAt: row.created_at,
+          readAt: row.read_at
+        } });
+      }
+      const peer = findMemoryUserByUsername(username);
+      if (!peer) return res.status(404).json({ error: "Account not found" });
+      if (peer.id === actor.id) return res.status(400).json({ error: "You cannot message yourself" });
+      const message = {
+        id: secureId("msg"),
+        senderId: actor.id,
+        recipientId: peer.id,
+        content,
+        createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+        readAt: null
+      };
+      memoryMessages.push(message);
+      retainMemoryMessages(actor.id);
+      res.status(201).json({ message: {
+        id: message.id,
+        senderUsername: actor.username,
+        recipientUsername: peer.username,
+        content: message.content,
+        createdAt: message.createdAt,
+        readAt: message.readAt
+      } });
+    } catch (err) {
+      console.error("[social/message]", err.message);
+      res.status(500).json({ error: "Message could not be saved" });
+    }
+  });
+  function githubError(res, err) {
+    const msg = err.message || "";
+    if (msg === GITHUB_ERRORS.TOKEN_EXPIRED) {
+      res.status(401).json({ error: "GitHub access expired \u2014 reconnect your account", code: "token_expired" });
+    } else if (msg === GITHUB_ERRORS.RATE_LIMITED) {
+      res.status(429).json({ error: "GitHub API rate limit reached \u2014 retry later", code: "rate_limited" });
+    } else if (msg === GITHUB_ERRORS.NOT_FOUND) {
+      res.status(404).json({ error: "Repository not found or not accessible with your grant", code: "not_found" });
+    } else {
+      console.error("[github]", msg);
+      res.status(502).json({ error: "GitHub API request failed" });
+    }
+  }
+  function serveSandboxPreview(res, title, html) {
+    const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    const srcdoc = html.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.send(
+      `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${esc(title)} \u2014 Sandbox Preview</title>
+<style>html,body{margin:0;height:100%;background:#0b1120}.bar{display:flex;align-items:center;gap:.5rem;padding:.5rem .75rem;font:12px/1.4 system-ui,sans-serif;color:#94a3b8;border-bottom:1px solid #1e293b}.dot{width:8px;height:8px;border-radius:50%;background:#f59e0b;flex:none}iframe{width:100%;height:calc(100% - 38px);border:0;display:block}</style>
+</head>
+<body>
+<div class="bar"><span class="dot"></span><span>Sandboxed preview \u2014 isolated opaque origin, no access to this platform</span></div>
+<iframe title="sandbox" sandbox="allow-scripts" srcdoc="${srcdoc}"></iframe>
+</body>
+</html>`
+    );
+  }
+  app.get("/api/v1/github/status", async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
+    try {
+      const token = await getGitHubToken(actor.id);
+      res.json({ connected: !!token, provider: "github" });
+    } catch (err) {
+      console.error("[github/status]", err.message);
+      res.status(500).json({ error: "Could not read connection state" });
+    }
+  });
+  app.get("/api/v1/github/repos", async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
+    try {
+      const token = await getGitHubToken(actor.id);
+      if (!token) return res.status(409).json({ error: "Connect your GitHub account first", code: "not_connected" });
+      const repos = await listUserRepos(token);
+      res.json({ repos });
+    } catch (err) {
+      githubError(res, err);
+    }
+  });
+  app.post("/api/v1/github/import", async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
+    const fullName = sanitizeText(req.body?.repo, 200).trim();
+    if (!/^[\w.-]+\/[\w.-]+$/.test(fullName)) {
+      return res.status(400).json({ error: "Enter a repository as owner/name" });
+    }
+    const [owner, repo] = fullName.split("/");
+    try {
+      const token = await getGitHubToken(actor.id);
+      if (!token) return res.status(409).json({ error: "Connect your GitHub account first", code: "not_connected" });
+      const imported = await importRepoFiles(token, owner, repo);
+      if (imported.files.length === 0) {
+        return res.status(422).json({ error: "No readable text files found in that repository" });
+      }
+      const row = await createProject({
+        ownerId: actor.id,
+        source: "github",
+        title: imported.title,
+        description: imported.description.slice(0, MAX_DESCRIPTION),
+        repoUrl: imported.repoUrl,
+        language: imported.language,
+        isWeb: imported.isWeb,
+        files: imported.files
+      });
+      persistAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorEmail: actor.email,
+        action: "PROJECT_IMPORTED",
+        category: "API",
+        target: `${imported.title} from ${fullName}`,
+        source: detectSource(req),
+        status: "SUCCESS",
+        ipAddress: req.ip || "unknown",
+        metadata: { files: imported.files.length, repoUrl: imported.repoUrl }
+      });
+      res.status(201).json({ project: await projectDetail(row) });
+    } catch (err) {
+      githubError(res, err);
+    }
+  });
+  app.get("/api/v1/publish/projects", async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
+    try {
+      res.json({ projects: await listProjects(actor.id) });
+    } catch (err) {
+      console.error("[publish/projects]", err.message);
+      res.status(500).json({ error: "Could not load your projects" });
+    }
+  });
+  app.get("/api/v1/publish/projects/public", async (_req, res) => {
+    try {
+      res.json({ projects: await listPublicProjects() });
+    } catch (err) {
+      console.error("[publish/gallery]", err.message);
+      res.status(500).json({ error: "Could not load the gallery" });
+    }
+  });
+  app.get("/api/v1/publish/projects/:id", async (req, res) => {
+    const id = sanitizeText(req.params.id, 64);
+    try {
+      const row = await getProject(id);
+      if (!row) return res.status(404).json({ error: "Project not found" });
+      res.json({ project: await projectDetail(row) });
+    } catch (err) {
+      console.error("[publish/project]", err.message);
+      res.status(500).json({ error: "Could not load the project" });
+    }
+  });
+  app.delete("/api/v1/publish/projects/:id", async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
+    const id = sanitizeText(req.params.id, 64);
+    try {
+      const outcome = await deleteProject(id, { id: actor.id, role: actor.role });
+      if (outcome === "deleted") return res.json({ success: true });
+      if (outcome === "forbidden") return res.status(403).json({ error: "You can only delete your own projects" });
+      res.status(404).json({ error: "Project not found" });
+    } catch (err) {
+      console.error("[publish/project/delete]", err.message);
+      res.status(500).json({ error: "Could not delete the project" });
+    }
+  });
+  app.get("/api/v1/publish/projects/:id/preview", async (req, res) => {
+    const id = sanitizeText(req.params.id, 64);
+    try {
+      const row = await getProject(id);
+      if (!row) return res.status(404).send("Project not found");
+      const index = row.files.find((f) => /^(?:[^/]+\/)?index\.html$/.test(f.path));
+      if (!index) return res.status(404).send("This project has no index.html to preview");
+      serveSandboxPreview(res, row.title, index.content);
+    } catch (err) {
+      console.error("[publish/project/preview]", err.message);
+      res.status(500).send("Preview unavailable");
+    }
+  });
+  app.post("/api/v1/publish/snippets", async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
+    const title = sanitizeText(req.body?.title, MAX_TITLE).trim();
+    const language = sanitizeText(req.body?.language, 40).trim().toLowerCase() || "text";
+    const content = typeof req.body?.content === "string" ? req.body.content : "";
+    if (!title) return res.status(400).json({ error: "A title is required" });
+    if (!content || content.length > MAX_SNIPPET) {
+      return res.status(400).json({ error: `Code must be between 1 and ${MAX_SNIPPET} characters` });
+    }
+    try {
+      const row = await createSnippet({ ownerId: actor.id, title, language, content });
+      persistAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorEmail: actor.email,
+        action: "SNIPPET_PUBLISHED",
+        category: "API",
+        target: `${title} (${language})`,
+        source: detectSource(req),
+        status: "SUCCESS",
+        ipAddress: req.ip || "unknown",
+        metadata: { language, bytes: Buffer.byteLength(content) }
+      });
+      res.status(201).json({ snippet: await snippetDetail(row) });
+    } catch (err) {
+      console.error("[publish/snippet]", err.message);
+      res.status(500).json({ error: "Could not publish the code" });
+    }
+  });
+  app.get("/api/v1/publish/snippets", async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
+    try {
+      res.json({ snippets: await listSnippets(actor.id) });
+    } catch (err) {
+      console.error("[publish/snippets]", err.message);
+      res.status(500).json({ error: "Could not load your snippets" });
+    }
+  });
+  app.get("/api/v1/publish/snippets/public", async (_req, res) => {
+    try {
+      res.json({ snippets: await listPublicSnippets() });
+    } catch (err) {
+      console.error("[publish/snippets/public]", err.message);
+      res.status(500).json({ error: "Could not load the snippet gallery" });
+    }
+  });
+  app.get("/api/v1/publish/snippets/:id", async (req, res) => {
+    const id = sanitizeText(req.params.id, 64);
+    try {
+      const row = await getSnippet(id);
+      if (!row) return res.status(404).json({ error: "Snippet not found" });
+      res.json({ snippet: await snippetDetail(row) });
+    } catch (err) {
+      console.error("[publish/snippet]", err.message);
+      res.status(500).json({ error: "Could not load the snippet" });
+    }
+  });
+  app.delete("/api/v1/publish/snippets/:id", async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
+    const id = sanitizeText(req.params.id, 64);
+    try {
+      const outcome = await deleteSnippet(id, { id: actor.id, role: actor.role });
+      if (outcome === "deleted") return res.json({ success: true });
+      if (outcome === "forbidden") return res.status(403).json({ error: "You can only delete your own snippets" });
+      res.status(404).json({ error: "Snippet not found" });
+    } catch (err) {
+      console.error("[publish/snippet/delete]", err.message);
+      res.status(500).json({ error: "Could not delete the snippet" });
+    }
+  });
+  app.get("/api/v1/publish/snippets/:id/preview", async (req, res) => {
+    const id = sanitizeText(req.params.id, 64);
+    try {
+      const row = await getSnippet(id);
+      if (!row) return res.status(404).send("Snippet not found");
+      if (row.language.toLowerCase() !== "html") {
+        return res.status(404).send("Only HTML snippets have a sandbox preview");
+      }
+      serveSandboxPreview(res, row.title, row.content);
+    } catch (err) {
+      console.error("[publish/snippet/preview]", err.message);
+      res.status(500).send("Preview unavailable");
+    }
+  });
   app.delete("/api/v1/admin/users/:id", async (req, res) => {
     const actor = requireAdmin(req, res);
     if (!actor) return;
@@ -5901,6 +6951,9 @@ async function buildApp() {
         for (let i = memoryComments.length - 1; i >= 0; i--) {
           if (memoryComments[i].userId === id) memoryComments.splice(i, 1);
         }
+        purgeMemoryMessages(id);
+        purgePublishedData(id);
+        await clearGitHubToken(id);
       }
       await clearAiChatHistory(id);
       await forgetAccount(id);
@@ -6082,7 +7135,7 @@ async function buildApp() {
   async function deliverWebhook(wh, event, data) {
     const payload = { event, timestamp: (/* @__PURE__ */ new Date()).toISOString(), data };
     const body = JSON.stringify(payload);
-    const signature = crypto7.createHmac("sha256", wh.secret).update(body).digest("hex");
+    const signature = crypto8.createHmac("sha256", wh.secret).update(body).digest("hex");
     const started = Date.now();
     let statusCode = 0;
     let ok = false;
@@ -6629,10 +7682,10 @@ async function buildApp() {
     }
   });
   const DOWNLOAD_LINK_TTL_MS = 10 * 60 * 1e3;
-  const downloadSignKey = crypto7.createHash("sha256").update(
-    `download-link:${process.env.DATABASE_URL || process.env.ADMIN_API_TOKEN || `local-${crypto7.randomBytes(32).toString("hex")}`}`
+  const downloadSignKey = crypto8.createHash("sha256").update(
+    `download-link:${process.env.DATABASE_URL || process.env.ADMIN_API_TOKEN || `local-${crypto8.randomBytes(32).toString("hex")}`}`
   ).digest();
-  const signDownloadLink = (type, exp, uid) => crypto7.createHmac("sha256", downloadSignKey).update(`${type}|${exp}|${uid}`).digest("base64url");
+  const signDownloadLink = (type, exp, uid) => crypto8.createHmac("sha256", downloadSignKey).update(`${type}|${exp}|${uid}`).digest("base64url");
   app.get("/api/v1/download/releases", (_req, res) => {
     res.json({
       success: true,
@@ -6671,7 +7724,7 @@ async function buildApp() {
         if (typeValid && sig && Number.isFinite(exp) && exp > now && exp <= now + DOWNLOAD_LINK_TTL_MS) {
           const expected = Buffer.from(signDownloadLink(type, exp, uid), "utf8");
           const given = Buffer.from(sig, "utf8");
-          valid = expected.length === given.length && crypto7.timingSafeEqual(expected, given);
+          valid = expected.length === given.length && crypto8.timingSafeEqual(expected, given);
         }
         if (!valid) return res.status(401).json({ error: "Authentication required" });
         actor = db.users.find((u) => u.id === uid) || {
@@ -6746,7 +7799,7 @@ async function startServer() {
     console.log(`Vanitas Central Server running on http://0.0.0.0:${PORT}`);
   });
 }
-var memoryComments, memoryAiChat, AI_HISTORY_PAGE, AI_HISTORY_RETAIN, server_default;
+var memoryComments, memoryAiChat, AI_HISTORY_PAGE, AI_HISTORY_RETAIN, memoryMessages, MEMORY_DM_RETAIN, server_default;
 var init_server = __esm({
   "server.ts"() {
     init_db();
@@ -6757,11 +7810,15 @@ var init_server = __esm({
     init_aiService();
     init_apiKeyAuth();
     init_apiKeyStore();
+    init_githubStore();
+    init_publishStore();
     init_security();
     memoryComments = [];
     memoryAiChat = [];
     AI_HISTORY_PAGE = 100;
     AI_HISTORY_RETAIN = 400;
+    memoryMessages = [];
+    MEMORY_DM_RETAIN = 500;
     process.on("unhandledRejection", (reason) => {
       console.error("[process] unhandledRejection:", reason instanceof Error ? reason.message : String(reason));
     });

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Vanitas mark (monochrome)">
+  <!-- Monochrome variant of /images/logo.svg. Single ink so it works on any
+       surface (footers, invoices, dark headers, one-colour print). -->
+  <g fill="none" stroke="#ffffff" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M32 3 59 18.5v27L32 61 5 45.5v-27z" fill="#ffffff" fill-opacity=".14" stroke-width="2.4"/>
+    <path d="M32 13 47 21.5v17L32 47l-15-8.5v-17z" fill="#ffffff" fill-opacity=".07" stroke-width="1.6" stroke-opacity=".72"/>
+    <path d="M32 13 47 21.5 32 30 17 21.5z" fill="#ffffff" fill-opacity=".55" stroke="none"/>
+    <path d="M32 30v17M17 21.5 32 30l15-8.5" stroke-width="1.6" stroke-opacity=".72"/>
+  </g>
+</svg>

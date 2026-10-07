@@ -24,6 +24,8 @@ import { WebhooksView } from './components/views/WebhooksView.tsx';
 import { StatusView } from './components/views/StatusView.tsx';
 import { ProfileView } from './components/views/ProfileView.tsx';
 import { DownloadsView } from './components/views/DownloadsView.tsx';
+import { SocialView } from './components/views/SocialView.tsx';
+import { PublishView } from './components/views/PublishView.tsx';
 
 const AppContent: React.FC = () => {
   const { activeView, user, authLoading } = useAuth();
@@ -97,6 +99,10 @@ const AppContent: React.FC = () => {
         return <StatusView />;
       case 'profile':
         return <ProfileView />;
+      case 'social':
+        return <SocialView />;
+      case 'publish':
+        return <PublishView />;
       default:
         return <OverviewView />;
     }

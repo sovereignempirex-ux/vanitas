@@ -221,6 +221,64 @@ create table if not exists public.ai_chat_messages (
 create index if not exists ai_chat_user_created_idx on public.ai_chat_messages (user_id, created_at desc);
 alter table public.ai_chat_messages enable row level security;
 
+-- Private user-to-user messages. Content is accessible only through the
+-- authenticated server API; no direct browser policies are granted.
+create table if not exists public.direct_messages (
+  id text primary key,
+  sender_id text not null references public.users(id) on delete cascade,
+  recipient_id text not null references public.users(id) on delete cascade,
+  content text not null check (char_length(content) between 1 and 4000),
+  created_at timestamptz not null default now(),
+  read_at timestamptz,
+  check (sender_id <> recipient_id)
+);
+create index if not exists direct_messages_pair_created_idx
+  on public.direct_messages (sender_id, recipient_id, created_at desc);
+create index if not exists direct_messages_recipient_unread_idx
+  on public.direct_messages (recipient_id, created_at desc) where read_at is null;
+alter table public.direct_messages enable row level security;
+
+-- ---------------------------------------------------------------------------
+-- Publishing & sandbox. github_tokens holds the user's OAuth grant as
+-- AES-256-GCM ciphertext (enc:v1:…) — never the raw token. Published
+-- projects carry their files as a jsonb array; snippets are single
+-- code files. Everything FK-cascades with the owning account.
+-- ---------------------------------------------------------------------------
+create table if not exists public.github_tokens (
+  user_id text primary key references public.users(id) on delete cascade,
+  access_token text not null,
+  granted_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.published_projects (
+  id text primary key,
+  owner_id text not null references public.users(id) on delete cascade,
+  source text not null check (source in ('github', 'manual')),
+  title text not null check (char_length(title) between 1 and 120),
+  description text not null default '',
+  repo_url text not null default '',
+  language text not null default '',
+  is_web boolean not null default false,
+  files jsonb not null default '[]',
+  created_at timestamptz not null default now()
+);
+create index if not exists published_projects_owner_idx on public.published_projects (owner_id, created_at desc);
+create index if not exists published_projects_created_idx on public.published_projects (created_at desc);
+alter table public.published_projects enable row level security;
+
+create table if not exists public.published_snippets (
+  id text primary key,
+  owner_id text not null references public.users(id) on delete cascade,
+  title text not null check (char_length(title) between 1 and 120),
+  language text not null default 'text',
+  content text not null check (char_length(content) between 1 and 100000),
+  created_at timestamptz not null default now()
+);
+create index if not exists published_snippets_owner_idx on public.published_snippets (owner_id, created_at desc);
+create index if not exists published_snippets_created_idx on public.published_snippets (created_at desc);
+alter table public.published_snippets enable row level security;
+
 -- ---------------------------------------------------------------------------
 -- Login sessions. Only the sha256 hash of the bearer token is stored,
 -- so a database leak cannot be replayed as a login.
@@ -276,7 +334,8 @@ declare
   other_role text;
   vanitas_tables constant text[] := array[
     'product_suggestions', 'api_keys', 'audit_logs', 'admin_invites', 'webhooks',
-    'comments', 'users', 'auth_sessions', 'user_identities', 'ai_chat_messages'
+    'comments', 'users', 'auth_sessions', 'user_identities', 'ai_chat_messages', 'direct_messages',
+    'github_tokens', 'published_projects', 'published_snippets'
   ];
 begin
   foreach tbl in array vanitas_tables loop
