@@ -40,6 +40,8 @@ interface AuthContextType {
     accentColor?: string;
     statusLine?: string;
     links?: ProfileLink[];
+    location?: string;
+    techTags?: string[];
   }) => Promise<{ success: boolean; error?: string }>;
   // Weekly Agent Quota System (1 run / week per account)
   weeklyAgentQuota: WeeklyAgentQuota;
@@ -296,6 +298,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     accentColor?: string;
     statusLine?: string;
     links?: ProfileLink[];
+    location?: string;
+    techTags?: string[];
   }) => {
     // Real accounts: edits are validated and persisted by the server.
     try {

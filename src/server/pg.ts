@@ -84,6 +84,11 @@ alter table if exists public.users add column if not exists accent_color text no
 -- API before it is stored; '' / [] clear the value).
 alter table if exists public.users add column if not exists status_line text not null default '';
 alter table if exists public.users add column if not exists profile_links jsonb not null default '[]';
+-- Profile identity extras: a free-text location and an ordered list of
+-- short tech tags, both rendered on the public /u/<username> page. '' / []
+-- clear the value; every value is length-checked at the API before storage.
+alter table if exists public.users add column if not exists location text not null default '';
+alter table if exists public.users add column if not exists tech_tags jsonb not null default '[]';
 -- TOTP replay watermark: highest time-step already spent on a login.
 alter table if exists public.users add column if not exists totp_last_step bigint not null default 0;
 -- TOTP brute-force lockout: failed 2FA attempts and the resulting cooldown.

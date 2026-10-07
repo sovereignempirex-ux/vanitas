@@ -26,14 +26,17 @@ import {
   QrCode,
   Palette,
   Radio,
+  MapPin,
+  Layers,
 } from 'lucide-react';
 
 // ---------------------------------------------------------------------------
 // Profile & identity: hero card (name, @username, badges, Markdown bio, real
 // account facts), a real profile-strength checklist, the editor (claim your
 // @username with live availability, a Markdown bio with toolbar + live
-// preview, accent colour, avatar), share actions (view / copy / QR), the
-// read-only account details and the character preset gallery.
+// preview, accent colour, avatar, location, tech tags), share actions
+// (view / copy / QR), the read-only account details and the character preset
+// gallery.
 // ---------------------------------------------------------------------------
 
 type AvailState = { checking: boolean; available: boolean; reason?: string } | null;
@@ -87,6 +90,12 @@ export const ProfileView: React.FC = () => {
   // by the server before they are stored (single line / https only).
   const [statusLine, setStatusLine] = useState(user?.statusLine || '');
   const [links, setLinks] = useState<ProfileLink[]>(user?.profileLinks || []);
+  // Location + tech tags — the two identity fields added to /u/<username>.
+  // Both are length-checked server-side; the client mirrors the limits so a
+  // too-long value fails with a readable message instead of a 400.
+  const [location, setLocation] = useState(user?.location || '');
+  const [techTags, setTechTags] = useState<string[]>(user?.techTags || []);
+  const [tagDraft, setTagDraft] = useState('');
   // Real docs-comment total for the facts card (fetched from the same public
   // profile endpoint the /u/<name> page uses).
   const [commentCount, setCommentCount] = useState<number | null>(null);
@@ -253,6 +262,21 @@ export const ProfileView: React.FC = () => {
         return;
       }
     }
+    // Mirrors the server's tech-tag rules (server is authoritative): blanks
+    // are dropped, then each tag is length-checked against the 24-char cap.
+    const cleanedTags = techTags.map((t) => t.trim()).filter(Boolean);
+    for (const t of cleanedTags) {
+      if (t.length > 24) {
+        setSaving(false);
+        setSaveError(`Tech tag "${t}" must be 24 characters or fewer.`);
+        return;
+      }
+    }
+    if (cleanedTags.length > 8) {
+      setSaving(false);
+      setSaveError('Up to 8 tech tags are allowed.');
+      return;
+    }
     // Persisted server-side on the real account record (PostgreSQL).
     const result = await updateUserProfile({
       name,
@@ -262,6 +286,8 @@ export const ProfileView: React.FC = () => {
       accentColor: accent,
       statusLine: statusLine.trim(),
       links: cleanedLinks,
+      location: location.trim(),
+      techTags: cleanedTags,
     });
     setSaving(false);
     if (result.success) {
@@ -270,6 +296,35 @@ export const ProfileView: React.FC = () => {
     } else {
       setSaveError(result.error || 'Failed to save profile.');
     }
+  };
+
+  /**
+   * Add the drafted tech tag. Mirrors the server's rules (8 max, 24 chars,
+   * case-insensitive duplicate drop) so the failure is immediate and readable.
+   *
+   * Deliberately NOT a <form onSubmit>: the editor is already inside the
+   * Save-Profile <form>, and nesting forms is invalid HTML — browsers close
+   * the outer form early, which would break the save button. Enter is
+   * handled explicitly on the input instead.
+   */
+  const addTag = () => {
+    const tag = tagDraft.trim();
+    if (!tag) return;
+    if (techTags.length >= 8) {
+      setSaveError('Up to 8 tech tags are allowed.');
+      return;
+    }
+    if (tag.length > 24) {
+      setSaveError('Tech tags must be 24 characters or fewer.');
+      return;
+    }
+    if (techTags.some((t) => t.toLowerCase() === tag.toLowerCase())) {
+      setTagDraft('');
+      return; // duplicates are silently dropped, not an error
+    }
+    setSaveError(null);
+    setTechTags([...techTags, tag]);
+    setTagDraft('');
   };
 
   const copyProfileLink = () => {
@@ -384,6 +439,30 @@ export const ProfileView: React.FC = () => {
                   <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400 animate-pulse" />
                   <span className="truncate">{statusLine.trim()}</span>
                 </p>
+              )}
+
+              {/* Location + tech tags — live preview, same shapes /u/ renders */}
+              {(location.trim() || techTags.length > 0) && (
+                <div className="mt-2.5 flex flex-col items-center gap-2">
+                  {location.trim() && (
+                    <span className="inline-flex items-center gap-1 text-[11px] text-slate-400">
+                      <MapPin className="h-3 w-3 text-cyan-400" />
+                      {location.trim()}
+                    </span>
+                  )}
+                  {techTags.length > 0 && (
+                    <div className="flex flex-wrap justify-center gap-1.5">
+                      {techTags.map((tag, i) => (
+                        <span
+                          key={`${tag}-${i}`}
+                          className="rounded-full border border-blue-500/25 bg-blue-500/10 px-2 py-0.5 text-[10px] text-blue-200"
+                        >
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
               )}
 
               {user?.bio ? (
@@ -804,6 +883,91 @@ export const ProfileView: React.FC = () => {
                 />
                 <p className="mt-1 text-[10px] text-slate-500">
                   One line under your name (80 chars max, emojis welcome) — updates live in the preview above.
+                </p>
+              </div>
+
+              {/* Location — plain text, single line, shown on /u/<username> */}
+              <div>
+                <div className="flex items-center justify-between gap-2">
+                  <label className="flex items-center gap-1.5 text-xs font-medium text-slate-300">
+                    <MapPin className="h-3.5 w-3.5 text-cyan-400" /> Location
+                  </label>
+                  <span className={`font-mono text-[10px] ${location.length > 50 ? 'text-amber-300' : 'text-slate-500'}`}>
+                    {location.length}/60
+                  </span>
+                </div>
+                <input
+                  type="text"
+                  maxLength={60}
+                  value={location}
+                  onChange={(e) => setLocation(e.target.value)}
+                  placeholder="Lisbon, PT"
+                  className="mt-1 w-full rounded-xl border border-white/10 bg-slate-900 px-3.5 py-2 text-xs text-white placeholder:text-slate-600 focus:border-cyan-500 focus:outline-none"
+                />
+                <p className="mt-1 text-[10px] text-slate-500">
+                  City and country, shown under your name on the public profile (60 chars max).
+                </p>
+              </div>
+
+              {/* Tech tags — short plain-text chips, max 8 */}
+              <div>
+                <div className="flex items-center justify-between gap-2">
+                  <label className="flex items-center gap-1.5 text-xs font-medium text-slate-300">
+                    <Layers className="h-3.5 w-3.5 text-blue-400" /> Tech tags
+                  </label>
+                  <span className="font-mono text-[10px] text-slate-500">{techTags.length}/8</span>
+                </div>
+
+                {techTags.length > 0 && (
+                  <div className="mt-1.5 flex flex-wrap gap-1.5">
+                    {techTags.map((tag, i) => (
+                      <span
+                        key={`${tag}-${i}`}
+                        className="inline-flex items-center gap-1 rounded-full border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-[11px] text-blue-200"
+                      >
+                        {tag}
+                        <button
+                          type="button"
+                          onClick={() => setTechTags(techTags.filter((_, j) => j !== i))}
+                          aria-label={`Remove ${tag}`}
+                          className="text-blue-400 transition-colors hover:text-white"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                {/* Not a <form>: nesting one inside the Save-Profile form is
+                    invalid HTML and would break the outer submit. */}
+                <div className="mt-1.5 flex gap-2">
+                  <input
+                    type="text"
+                    maxLength={24}
+                    value={tagDraft}
+                    onChange={(e) => setTagDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        addTag();
+                      }
+                    }}
+                    placeholder="TypeScript"
+                    aria-label="New tech tag"
+                    className="min-w-0 flex-1 rounded-xl border border-white/10 bg-slate-900 px-3.5 py-2 text-xs text-white placeholder:text-slate-600 focus:border-blue-500 focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={addTag}
+                    disabled={!tagDraft.trim() || techTags.length >= 8}
+                    className="shrink-0 rounded-xl border border-white/15 bg-slate-900 px-3 py-2 text-xs font-semibold text-slate-300 transition-colors hover:border-blue-400/50 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    Add
+                  </button>
+                </div>
+                <p className="mt-1 text-[10px] text-slate-500">
+                  Up to 8 chips (24 chars each), shown as plain text on your public profile.
                 </p>
               </div>
 

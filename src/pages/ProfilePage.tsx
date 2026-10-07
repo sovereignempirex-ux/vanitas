@@ -6,7 +6,7 @@ import { seoForPublicProfile, setPageSeo } from '../lib/seo.ts';
 import { VerifiedBadge } from '../components/VerifiedBadge.tsx';
 import { Markdown } from '../components/Markdown.tsx';
 import { PublicProfile } from '../types.ts';
-import { Shield, CalendarDays, AtSign, UserSearch, Loader2, ArrowRight, Link2, MessageSquare, Copy, Check } from 'lucide-react';
+import { Shield, CalendarDays, AtSign, UserSearch, Loader2, ArrowRight, Link2, MessageSquare, Copy, Check, MapPin } from 'lucide-react';
 
 // ---------------------------------------------------------------------------
 // Standalone /u/<username> public profile — the shareable side of the
@@ -158,6 +158,30 @@ export const ProfilePage: React.FC<{ username: string }> = ({ username }) => {
               <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400 animate-pulse" />
               <span className="truncate">{p.statusLine}</span>
             </p>
+          )}
+
+          {/* Location + tech tags — plain text only, exactly as saved */}
+          {(p.location || (p.techTags || []).length > 0) && (
+            <div className="mt-2.5 flex flex-col items-center gap-2">
+              {p.location && (
+                <span className="inline-flex items-center gap-1.5 text-xs text-slate-400">
+                  <MapPin className="h-3.5 w-3.5 text-cyan-400" />
+                  {p.location}
+                </span>
+              )}
+              {(p.techTags || []).length > 0 && (
+                <div className="flex flex-wrap justify-center gap-1.5">
+                  {p.techTags!.map((tag, i) => (
+                    <span
+                      key={`${tag}-${i}`}
+                      className="rounded-full border border-blue-500/25 bg-blue-500/10 px-2.5 py-0.5 text-[11px] text-blue-200"
+                    >
+                      {tag}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
           )}
 
           <div className="mt-3 flex flex-wrap items-center justify-center gap-2">

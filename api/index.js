@@ -945,6 +945,11 @@ alter table if exists public.users add column if not exists accent_color text no
 -- API before it is stored; '' / [] clear the value).
 alter table if exists public.users add column if not exists status_line text not null default '';
 alter table if exists public.users add column if not exists profile_links jsonb not null default '[]';
+-- Profile identity extras: a free-text location and an ordered list of
+-- short tech tags, both rendered on the public /u/<username> page. '' / []
+-- clear the value; every value is length-checked at the API before storage.
+alter table if exists public.users add column if not exists location text not null default '';
+alter table if exists public.users add column if not exists tech_tags jsonb not null default '[]';
 -- TOTP replay watermark: highest time-step already spent on a login.
 alter table if exists public.users add column if not exists totp_last_step bigint not null default 0;
 -- TOTP brute-force lockout: failed 2FA attempts and the resulting cooldown.
@@ -1256,6 +1261,8 @@ function rowToUser(row) {
     accentColor: row.accent_color || void 0,
     statusLine: row.status_line || void 0,
     profileLinks: Array.isArray(row.profile_links) ? row.profile_links : [],
+    location: row.location || void 0,
+    techTags: Array.isArray(row.tech_tags) ? row.tech_tags : [],
     role: row.role === "ADMIN" ? "ADMIN" : "USER",
     verification: ["USER", "DEVELOPER", "ADMIN"].includes(row.verification) ? row.verification : "",
     twoFactorEnabled: !!row.two_factor_enabled,
@@ -1335,7 +1342,9 @@ async function updateProfile(userId, updates) {
               bio = coalesce($5, bio),
               accent_color = coalesce($6, accent_color),
               status_line = coalesce($7, status_line),
-              profile_links = coalesce($8::jsonb, profile_links)
+              profile_links = coalesce($8::jsonb, profile_links),
+              location = coalesce($9, location),
+              tech_tags = coalesce($10::jsonb, tech_tags)
         where id = $1
         returning *`,
       [
@@ -1346,7 +1355,9 @@ async function updateProfile(userId, updates) {
         updates.bio ?? null,
         updates.accentColor ?? null,
         updates.statusLine ?? null,
-        updates.profileLinks != null ? JSON.stringify(updates.profileLinks) : null
+        updates.profileLinks != null ? JSON.stringify(updates.profileLinks) : null,
+        updates.location ?? null,
+        updates.techTags != null ? JSON.stringify(updates.techTags) : null
       ]
     );
     const user2 = result.rows[0] ? rowToUser(result.rows[0]) : null;
@@ -1362,6 +1373,8 @@ async function updateProfile(userId, updates) {
   if (updates.accentColor !== void 0) user.accentColor = updates.accentColor || void 0;
   if (updates.statusLine !== void 0) user.statusLine = updates.statusLine || void 0;
   if (updates.profileLinks !== void 0) user.profileLinks = updates.profileLinks;
+  if (updates.location !== void 0) user.location = updates.location || void 0;
+  if (updates.techTags !== void 0) user.techTags = updates.techTags;
   invalidateResolveCache(userId);
   return user;
 }
@@ -1383,6 +1396,8 @@ async function findPublicProfile(username) {
     accentColor: user.accentColor || void 0,
     statusLine: user.statusLine || void 0,
     links: user.profileLinks || [],
+    location: user.location || void 0,
+    techTags: Array.isArray(user.techTags) ? user.techTags : [],
     role: user.role,
     verification: user.verification,
     createdAt: user.createdAt,
@@ -4563,8 +4578,42 @@ async function buildApp() {
       }
       profileLinks = links;
     }
+    let location;
+    if (typeof req.body?.location === "string") {
+      const value = sanitizeText(req.body.location, 200).replace(/\s+/g, " ").trim();
+      if (value.length > 60) {
+        return res.status(400).json({ error: "Location must be 60 characters or fewer" });
+      }
+      location = value;
+    }
+    let techTags;
+    if (req.body?.techTags !== void 0) {
+      const raw = req.body.techTags;
+      if (!Array.isArray(raw)) return res.status(400).json({ error: "Tech tags must be an array" });
+      if (raw.length > 8) return res.status(400).json({ error: "Up to 8 tech tags are allowed" });
+      const tags = [];
+      for (const item of raw) {
+        const tag = typeof item === "string" ? sanitizeText(item, 60).replace(/\s+/g, " ").trim() : "";
+        if (!tag) continue;
+        if (tag.length > 24) {
+          return res.status(400).json({ error: `Tech tag "${tag}" must be 24 characters or fewer` });
+        }
+        tags.push(tag);
+      }
+      techTags = tags;
+    }
     try {
-      const updated = await updateProfile(actor.id, { name, avatarUrl, username, bio, accentColor, statusLine, profileLinks });
+      const updated = await updateProfile(actor.id, {
+        name,
+        avatarUrl,
+        username,
+        bio,
+        accentColor,
+        statusLine,
+        profileLinks,
+        location,
+        techTags
+      });
       if (!updated) return res.status(404).json({ error: "Account not found" });
       if (username) {
         persistAuditLog({

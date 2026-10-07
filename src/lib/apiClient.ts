@@ -168,7 +168,7 @@ class ApiClient {
     }
   }
 
-  /** Persist profile edits. `username`/`bio`/`accentColor`/`statusLine`/`links` are optional — omit = unchanged. */
+  /** Persist profile edits. `username`/`bio`/`accentColor`/`statusLine`/`links`/`location`/`techTags` are optional — omit = unchanged. */
   async updateProfile(params: {
     name: string;
     avatarUrl: string;
@@ -177,6 +177,8 @@ class ApiClient {
     accentColor?: string;
     statusLine?: string;
     links?: ProfileLink[];
+    location?: string;
+    techTags?: string[];
   }) {
     return this.request<{ user: User; permissions: PermissionScope[] }>('/auth/profile', {
       method: 'PATCH',

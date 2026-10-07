@@ -254,6 +254,23 @@ export const Header: React.FC<HeaderProps> = ({ onOpenCommandPalette, onToggleSi
                   </div>
 
                   <div className="py-1">
+                    {/* Direct link to this account's own public /u/<username>
+                        page. The username only exists once claimed, so the
+                        item is hidden (rather than dead) until then. */}
+                    {user.username && (
+                      <a
+                        href={`/u/${user.username}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={() => setIsProfileMenuOpen(false)}
+                        className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-xs text-slate-300 hover:bg-white/[0.05] hover:text-white transition-colors"
+                        title={`Open your public profile — vanitas-bot.vercel.app/u/${user.username}`}
+                      >
+                        <ExternalLink className="h-3.5 w-3.5 text-cyan-400" />
+                        <span className="flex-1 text-left">Public Profile</span>
+                        <span className="font-mono text-[10px] text-slate-500">@{user.username}</span>
+                      </a>
+                    )}
                     <button
                       onClick={() => {
                         setActiveView('profile');

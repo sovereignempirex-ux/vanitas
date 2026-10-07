@@ -815,8 +815,41 @@ export async function buildApp() {
       profileLinks = links;
     }
 
+    // Optional location — collapsed to a single line and capped at 60 chars.
+    // Rendered as plain text on /u/<username>, never as markup. '' clears it.
+    let location: string | undefined;
+    if (typeof req.body?.location === 'string') {
+      const value = sanitizeText(req.body.location, 200).replace(/\s+/g, ' ').trim();
+      if (value.length > 60) {
+        return res.status(400).json({ error: 'Location must be 60 characters or fewer' });
+      }
+      location = value;
+    }
+
+    // Optional tech tags — up to 8, each a short plain-text label. Stripped of
+    // control characters and collapsed to one line so nothing but the text a
+    // user typed reaches the chips rendered on the public profile.
+    let techTags: string[] | undefined;
+    if (req.body?.techTags !== undefined) {
+      const raw = req.body.techTags;
+      if (!Array.isArray(raw)) return res.status(400).json({ error: 'Tech tags must be an array' });
+      if (raw.length > 8) return res.status(400).json({ error: 'Up to 8 tech tags are allowed' });
+      const tags: string[] = [];
+      for (const item of raw) {
+        const tag = typeof item === 'string' ? sanitizeText(item, 60).replace(/\s+/g, ' ').trim() : '';
+        if (!tag) continue; // ignore blanks rather than failing the whole save
+        if (tag.length > 24) {
+          return res.status(400).json({ error: `Tech tag "${tag}" must be 24 characters or fewer` });
+        }
+        tags.push(tag);
+      }
+      techTags = tags;
+    }
+
     try {
-      const updated = await updateProfile(actor.id, { name, avatarUrl, username, bio, accentColor, statusLine, profileLinks });
+      const updated = await updateProfile(actor.id, {
+        name, avatarUrl, username, bio, accentColor, statusLine, profileLinks, location, techTags,
+      });
       if (!updated) return res.status(404).json({ error: 'Account not found' });
       if (username) {
         persistAuditLog({

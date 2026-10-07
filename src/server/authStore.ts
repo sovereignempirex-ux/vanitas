@@ -187,6 +187,8 @@ export function rowToUser(row: Record<string, any>): User {
     accentColor: row.accent_color || undefined,
     statusLine: row.status_line || undefined,
     profileLinks: Array.isArray(row.profile_links) ? row.profile_links : [],
+    location: row.location || undefined,
+    techTags: Array.isArray(row.tech_tags) ? row.tech_tags : [],
     role: row.role === 'ADMIN' ? 'ADMIN' : 'USER',
     verification: ['USER', 'DEVELOPER', 'ADMIN'].includes(row.verification) ? row.verification : '',
     twoFactorEnabled: !!row.two_factor_enabled,
@@ -293,6 +295,8 @@ export async function updateProfile(
     accentColor?: string;
     statusLine?: string;
     profileLinks?: ProfileLink[];
+    location?: string;
+    techTags?: string[];
   },
 ): Promise<User | null> {
   if (databasePool) {
@@ -304,7 +308,9 @@ export async function updateProfile(
               bio = coalesce($5, bio),
               accent_color = coalesce($6, accent_color),
               status_line = coalesce($7, status_line),
-              profile_links = coalesce($8::jsonb, profile_links)
+              profile_links = coalesce($8::jsonb, profile_links),
+              location = coalesce($9, location),
+              tech_tags = coalesce($10::jsonb, tech_tags)
         where id = $1
         returning *`,
       [
@@ -316,6 +322,8 @@ export async function updateProfile(
         updates.accentColor ?? null,
         updates.statusLine ?? null,
         updates.profileLinks != null ? JSON.stringify(updates.profileLinks) : null,
+        updates.location ?? null,
+        updates.techTags != null ? JSON.stringify(updates.techTags) : null,
       ],
     );
     const user = result.rows[0] ? rowToUser(result.rows[0]) : null;
@@ -332,6 +340,10 @@ export async function updateProfile(
   if (updates.accentColor !== undefined) user.accentColor = updates.accentColor || undefined;
   if (updates.statusLine !== undefined) user.statusLine = updates.statusLine || undefined;
   if (updates.profileLinks !== undefined) user.profileLinks = updates.profileLinks;
+  // '' clears the location (unset), but [] is a meaningful "no tags" value, so
+  // the two need different sentinels.
+  if (updates.location !== undefined) user.location = updates.location || undefined;
+  if (updates.techTags !== undefined) user.techTags = updates.techTags;
   invalidateResolveCache(userId);
   return user;
 }
@@ -355,6 +367,8 @@ export async function findPublicProfile(username: string): Promise<PublicProfile
     accentColor: user.accentColor || undefined,
     statusLine: user.statusLine || undefined,
     links: user.profileLinks || [],
+    location: user.location || undefined,
+    techTags: Array.isArray(user.techTags) ? user.techTags : [],
     role: user.role,
     verification: user.verification,
     createdAt: user.createdAt,

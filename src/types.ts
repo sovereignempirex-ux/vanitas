@@ -51,6 +51,10 @@ export interface User {
   statusLine?: string;
   /** Up to 5 published https links (server-validated). */
   profileLinks?: ProfileLink[];
+  /** Free-text location ("Lisbon, PT") shown on /u/<username>. ≤60 chars. */
+  location?: string;
+  /** Up to 8 short tech tags ("TypeScript", "Postgres"). Each ≤24 chars. */
+  techTags?: string[];
   role: UserRole;
   /** Verification badge granted by an admin — see VerificationType. */
   verification: VerificationType;
@@ -95,6 +99,10 @@ export interface PublicProfile {
   statusLine?: string;
   /** The account holder's published links (label + https URL only). */
   links?: ProfileLink[];
+  /** The account holder's location, exactly as saved (≤60 chars). */
+  location?: string;
+  /** The account holder's tech tags, in the order they saved them. */
+  techTags?: string[];
   /** Real number of docs comments this author wrote (0 on a fresh account). */
   commentCount?: number;
   /** The newest few of those comments — newest first, capped server-side. */
