@@ -18,6 +18,12 @@ coverage/
 vanitas (1)/
 .vercel
 
+# Blender scratch renders (tools/blender/_test_* is a smoke test; only
+# assets that land in public/images/ are tracked) + bytecode cache
+tools/blender/_test_*.png
+__pycache__/
+*.pyc
+
 # Logs & OS
 *.log
 .DS_Store

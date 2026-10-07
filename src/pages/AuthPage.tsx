@@ -218,7 +218,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({ mode, invite }) => {
 
   return (
     <div className="min-h-screen vnt-app-bg text-slate-100 flex flex-col relative overflow-hidden">
-      {/* Real photographic backdrop (bundled in /public/images) */}
+      {/* Abstract brand backdrop (bundled in /public/images) */}
       <img
         src="/images/auth-bg.jpg"
         alt=""

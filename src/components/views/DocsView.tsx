@@ -51,11 +51,11 @@ export const DocsView: React.FC = () => {
         </div>
       </div>
 
-      {/* Real photograph banner (bundled in /public/images) */}
+      {/* Abstract brand banner (bundled in /public/images) */}
       <div className="relative h-32 sm:h-40 overflow-hidden rounded-3xl border border-white/10">
         <img
           src="/images/docs-banner.jpg"
-          alt="Developer workstation with a laptop and coffee"
+          alt="Faceted Vanitas crystal rendered as a wireframe"
           className="absolute inset-0 h-full w-full object-cover object-center"
         />
         <div className="absolute inset-0 bg-gradient-to-r from-slate-950/95 via-slate-950/70 to-transparent" />

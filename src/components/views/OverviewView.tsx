@@ -208,7 +208,7 @@ export const OverviewView: React.FC = () => {
     <div className="space-y-8 vnt-fade-up">
       {/* Hero Glass Banner */}
       <div className="vnt-surface relative overflow-hidden rounded-3xl p-6 sm:p-10 shadow-[0_24px_64px_-32px_rgba(59,130,246,0.45)]">
-        {/* Real workspace photograph (bundled in /public/images) */}
+        {/* Abstract brand backdrop (bundled in /public/images) */}
         <img
           src="/images/overview-hero.jpg"
           alt=""
