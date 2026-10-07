@@ -1424,6 +1424,7 @@ async function forgetAccount(userId) {
       const [removed] = db.users.splice(idx, 1);
       if (removed) memoryPasswords.delete(removed.email);
     }
+    if (db.users.length === 0) bootstrapRoleClaimed = false;
     db.apiKeys = db.apiKeys.filter((k) => k.ownerId !== userId);
     for (const [key, rec] of memorySessions) if (rec.userId === userId) memorySessions.delete(key);
     for (const [key, uid] of memoryIdentities) if (uid === userId) memoryIdentities.delete(key);

@@ -404,6 +404,16 @@ export async function forgetAccount(userId: string): Promise<void> {
       const [removed] = db.users.splice(idx, 1);
       if (removed) memoryPasswords.delete(removed.email);
     }
+    // Re-arm the bootstrap claim once the store is empty again.
+    //
+    // pickInitialRole reads count(*) live in PostgreSQL, so an emptied
+    // database bootstraps a fresh ADMIN on the next signup — in-memory mode
+    // must do the same. The flag was set once and never cleared, so after the
+    // very first account deleted itself every later signup came out USER and
+    // a reset install was left with no owner at all. While any user remains
+    // the flag stays set; clearing it only on emptiness keeps two racing
+    // signups from both reading 0 rows and both claiming ADMIN.
+    if (db.users.length === 0) bootstrapRoleClaimed = false;
     db.apiKeys = db.apiKeys.filter((k) => k.ownerId !== userId);
     for (const [key, rec] of memorySessions) if (rec.userId === userId) memorySessions.delete(key);
     for (const [key, uid] of memoryIdentities) if (uid === userId) memoryIdentities.delete(key);

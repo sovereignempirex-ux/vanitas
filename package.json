@@ -11,7 +11,8 @@
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "test": "npm run lint && node scripts/sql-check.mjs",
+    "test": "npm run lint && npm run build && node scripts/run-tests.mjs",
+    "test:sql": "node scripts/sql-check.mjs",
     "test:e2e": "npm run build && node scripts/oauth-e2e-test.mjs",
     "db:migrate": "node scripts/migrate.js"
   },
