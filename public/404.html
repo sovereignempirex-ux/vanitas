@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- A 404 must never enter the index; the correct status code is already
+         sent by the edge, this only stops it being crawled as content. -->
+    <meta name="robots" content="noindex, nofollow" />
+    <title>404 — Page not found | Vanitas</title>
+    <meta
+      name="description"
+      content="The page you were looking for does not exist on Vanitas."
+    />
+    <meta name="theme-color" content="#05070e" />
+    <link rel="icon" type="image/svg+xml" href="/images/vanitas-web-crystal.svg" />
+    <link rel="alternate icon" href="/images/vanitas-desktop-installer.ico" sizes="any" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700;900&family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <!--
+      Everything below is inline because this file ships as a standalone
+      document (it is NOT the SPA bundle) and the site CSP runs
+      script-src 'self' — so: no JavaScript at all, inline <style> only
+      (style-src allows 'unsafe-inline'), and every image self-hosted
+      per BRAND.md §7.
+    -->
+    <style>
+      :root {
+        --vnt-bg: #05070e;
+        --vnt-surface: rgba(13, 20, 38, 0.72);
+        --vnt-border: rgba(148, 163, 184, 0.14);
+        --vnt-accent: #60a5fa;
+        --vnt-accent-2: #22d3ee;
+        color-scheme: dark;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        min-height: 100%;
+      }
+
+      body {
+        /* Same mesh background as .vnt-app-bg so the 404 reads as part of
+           the product rather than a generic host error page. */
+        background:
+          radial-gradient(900px 480px at 85% -5%, rgba(59, 130, 246, 0.14), transparent 60%),
+          radial-gradient(760px 420px at 8% 8%, rgba(34, 211, 238, 0.09), transparent 60%),
+          radial-gradient(700px 500px at 50% 110%, rgba(99, 102, 241, 0.08), transparent 60%),
+          var(--vnt-bg);
+        color: #e2e8f0;
+        font-family: 'Plus Jakarta Sans', ui-sans-serif, system-ui, sans-serif;
+        -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 3rem 1.25rem;
+        text-align: center;
+      }
+
+      a {
+        color: inherit;
+      }
+
+      :focus-visible {
+        outline: 2px solid rgba(96, 165, 250, 0.8);
+        outline-offset: 2px;
+        border-radius: 8px;
+      }
+
+      .mark {
+        width: 64px;
+        height: 64px;
+        display: block;
+        filter: drop-shadow(0 8px 28px rgba(96, 165, 250, 0.35));
+      }
+
+      .code {
+        font-family: 'Cinzel', serif;
+        font-weight: 900;
+        font-size: clamp(5.5rem, 22vw, 11rem);
+        line-height: 0.9;
+        margin: 1.75rem 0 0;
+        letter-spacing: 0.04em;
+        background: linear-gradient(100deg, #93c5fd 0%, #67e8f9 45%, #dbeafe 100%);
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+        user-select: none;
+      }
+
+      h1 {
+        font-size: clamp(1.15rem, 3.2vw, 1.5rem);
+        font-weight: 700;
+        margin: 0.35rem 0 0;
+        color: #f1f5f9;
+      }
+
+      .lede {
+        max-width: 34rem;
+        margin: 0.85rem auto 0;
+        font-size: 0.95rem;
+        line-height: 1.65;
+        color: #94a3b8;
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        justify-content: center;
+        margin-top: 2rem;
+      }
+
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.7rem 1.25rem;
+        border-radius: 0.8rem;
+        font-size: 0.875rem;
+        font-weight: 600;
+        text-decoration: none;
+        transition: transform 0.15s ease, border-color 0.15s ease,
+          background-color 0.15s ease, color 0.15s ease;
+      }
+
+      .btn-primary {
+        background: linear-gradient(100deg, rgba(96, 165, 250, 0.18), rgba(34, 211, 238, 0.14));
+        border: 1px solid rgba(96, 165, 250, 0.45);
+        color: #dbeafe;
+      }
+
+      .btn-primary:hover {
+        transform: translateY(-1px);
+        border-color: rgba(96, 165, 250, 0.8);
+        background: linear-gradient(100deg, rgba(96, 165, 250, 0.28), rgba(34, 211, 238, 0.2));
+      }
+
+      .btn-ghost {
+        background: var(--vnt-surface);
+        border: 1px solid var(--vnt-border);
+        color: #cbd5e1;
+        backdrop-filter: blur(18px) saturate(1.2);
+        -webkit-backdrop-filter: blur(18px) saturate(1.2);
+      }
+
+      .btn-ghost:hover {
+        transform: translateY(-1px);
+        border-color: rgba(148, 163, 184, 0.32);
+        color: #f1f5f9;
+      }
+
+      .meta {
+        margin-top: 2.75rem;
+        padding-top: 1.25rem;
+        border-top: 1px solid rgba(148, 163, 184, 0.1);
+        width: 100%;
+        max-width: 34rem;
+        font-family: 'JetBrains Mono', ui-monospace, monospace;
+        font-size: 0.68rem;
+        letter-spacing: 0.08em;
+        color: #64748b;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem 1rem;
+        justify-content: center;
+      }
+
+      .meta a {
+        color: #64748b;
+        text-decoration: none;
+        transition: color 0.15s ease;
+      }
+
+      .meta a:hover {
+        color: var(--vnt-accent-2);
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        * {
+          transition-duration: 0.01ms !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <!-- Faceted gem mark (BRAND.md §2), self-hosted per §7 -->
+      <img
+        class="mark"
+        src="/images/vanitas-web-crystal.svg"
+        alt="Vanitas"
+        width="64"
+        height="64"
+      />
+
+      <p class="code" aria-hidden="true">404</p>
+
+      <h1>This page doesn&rsquo;t exist</h1>
+      <p class="lede">
+        The link may be outdated, or the address was mistyped. Nothing was
+        lost &mdash; your keys, logs and dashboards are exactly where you left
+        them.
+      </p>
+
+      <nav class="actions" aria-label="Recovery">
+        <a class="btn btn-primary" href="/">&larr; Back to home</a>
+        <a class="btn btn-ghost" href="/login">Sign in</a>
+        <a class="btn btn-ghost" href="/register">Create account</a>
+      </nav>
+    </main>
+
+    <!-- Only routes that actually resolve are linked: /docs and /status are
+         authenticated dashboard views, not public paths — linking them here
+         would ship a 404 page whose own links 404. -->
+    <footer class="meta">
+      <span>VANITAS &middot; CENTRALIZED API PLATFORM</span>
+      <a href="/">HOME</a>
+      <a href="/login">CONSOLE</a>
+      <a href="/register">REGISTER</a>
+    </footer>
+  </body>
+</html>
