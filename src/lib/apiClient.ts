@@ -175,6 +175,19 @@ class ApiClient {
     }
   }
 
+  /** Revoke SOME account's session (multi-account menu): the request
+   *  must carry THAT account's token, not the active one's. */
+  async revokeToken(token: string) {
+    try {
+      await fetch(`${this.baseUrl}/auth/logout`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      });
+    } catch {
+      // Server unreachable — still forget the entry locally.
+    }
+  }
+
   /** Persist profile edits. `username`/`bio`/`accentColor`/`statusLine`/`links`/`location`/`techTags` are optional — omit = unchanged. */
   async updateProfile(params: {
     name: string;

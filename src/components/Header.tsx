@@ -23,6 +23,9 @@ import {
   Globe,
   Download,
   Menu,
+  Check,
+  X,
+  UserPlus,
 } from 'lucide-react';
 
 interface HeaderProps {
@@ -32,10 +35,11 @@ interface HeaderProps {
 }
 
 export const Header: React.FC<HeaderProps> = ({ onOpenCommandPalette, onToggleSidebar }) => {
-  const { user, role, logout, setActiveView, isAuthModalOpen, setIsAuthModalOpen, clientSource, setClientSource } = useAuth();
+  const { user, role, logout, logoutAll, setActiveView, isAuthModalOpen, setIsAuthModalOpen, clientSource, setClientSource, accounts, switchAccount, removeAccount } = useAuth();
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
   const [isNotifOpen, setIsNotifOpen] = useState(false);
   const [isSourceMenuOpen, setIsSourceMenuOpen] = useState(false);
+  const [switchError, setSwitchError] = useState('');
 
   const notifications = [
     { id: 1, title: 'Key Rotated', time: '2m ago', text: 'Central Production Gateway secret was safely rotated.' },
@@ -231,7 +235,7 @@ export const Header: React.FC<HeaderProps> = ({ onOpenCommandPalette, onToggleSi
               </button>
 
               {isProfileMenuOpen && (
-                <div className="absolute right-0 mt-2 w-56 rounded-2xl border border-white/10 bg-slate-950/95 p-2 shadow-2xl backdrop-blur-xl z-50">
+                <div className="absolute right-0 mt-2 w-64 rounded-2xl border border-white/10 bg-slate-950/95 p-2 shadow-2xl backdrop-blur-xl z-50">
                   <div className="px-3 py-2 border-b border-white/10">
                     <p className="flex items-center gap-1.5 text-xs font-semibold text-white">
                       <span className="truncate">{user.name}</span>
@@ -251,6 +255,61 @@ export const Header: React.FC<HeaderProps> = ({ onOpenCommandPalette, onToggleSi
                         {user.twoFactorEnabled ? '2FA Active' : '2FA Off'}
                       </span>
                     </div>
+                  </div>
+
+                  {/* Multi-account switcher — every entry is a REAL
+                      server session, not a fake local profile. */}
+                  <div className="border-b border-white/10 px-1 py-1">
+                    <p className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                      Accounts on this device
+                    </p>
+                    {accounts.map((account) => {
+                      const isActive = account.id === user.id;
+                      return (
+                        <div key={account.id} className="group flex items-center gap-1 rounded-lg hover:bg-white/[0.05]">
+                          <button
+                            onClick={async () => {
+                              setSwitchError('');
+                              if (isActive) return;
+                              const result = await switchAccount(account.id);
+                              if (!result.success) setSwitchError(result.error || 'Could not switch');
+                              else setIsProfileMenuOpen(false);
+                            }}
+                            className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg px-2 py-1.5 text-left"
+                            title={isActive ? 'Current account' : `Switch to ${account.name}`}
+                          >
+                            <img
+                              src={account.avatarUrl || '/images/avatar-default.svg'}
+                              alt=""
+                              className="h-6 w-6 rounded-md border border-white/10 object-cover"
+                            />
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate text-xs font-medium text-slate-200">{account.name}</span>
+                              <span className="block truncate text-[10px] text-slate-500">{account.email}</span>
+                            </span>
+                            {isActive && <Check className="h-3.5 w-3.5 flex-none text-cyan-400" />}
+                          </button>
+                          <button
+                            onClick={() => void removeAccount(account.id)}
+                            title={`Sign out ${account.name}`}
+                            className="rounded p-1 text-slate-600 opacity-0 transition group-hover:opacity-100 hover:text-rose-300"
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        </div>
+                      );
+                    })}
+                    {switchError && <p className="px-2 pb-1 text-[10px] text-rose-300">{switchError}</p>}
+                    <button
+                      onClick={() => {
+                        setIsProfileMenuOpen(false);
+                        window.location.href = '/login';
+                      }}
+                      className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-xs text-cyan-300 transition-colors hover:bg-cyan-400/10"
+                    >
+                      <UserPlus className="h-3.5 w-3.5" />
+                      <span>Add Another Account</span>
+                    </button>
                   </div>
 
                   <div className="py-1">
@@ -303,7 +362,7 @@ export const Header: React.FC<HeaderProps> = ({ onOpenCommandPalette, onToggleSi
                     </button>
                   </div>
 
-                  <div className="pt-1 border-t border-white/10">
+                  <div className="space-y-1 border-t border-white/10 pt-1">
                     <button
                       onClick={() => {
                         logout();
@@ -312,7 +371,17 @@ export const Header: React.FC<HeaderProps> = ({ onOpenCommandPalette, onToggleSi
                       className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-xs text-rose-400 hover:bg-rose-500/10 transition-colors"
                     >
                       <LogOut className="h-3.5 w-3.5" />
-                      <span>Log Out</span>
+                      <span>Log Out This Account</span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        logoutAll();
+                        setIsProfileMenuOpen(false);
+                      }}
+                      className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-xs text-rose-300/70 hover:bg-rose-500/10 transition-colors"
+                    >
+                      <LogOut className="h-3.5 w-3.5" />
+                      <span>Sign Out of All Accounts</span>
                     </button>
                   </div>
                 </div>

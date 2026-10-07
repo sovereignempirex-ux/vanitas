@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { User, UserRole, ClientSource, PermissionScope, WeeklyAgentQuota, ProfileLink } from '../types.ts';
 import { api } from '../lib/apiClient.ts';
+import { getAccounts, upsertAccount, removeAccount, clearAccounts, StoredAccount } from '../lib/accounts.ts';
 
 const ONE_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -47,6 +48,15 @@ interface AuthContextType {
   weeklyAgentQuota: WeeklyAgentQuota;
   executeAgentRun: (agentType?: string) => { success: boolean; message: string };
   resetAgentQuota: () => void;
+  // Multi-account system — every entry is a real server session.
+  /** All accounts ever signed in on this device (with live tokens). */
+  accounts: StoredAccount[];
+  /** Login as a different account already stored on this device. */
+  switchAccount: (id: string) => Promise<{ success: boolean; error?: string }>;
+  /** Sign one stored account out (revokes its server session). */
+  removeAccount: (id: string) => Promise<void>;
+  /** Sign every stored account out on this device. */
+  logoutAll: () => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -73,6 +83,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
   // Gate the dashboard until the server confirms (or rejects) the session.
   const [authLoading, setAuthLoading] = useState<boolean>(true);
+  // Multi-account registry (localStorage) + which entry owns the token.
+  const [accounts, setAccounts] = useState<StoredAccount[]>(() => getAccounts());
+  const [activeAccountId, setActiveAccountId] = useState<string | null>(() => {
+    try {
+      const token = localStorage.getItem('vanitas_auth_token');
+      return token ? getAccounts().find((a) => a.token === token)?.id || null : null;
+    } catch {
+      return null;
+    }
+  });
 
   // Weekly Agent Quota state
   const [agentQuotaState, setAgentQuotaState] = useState<{
@@ -164,6 +184,23 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, [user]);
 
+  /** Adopt a server-verified account: set the token, sync the
+   *  registry entry, close any open auth UI. */
+  const activateUser = (dataUser: User, token: string, permissions: PermissionScope[]) => {
+    api.setAuthToken(token);
+    setUser(dataUser);
+    setRoleState(dataUser.role);
+    setPermissions(permissions || []);
+    setActiveAccountId(dataUser.id);
+    try {
+      localStorage.setItem('vanitas_active_user', JSON.stringify(dataUser));
+    } catch {
+      // ignore
+    }
+    setAccounts(upsertAccount(dataUser, token));
+    setIsAuthModalOpen(false);
+  };
+
   const refreshUser = async () => {
     try {
       const data = await api.getMe();
@@ -177,19 +214,39 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         } catch {
           // ignore
         }
+        // Keep the device's registry entry fresh (role/avatar/name drift
+        // while the account is away is reflected on next activation).
+        const token = api.getSessionToken();
+        if (token) setAccounts(upsertAccount(data.user, token));
       }
     } catch (err: any) {
       if (err?.status === 401) {
-        // No valid session → signed out. Clear any cached persona.
-        setUser(null);
-        setRoleState('USER');
-        setPermissions([]);
+        // The ACTIVE session is dead. Drop only that entry — other
+        // stored sessions survive, and the most recent one takes over.
+        const deadId = activeAccountId || user?.id;
+        const remaining = deadId ? removeAccount(deadId) : getAccounts();
+        setAccounts(remaining);
         api.setAuthToken(null);
         try {
           localStorage.removeItem('vanitas_active_user');
         } catch {
           // ignore
         }
+        const next = remaining[0];
+        if (next) {
+          api.setAuthToken(next.token);
+          try {
+            const data = await api.getMe();
+            activateUser(data.user, next.token, data.permissions);
+            return;
+          } catch {
+            // next token also dead — clear fully below
+          }
+        }
+        setUser(null);
+        setRoleState('USER');
+        setPermissions([]);
+        setActiveAccountId(null);
       } else {
         console.warn('Failed fetching me:', err);
       }
@@ -218,18 +275,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
    *  with a session token in the URL fragment — adopt it and load the user. */
   const completeOAuthLogin = async (token: string) => {
     api.setAuthToken(token);
-    await refreshUser();
+    const data = await api.getMe();
+    activateUser(data.user, token, data.permissions);
+    setAuthLoading(false);
   };
 
   /** Finish an OAuth login that the server paused for a real TOTP code. */
   const completeTwoFactorLogin = async (state: string, code: string) => {
     try {
       const data = await api.completeTwoFactor(state, code);
-      setUser(data.user);
-      setRoleState(data.user.role);
-      setPermissions(data.permissions);
-      localStorage.setItem('vanitas_active_user', JSON.stringify(data.user));
-      setIsAuthModalOpen(false);
+      activateUser(data.user, data.token, data.permissions);
       return { success: true };
     } catch (err: any) {
       return { success: false, error: err?.message || 'Two-factor verification failed' };
@@ -260,11 +315,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           : await api.login({ email: cleanEmail, password, code });
 
       // Server is the source of truth for role & permissions.
-      setUser(data.user);
-      setRoleState(data.user.role);
-      setPermissions(data.permissions);
-      localStorage.setItem('vanitas_active_user', JSON.stringify(data.user));
-      setIsAuthModalOpen(false);
+      activateUser(data.user, data.token, data.permissions);
       return { success: true };
     } catch (err: any) {
       // Server answered (wrong password, duplicate email, 2FA needed, storage
@@ -282,12 +333,123 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  /** Log out of the CURRENT account only. If other stored accounts
+   *  remain, the most recently used one takes over seamlessly —
+   *  "Log Out of All" is the full sign-out. */
   const logout = () => {
-    // Revoke the server session and clear the stored Bearer token.
-    api.logout().catch(() => undefined);
+    const currentId = activeAccountId || user?.id;
+    api.logout().catch(() => undefined); // revokes the CURRENT session server-side
+    const remaining = currentId ? removeAccount(currentId) : getAccounts();
+    setAccounts(remaining);
+    api.setAuthToken(null);
+    try {
+      localStorage.removeItem('vanitas_active_user');
+    } catch {
+      // ignore
+    }
+    const next = remaining[0];
+    if (next) {
+      api.setAuthToken(next.token);
+      api
+        .getMe()
+        .then((data) => activateUser(data.user, next.token, data.permissions))
+        .catch(() => {
+          // The fallback session is dead — clear fully.
+          api.setAuthToken(null);
+          setUser(null);
+          setRoleState('USER');
+          setPermissions([]);
+          setActiveAccountId(null);
+        });
+      return;
+    }
     setUser(null);
     setRoleState('USER');
-    localStorage.removeItem('vanitas_active_user');
+    setPermissions([]);
+    setActiveAccountId(null);
+  };
+
+  /** Sign one stored account out (revokes its server session, drops
+   *  its entry). When it is the active one, the next account takes over. */
+  const removeAccountById = async (id: string) => {
+    const entry = accounts.find((a) => a.id === id);
+    if (entry) {
+      try {
+        await api.revokeToken(entry.token);
+      } catch {
+        // already gone
+      }
+    }
+    const remaining = removeAccount(id);
+    setAccounts(remaining);
+    if (id !== activeAccountId) return;
+    const next = remaining[0];
+    if (next) {
+      api.setAuthToken(next.token);
+      try {
+        const data = await api.getMe();
+        activateUser(data.user, next.token, data.permissions);
+        return;
+      } catch {
+        api.setAuthToken(null);
+      }
+    } else {
+      api.setAuthToken(null);
+    }
+    setUser(null);
+    setRoleState('USER');
+    setPermissions([]);
+    setActiveAccountId(null);
+    try {
+      localStorage.removeItem('vanitas_active_user');
+    } catch {
+      // ignore
+    }
+  };
+
+  /** Switch the active session to another stored account. The
+   *  server verifies its token; a dead entry is dropped on 401. */
+  const switchAccount = async (id: string): Promise<{ success: boolean; error?: string }> => {
+    const target = accounts.find((a) => a.id === id);
+    if (!target) return { success: false, error: 'Account no longer on this device' };
+    if (id === activeAccountId && user) return { success: true };
+    const previousToken = api.getSessionToken();
+    const previousActiveId = activeAccountId;
+    api.setAuthToken(target.token);
+    try {
+      const data = await api.getMe();
+      activateUser(data.user, target.token, data.permissions);
+      return { success: true };
+    } catch (err: any) {
+      if (err?.status === 401) {
+        setAccounts(removeAccount(id));
+        // Restore the previous session untouched.
+        api.setAuthToken(previousToken);
+        setActiveAccountId(previousActiveId);
+        return { success: false, error: 'That session expired — sign in to add it again.' };
+      }
+      api.setAuthToken(previousToken);
+      setActiveAccountId(previousActiveId);
+      return { success: false, error: err?.message || 'Could not switch account' };
+    }
+  };
+
+  /** Revoke every stored session on this device and forget them all. */
+  const logoutAll = () => {
+    const tokens = getAccounts().map((a) => a.token);
+    void Promise.allSettled(tokens.map((t) => api.revokeToken(t)));
+    clearAccounts();
+    setAccounts([]);
+    api.setAuthToken(null);
+    setUser(null);
+    setRoleState('USER');
+    setPermissions([]);
+    setActiveAccountId(null);
+    try {
+      localStorage.removeItem('vanitas_active_user');
+    } catch {
+      // ignore
+    }
   };
 
   const updateUserProfile = async (updates: {
@@ -312,6 +474,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       } catch {
         // ignore
       }
+      // Refresh the registry entry too — name/avatar changes show up
+      // correctly in the switcher next time.
+      const token = api.getSessionToken();
+      if (token) setAccounts(upsertAccount(data.user, token));
       return { success: true };
     } catch (err: any) {
       return { success: false, error: err?.message || 'Profile update failed' };
@@ -379,6 +545,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         weeklyAgentQuota,
         executeAgentRun,
         resetAgentQuota,
+        accounts,
+        switchAccount,
+        removeAccount: removeAccountById,
+        logoutAll,
       }}
     >
       {children}
