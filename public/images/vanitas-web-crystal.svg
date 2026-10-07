@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Vanitas">
+  <!-- Favicon cut of the brand gem (BRAND.md §2).
+       Not a copy of logo.svg: that mark's inner facets close up below 24px,
+       so this variant uses fewer, larger planes and a heavier dark seam so
+       the crystal still reads at 16px. Same palette as §3. -->
+  <defs>
+    <linearGradient id="vnt-body" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7dd3fc"/>
+      <stop offset="0.5" stop-color="#2563eb"/>
+      <stop offset="1" stop-color="#1e3a8a"/>
+    </linearGradient>
+    <linearGradient id="vnt-crown" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e0f2fe"/>
+      <stop offset="1" stop-color="#38bdf8"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Silhouette: regular hexagon, outlined so it survives on any tile -->
+  <path d="M32 3 59 18.5v27L32 61 5 45.5v-27z"
+        fill="url(#vnt-body)" stroke="#38bdf8" stroke-width="2" stroke-linejoin="round"/>
+
+  <!-- One large crown plane instead of logo.svg's three small ones -->
+  <path d="M32 13 47 21.5v14L32 47 15 35.5v-14z"
+        fill="url(#vnt-crown)" opacity="0.38"/>
+
+  <!-- Table (top facet) kept solid and bright — the value anchor at 16px -->
+  <path d="M32 13 47 21.5 32 30 17 21.5z" fill="#e0f2fe"/>
+
+  <!-- Dark seams: light-coloured strokes vanish on a light browser tab,
+       so the facet edges are cut in dark for contrast in both modes. -->
+  <path d="M32 30v17M17 21.5 32 30l15-8.5" fill="none" stroke="#0b1a3a"
+        stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity="0.7"/>
+</svg>

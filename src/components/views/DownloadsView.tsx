@@ -311,9 +311,9 @@ export const DownloadsView: React.FC = () => {
             <div className="relative rounded-3xl border border-blue-500/30 bg-black/60 p-6 backdrop-blur-2xl shadow-2xl flex flex-col items-center text-center max-w-xs">
               <div className="relative mb-4 flex h-20 w-20 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-600/30 via-blue-500/10 to-transparent border border-blue-500/40 shadow-[0_0_30px_rgba(59,130,246,0.3)]">
                 <img
-                  src={BRAND_ASSETS.logo}
+                  src={BRAND_ASSETS.icons.application.path}
                   alt="Vanitas App Icon"
-                  className="h-12 w-12 object-contain filter drop-shadow-[0_0_12px_rgba(96,165,250,0.8)]"
+                  className="h-14 w-14 object-contain filter drop-shadow-[0_0_12px_rgba(96,165,250,0.8)]"
                 />
               </div>
 
@@ -580,6 +580,55 @@ export const DownloadsView: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Platform icons — every asset declared in BRAND_ASSETS.icons, with
+          its real served path. These three were listed in assets.ts for a
+          long time while pointing at files that were never in the repo. */}
+      <div className="rounded-3xl border border-white/10 bg-slate-950/60 p-6 sm:p-8 backdrop-blur-xl space-y-4">
+        <div>
+          <h3 className="text-lg font-bold text-white flex items-center gap-2">
+            <Layers className="h-5 w-5 text-cyan-400" />
+            <span>App &amp; Browser Icons</span>
+          </h3>
+          <p className="text-xs text-slate-400 mt-1">
+            Self-hosted from <code className="font-mono text-blue-300">/images/</code> — no third-party
+            image host can swap them.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          {(Object.entries(BRAND_ASSETS.icons) as [string, {
+            title: string; format: string; description: string;
+            badge: string; filename: string; path: string;
+          }][]).map(([key, icon]) => (
+            <a
+              key={key}
+              href={icon.path}
+              target="_blank"
+              rel="noreferrer"
+              className="group flex flex-col items-start gap-3 rounded-2xl border border-white/10 bg-black/40 p-4 transition-colors hover:border-cyan-400/40"
+            >
+              <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-blue-500/30 bg-gradient-to-br from-blue-600/25 to-transparent">
+                <img
+                  src={icon.path}
+                  alt={icon.title}
+                  className="h-9 w-9 object-contain transition-transform group-hover:scale-110"
+                />
+              </div>
+              <div className="space-y-1">
+                <p className="text-xs font-bold text-white">{icon.title}</p>
+                <p className="font-mono text-[10px] uppercase tracking-widest text-cyan-400">
+                  {icon.badge}
+                </p>
+                <p className="text-[11px] leading-relaxed text-slate-400">{icon.description}</p>
+              </div>
+              <code className="mt-auto break-all font-mono text-[10px] text-slate-500 group-hover:text-blue-300">
+                {icon.path}
+              </code>
+            </a>
+          ))}
+        </div>
+      </div>
 
       {/* Step-by-Step Installation Manual (Tabbed APK vs EXE) */}
       <div className="rounded-3xl border border-white/10 bg-slate-950/60 p-6 sm:p-8 backdrop-blur-xl space-y-6">

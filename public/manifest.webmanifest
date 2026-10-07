@@ -1,0 +1,32 @@
+{
+  "name": "Vanitas — Centralized API & Security Engine",
+  "short_name": "Vanitas",
+  "description": "One unified gateway for web, bots, mobile and desktop — scoped keys, rate limits, webhooks, audit logs and a site-aware AI copilot.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#05070e",
+  "theme_color": "#05070e",
+  "icons": [
+    {
+      "src": "/images/vanitas-web-crystal.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/images/vanitas-app-icon.png",
+      "sizes": "1024x1024",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "API Keys",
+      "short_name": "Keys",
+      "url": "/register"
+    }
+  ]
+}

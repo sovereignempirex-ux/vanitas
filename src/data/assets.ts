@@ -9,12 +9,16 @@ export const BRAND_ASSETS = {
   centralApiUrl: getApiBaseUrl(),
   portalUrl: getPortalUrl(),
   icons: {
+    // `path` is the served URL; `filename` is the on-disk name in
+    // public/images/. Both must exist — these three were declared for a
+    // long time while pointing at files that were never in the repo.
     website: {
       title: 'Vanitas Web Portal Icon',
       format: 'SVG / PNG Favicon',
       description: 'Official crystal sapphire emblem for the web portal and cloud console.',
-      badge: 'Web Favicon (512x512)',
+      badge: 'Web Favicon (SVG, scales to any size)',
       filename: 'vanitas-web-crystal.svg',
+      path: '/images/vanitas-web-crystal.svg',
     },
     application: {
       title: 'Vanitas Mobile & PWA App Icon',
@@ -22,6 +26,7 @@ export const BRAND_ASSETS = {
       description: 'Prismatic crystal icon with squircle glass frame for Android APK and iOS PWA.',
       badge: 'App Icon (1024x1024)',
       filename: 'vanitas-app-icon.png',
+      path: '/images/vanitas-app-icon.png',
     },
     desktopExe: {
       title: 'Vanitas Windows Desktop (.exe) Icon',
@@ -29,8 +34,16 @@ export const BRAND_ASSETS = {
       description: 'Hexagonal crystal core with titanium outer rim for Windows 10/11 x64 installer executable.',
       badge: 'Windows EXE (256x256 ICO)',
       filename: 'vanitas-desktop-installer.ico',
+      path: '/images/vanitas-desktop-installer.ico',
     },
-  },
+  } satisfies Record<string, {
+    title: string;
+    format: string;
+    description: string;
+    badge: string;
+    filename: string;
+    path: string;
+  }>,
 };
 
 export const CHARACTER_AVATARS = [
