@@ -173,6 +173,11 @@ create table if not exists public.users (
   accent_color text not null default '',
   status_line text not null default '',
   profile_links jsonb not null default '[]',
+  -- Identity extras on the public /u/<username> page: a free-text location
+  -- ('' = unset) and an ordered list of short tech tags ([] = none). Every
+  -- value is length/count-checked at the API before storage.
+  location text not null default '',
+  tech_tags jsonb not null default '[]',
   connected_accounts jsonb not null default '{"google":false,"github":false,"discord":false}',
   created_at timestamptz not null default now(),
   last_login_at timestamptz

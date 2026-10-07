@@ -115,6 +115,80 @@ await must('users.totp_last_step watermark round-trips (bigint)', async () => {
   await db.query('update public.users set totp_last_step = 0 where id = $1', [id]);
 });
 
+await must('updateProfile UPDATE mapping (authStore exact query, 10 params)', async () => {
+  // Mirrors updateProfile in authStore byte-for-byte. A column/param
+  // misalignment here silently writes one profile field over another
+  // without erroring, so every column is read back against its own value.
+  const params = [
+    id, // $1 where id
+    'Renamed User', // $2 name
+    'https://x/new.png', // $3 avatar_url
+    'renamed_user', // $4 username
+    'a bio', // $5 bio
+    '#38bdf8', // $6 accent_color
+    'Now shipping', // $7 status_line
+    JSON.stringify([{ label: 'GitHub', url: 'https://github.com/x' }]), // $8 profile_links
+    'Lisbon, PT', // $9 location
+    JSON.stringify(['TypeScript', 'Postgres']), // $10 tech_tags
+  ];
+  const r = await db.query(
+    `update public.users
+        set name = $2,
+            avatar_url = $3,
+            username = coalesce($4, username),
+            bio = coalesce($5, bio),
+            accent_color = coalesce($6, accent_color),
+            status_line = coalesce($7, status_line),
+            profile_links = coalesce($8::jsonb, profile_links),
+            location = coalesce($9, location),
+            tech_tags = coalesce($10::jsonb, tech_tags)
+      where id = $1
+      returning *`,
+    params,
+  );
+  const row = r.rows[0];
+  const json = (v) => (typeof v === 'string' ? JSON.parse(v) : v);
+  if (row.name !== 'Renamed User') throw new Error(`name -> ${row.name}`);
+  if (row.avatar_url !== 'https://x/new.png') throw new Error(`avatar_url -> ${row.avatar_url}`);
+  if (row.username !== 'renamed_user') throw new Error(`username -> ${row.username}`);
+  if (row.bio !== 'a bio') throw new Error(`bio -> ${row.bio}`);
+  if (row.accent_color !== '#38bdf8') throw new Error(`accent_color -> ${row.accent_color}`);
+  if (row.status_line !== 'Now shipping') throw new Error(`status_line -> ${row.status_line}`);
+  // The two columns added for /u/<username> — the whole point of this test.
+  if (row.location !== 'Lisbon, PT') throw new Error(`location -> ${row.location}`);
+  const links = json(row.profile_links);
+  if (links?.[0]?.label !== 'GitHub') throw new Error(`profile_links -> ${JSON.stringify(row.profile_links)}`);
+  const tags = json(row.tech_tags);
+  if (JSON.stringify(tags) !== JSON.stringify(['TypeScript', 'Postgres'])) {
+    throw new Error(`tech_tags -> ${JSON.stringify(row.tech_tags)}`);
+  }
+
+  // coalesce must NOT let a null param clear an existing value: omitting a
+  // field from the PATCH is what "leave unchanged" means at the API.
+  const r2 = await db.query(
+    `update public.users
+        set location = coalesce($2, location),
+            tech_tags = coalesce($3::jsonb, tech_tags)
+      where id = $1 returning *`,
+    [id, null, null],
+  );
+  const row2 = r2.rows[0];
+  if (row2.location !== 'Lisbon, PT') throw new Error(`null cleared location -> ${row2.location}`);
+  if (JSON.stringify(json(row2.tech_tags)) !== JSON.stringify(['TypeScript', 'Postgres'])) {
+    throw new Error(`null cleared tech_tags -> ${JSON.stringify(row2.tech_tags)}`);
+  }
+
+  // rowToUser/findPublicProfile read these exact names — a mismatch here
+  // would surface as `undefined` on the public profile despite a good save.
+  const cols = await db.query(
+    `select column_name from information_schema.columns where table_schema='public' and table_name='users'`,
+  );
+  const have = cols.rows.map((x) => x.column_name);
+  for (const c of ['location', 'tech_tags']) {
+    if (!have.includes(c)) throw new Error(`column ${c} missing from users`);
+  }
+});
+
 await must('admin_invites.token_hash unique partial index (lookup by hash)', async () => {
   const exp = new Date(Date.now() + 60_000);
   await db.query(
