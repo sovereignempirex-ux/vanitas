@@ -16,6 +16,13 @@
     { "source": "/invite/(.*)", "destination": "/index.html" },
     { "source": "/u/(.*)", "destination": "/index.html" }
   ],
+  "redirects": [
+    {
+      "source": "/.well-known/change-password",
+      "destination": "/login",
+      "permanent": false
+    }
+  ],
   "headers": [
     {
       "source": "/(.*)",
