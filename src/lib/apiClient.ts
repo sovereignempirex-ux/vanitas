@@ -35,6 +35,8 @@ import {
   PublishedProject,
   PublishedProjectDetail,
   PublishedSnippet,
+  OAuthApp,
+  OAuthAuthorizeValidation,
 } from '../types.ts';
 
 class ApiClient {
@@ -287,6 +289,36 @@ class ApiClient {
 
   async deleteSnippet(id: string) {
     return this.request<{ success: boolean }>(`/publish/snippets/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  // ---- OAuth provider: register third-party apps ("Sign in with Vanitas") ----
+  async listOAuthApps() {
+    return this.request<{ apps: OAuthApp[]; availableScopes: string[] }>('/oauth/apps');
+  }
+
+  /** Register a third-party app. The client secret comes back
+   *  exactly once — the UI must show it in a reveal-once block. */
+  async createOAuthApp(params: { name: string; redirectUris: string[]; scopes: string[] }) {
+    return this.request<{ app: OAuthApp; clientSecret: string; revealNote: string }>('/oauth/apps', {
+      method: 'POST', body: JSON.stringify(params),
+    });
+  }
+
+  async deleteOAuthApp(id: string) {
+    return this.request<{ success: boolean }>(`/oauth/apps/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  /** Validate an incoming authorize request (called by the
+   *  /oauth/consent page with the signed-in session). */
+  async validateOAuthAuthorize(query: URLSearchParams) {
+    return this.request<OAuthAuthorizeValidation>(`/oauth/authorize?${query.toString()}`);
+  }
+
+  /** Submit the user's consent decision → the final redirect URL. */
+  async postOAuthDecision(ticket: string, decision: 'allow' | 'deny') {
+    return this.request<{ redirectUrl: string }>('/oauth/authorize/decision', {
+      method: 'POST', body: JSON.stringify({ ticket, decision }),
+    });
   }
 
   // Real two-factor authentication (RFC 6238 TOTP).

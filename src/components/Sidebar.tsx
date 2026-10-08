@@ -3,6 +3,7 @@ import { useAuth } from '../context/AuthContext.tsx';
 import {
   LayoutDashboard,
   Key,
+  KeyRound,
   Terminal,
   FileCode2,
   Activity,
@@ -39,6 +40,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen, setIsMobileOpen 
       items: [
         { id: 'overview', label: 'Architecture & Stats', icon: LayoutDashboard, badge: null },
         { id: 'keys', label: 'API Keys & Scopes', icon: Key, badge: 'Live' },
+        { id: 'oauth-apps', label: 'OAuth Apps', icon: KeyRound, badge: 'Provider' },
         { id: 'playground', label: 'API Playground', icon: Terminal, badge: null },
         { id: 'docs', label: 'Developer Portal', icon: FileCode2, badge: null },
         { id: 'status', label: 'Public Status', icon: Activity, badge: 'Live' },

@@ -28,6 +28,25 @@ import { authenticateApiKey, requireScope, rateWindowStatus, nextQuotaReset } fr
 import { loadApiKeys, saveApiKey, flushAllUsage } from './src/server/apiKeyStore.ts';
 import { saveGitHubToken, getGitHubToken, clearGitHubToken, listUserRepos, importRepoFiles, GITHUB_ERRORS } from './src/server/githubStore.ts';
 import { createProject, getProject, listProjects, listPublicProjects, deleteProject, createSnippet, getSnippet, listSnippets, listPublicSnippets, deleteSnippet, purgePublishedData, projectDetail, snippetDetail, MAX_TITLE, MAX_DESCRIPTION, MAX_SNIPPET } from './src/server/publishStore.ts';
+import {
+  createOAuthApp,
+  listOAuthApps,
+  lookupOAuthApp,
+  deleteOAuthApp,
+  authenticateClient,
+  createAuthorizationCode,
+  consumeAuthorizationCode,
+  createAccessToken,
+  resolveAccessToken,
+  revokeAccessToken,
+  purgeOAuthAppData,
+  verifyPkce,
+  isValidRedirectUri,
+  isKnownOAuthScope,
+  AUTH_CODE_TTL_MS,
+  ACCESS_TOKEN_TTL_MS,
+} from './src/server/oauthAppsStore.ts';
+import type { OAuthApp } from './src/server/oauthAppsStore.ts';
 import { ClientSource, UserRole, PermissionScope, ProductSuggestion, ApiKey, User, AuditLog, VerificationType, AdminInvite, WebhookEndpoint, WebhookDeliveryLog, PublicUserComment, ProfileLink, SocialAccount, SocialConversation, DirectMessage } from './src/types.ts';
 import { getActorUser, requireAdmin, rateLimit, sanitizeText, sanitizeUrl, csvCell, parsePagination, secureToken, secureId, isValidScope } from './src/server/security.ts';
 
@@ -560,6 +579,12 @@ export async function buildApp() {
   // keeps a spraying client from burning that quota.
   app.use('/api/v1/github/', rateLimit({ windowMs: 60_000, max: 30 }));
   app.use('/api/v1/publish/', rateLimit({ windowMs: 60_000, max: 60, perIpOnly: true }));
+  // OAuth provider surface. The authorize-validation + consent
+  // decision endpoints are path-parameter-free but hit by
+  // browsers; the token endpoint exchanges credentials, so it
+  // gets a tighter per-IP budget against spraying.
+  app.use('/api/v1/oauth/', rateLimit({ windowMs: 60_000, max: 60, perIpOnly: true }));
+  app.use('/api/v1/oauth/token', rateLimit({ windowMs: 60_000, max: 30, perIpOnly: true }));
   app.use('/api/v1/youtube/', rateLimit({ windowMs: 60_000, max: 60 }));
   app.use('/api/v1/search/', rateLimit({ windowMs: 60_000, max: 60 }));
   app.use('/api/v1/semantic-search', rateLimit({ windowMs: 60_000, max: 60 }));
@@ -1227,6 +1252,8 @@ export async function buildApp() {
         // the account (PG: FK cascade; memory: explicit sweeps).
         purgePublishedData(actor.id);
         await clearGitHubToken(actor.id);
+        // Third-party OAuth apps, codes and tokens too.
+        purgeOAuthAppData(actor.id);
       }
       res.json({ success: true });
     } catch (err) {
@@ -2981,6 +3008,450 @@ export async function buildApp() {
     }
   });
 
+  // ---------------------------------------------------------------------------
+  // OAUTH PROVIDER — Vanitas doubles as an OAuth 2.0 authorization
+  // server. A user registers a third-party application in the
+  // dashboard (OAuth Apps), and that app sends its users through
+  // the standard authorization-code flow (PKCE supported) to
+  // sign in with their Vanitas account.
+  //
+  // Browser flow: the app points its users at the SPA page
+  // /oauth/consent (so the request carries the caller's real
+  // session). That page validates the request server-side, shows
+  // the consent screen, and only then is a single-use code
+  // issued. The token endpoint is pure machine-to-machine API.
+  //
+  // Paths live under /api/v1/oauth/ — Vercel's edge hijacks bare
+  // "/oauth/<seg>" GETs to index.html before the lambda runs
+  // (observed in production, see src/server/oauth.ts).
+  // ---------------------------------------------------------------------------
+
+  // Consent ticket: binds a validated authorize request to the
+  // signed-in user so the decision POST cannot be tampered with.
+  // HMAC-SHA256, domain-separated key, 10-minute TTL.
+  const oauthProviderKey = crypto
+    .createHash('sha256')
+    .update(
+      process.env.DATABASE_URL ||
+        process.env.ADMIN_API_TOKEN ||
+        `local-${crypto.randomBytes(32).toString('hex')}`,
+    )
+    .digest();
+
+  interface ConsentTicket {
+    appId: string;
+    clientId: string;
+    redirectUri: string;
+    scopes: string[];
+    state: string;
+    codeChallenge: string | null;
+    codeChallengeMethod: 'plain' | 's256';
+    userId: string;
+    exp: number;
+  }
+
+  function makeConsentTicket(t: Omit<ConsentTicket, 'exp'>): string {
+    const payload = Buffer.from(
+      JSON.stringify({ ...t, exp: Date.now() + AUTH_CODE_TTL_MS }),
+    ).toString('base64url');
+    const sig = crypto.createHmac('sha256', oauthProviderKey).update(payload).digest('base64url');
+    return `${payload}.${sig}`;
+  }
+
+  function readConsentTicket(ticket: string): ConsentTicket | null {
+    if (typeof ticket !== 'string' || ticket.length > 4096) return null;
+    const [p64, sig] = ticket.split('.');
+    if (!p64 || !sig) return null;
+    const expected = crypto.createHmac('sha256', oauthProviderKey).update(p64).digest('base64url');
+    const a = Buffer.from(sig);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || a.length === 0 || !crypto.timingSafeEqual(a, b)) return null;
+    let parsed: any;
+    try {
+      parsed = JSON.parse(Buffer.from(p64, 'base64url').toString('utf8'));
+    } catch {
+      return null;
+    }
+    if (!parsed || typeof parsed !== 'object') return null;
+    if (!Number.isFinite(parsed.exp) || parsed.exp <= Date.now()) return null;
+    if (typeof parsed.appId !== 'string' || typeof parsed.clientId !== 'string') return null;
+    if (typeof parsed.redirectUri !== 'string' || typeof parsed.userId !== 'string') return null;
+    if (!Array.isArray(parsed.scopes) || !parsed.scopes.every((s: unknown) => typeof s === 'string')) {
+      return null;
+    }
+    if (parsed.codeChallenge != null && typeof parsed.codeChallenge !== 'string') return null;
+    if (parsed.codeChallengeMethod !== 'plain' && parsed.codeChallengeMethod !== 's256') return null;
+    return parsed as ConsentTicket;
+  }
+
+  // Validate every part of an authorize request (RFC 6749 §4.1.1):
+  // response type, known client, EXACT redirect-uri match, scopes
+  // the app was actually granted, and well-formed PKCE params.
+  async function validateAuthorizeRequest(query: any): Promise<
+    | {
+        ok: true;
+        app: OAuthApp;
+        redirectUri: string;
+        scopes: string[];
+        state: string;
+        codeChallenge: string | null;
+        codeChallengeMethod: 'plain' | 's256';
+      }
+    | { ok: false; error: string }
+  > {
+    const clientId = sanitizeText(query?.client_id, 128);
+    const redirectUri = sanitizeText(query?.redirect_uri, 2048);
+    const responseType = sanitizeText(query?.response_type, 32);
+    const state = typeof query?.state === 'string' ? query.state.slice(0, 512) : '';
+    const scopeParam = sanitizeText(query?.scope, 200);
+    const challenge = typeof query?.code_challenge === 'string' ? query.code_challenge.slice(0, 256) : '';
+    const methodRaw = sanitizeText(query?.code_challenge_method, 16);
+
+    if (responseType !== 'code') return { ok: false, error: 'response_type must be "code"' };
+    if (!clientId) return { ok: false, error: 'client_id is required' };
+    if (!redirectUri) return { ok: false, error: 'redirect_uri is required' };
+
+    const app = await lookupOAuthApp(clientId);
+    if (!app) return { ok: false, error: 'Unknown client_id' };
+    if (!app.redirectUris.includes(redirectUri)) {
+      return { ok: false, error: 'redirect_uri does not match any URI registered for this app' };
+    }
+
+    const requested = scopeParam ? scopeParam.split(/\s+/).filter(Boolean) : app.scopes;
+    if (requested.length === 0 || requested.length > 10) {
+      return { ok: false, error: 'Invalid scope list' };
+    }
+    for (const s of requested) {
+      if (!isKnownOAuthScope(s)) return { ok: false, error: `Unknown scope "${s}"` };
+      if (!app.scopes.includes(s)) {
+        return { ok: false, error: `Scope "${s}" was not granted to this app` };
+      }
+    }
+
+    // PKCE (RFC 7636): challenge and method must come together.
+    if (methodRaw && methodRaw !== 'plain' && methodRaw !== 's256') {
+      return { ok: false, error: 'code_challenge_method must be "plain" or "s256"' };
+    }
+    if (methodRaw && !challenge) {
+      return { ok: false, error: 'code_challenge is required when code_challenge_method is set' };
+    }
+    if (!methodRaw && challenge) {
+      return { ok: false, error: 'code_challenge_method is required when code_challenge is set' };
+    }
+
+    return {
+      ok: true,
+      app,
+      redirectUri,
+      scopes: requested,
+      state,
+      codeChallenge: challenge || null,
+      codeChallengeMethod: (methodRaw || 'plain') as 'plain' | 's256',
+    };
+  }
+
+  function appendQuery(uri: string, params: Record<string, string>): string {
+    const u = new URL(uri);
+    for (const [k, v] of Object.entries(params)) u.searchParams.set(k, v);
+    return u.toString();
+  }
+
+  // ---- Developer API: register / list / revoke third-party apps ----
+  app.get('/api/v1/oauth/apps', async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
+    try {
+      res.json({ apps: await listOAuthApps(actor.id), availableScopes: ['profile', 'email'] });
+    } catch (err) {
+      console.error('[oauth/apps]', (err as Error).message);
+      res.status(500).json({ error: 'Could not load your apps' });
+    }
+  });
+
+  app.post('/api/v1/oauth/apps', async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
+    const name = sanitizeText(req.body?.name, 80).trim();
+    const redirectUris = (Array.isArray(req.body?.redirectUris) ? req.body.redirectUris : [])
+      .map((u: unknown) => sanitizeText(u, 2048).trim())
+      .filter(Boolean);
+    const scopes = (Array.isArray(req.body?.scopes) ? req.body.scopes : ['profile'])
+      .map((s: unknown) => sanitizeText(s, 32))
+      .filter(Boolean);
+
+    if (name.length < 3) return res.status(400).json({ error: 'App name must be at least 3 characters' });
+    if (redirectUris.length === 0 || redirectUris.length > 20) {
+      return res.status(400).json({ error: 'Register between 1 and 20 redirect URIs' });
+    }
+    for (const u of redirectUris) {
+      if (!isValidRedirectUri(u)) {
+        return res.status(400).json({ error: `Invalid redirect URI: ${u.slice(0, 80)}` });
+      }
+    }
+    if (scopes.length === 0 || scopes.length > 5) {
+      return res.status(400).json({ error: 'Pick between 1 and 5 scopes' });
+    }
+    for (const s of scopes) {
+      if (!isKnownOAuthScope(s)) return res.status(400).json({ error: `Unknown scope "${s}"` });
+    }
+
+    try {
+      const { app, clientSecret } = await createOAuthApp({ ownerId: actor.id, name, redirectUris, scopes });
+      persistAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorEmail: actor.email,
+        action: 'OAUTH_APP_CREATED',
+        category: 'SECURITY',
+        target: `${name} (${app.clientId})`,
+        source: detectSource(req),
+        status: 'SUCCESS',
+        ipAddress: req.ip || 'unknown',
+        metadata: { redirectUris, scopes },
+      });
+      res.status(201).json({
+        app,
+        clientSecret,
+        revealNote: 'The client secret is shown exactly once — store it in a secure vault.',
+      });
+    } catch (err) {
+      console.error('[oauth/apps/create]', (err as Error).message);
+      res.status(500).json({ error: 'Could not register the app' });
+    }
+  });
+
+  app.delete('/api/v1/oauth/apps/:id', async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
+    const id = sanitizeText(req.params.id, 64);
+    try {
+      const deleted = await deleteOAuthApp(id, actor.id);
+      if (!deleted) return res.status(404).json({ error: 'App not found' });
+      persistAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorEmail: actor.email,
+        action: 'OAUTH_APP_REVOKED',
+        category: 'SECURITY',
+        target: `OAuth App: ${id}`,
+        source: detectSource(req),
+        status: 'WARNING',
+        ipAddress: req.ip || 'unknown',
+        metadata: {},
+      });
+      res.json({ success: true });
+    } catch (err) {
+      console.error('[oauth/apps/delete]', (err as Error).message);
+      res.status(500).json({ error: 'Could not delete the app' });
+    }
+  });
+
+  // ---- Authorization endpoint (session-authenticated) ----
+  // The SPA consent page calls this with the user's own session
+  // to validate the request and receive a signed consent ticket.
+  app.get('/api/v1/oauth/authorize', async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
+    try {
+      const outcome = await validateAuthorizeRequest(req.query);
+      // (=== false, not !ok: without strictNullChecks the
+      // negated discriminant does not narrow the union.)
+      if (outcome.ok === false) return res.status(400).json({ error: outcome.error });
+      const ticket = makeConsentTicket({
+        appId: outcome.app.id,
+        clientId: outcome.app.clientId,
+        redirectUri: outcome.redirectUri,
+        scopes: outcome.scopes,
+        state: outcome.state,
+        codeChallenge: outcome.codeChallenge,
+        codeChallengeMethod: outcome.codeChallengeMethod,
+        userId: actor.id,
+      });
+      res.json({
+        ticket,
+        app: { name: outcome.app.name, clientId: outcome.app.clientId, scopes: outcome.scopes },
+        redirectUri: outcome.redirectUri,
+        state: outcome.state,
+      });
+    } catch (err) {
+      console.error('[oauth/authorize]', (err as Error).message);
+      res.status(500).json({ error: 'Could not validate the authorize request' });
+    }
+  });
+
+  // The user's decision. Only the session that validated the
+  // request may answer its ticket — a CSRF'd or forged decision
+  // cannot issue a code for someone else's consent.
+  app.post('/api/v1/oauth/authorize/decision', async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
+    const ticket = readConsentTicket(sanitizeText(req.body?.ticket, 4096));
+    const decision = sanitizeText(req.body?.decision, 16);
+    if (!ticket) return res.status(400).json({ error: 'Consent request is invalid or expired' });
+    if (ticket.userId !== actor.id) {
+      return res.status(403).json({ error: 'The signed-in account does not match this consent request' });
+    }
+    if (decision !== 'allow' && decision !== 'deny') {
+      return res.status(400).json({ error: 'Decision must be "allow" or "deny"' });
+    }
+
+    const log = (status: 'SUCCESS' | 'WARNING') =>
+      persistAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorEmail: actor.email,
+        action: decision === 'allow' ? 'OAUTH_CONSENT_GRANTED' : 'OAUTH_CONSENT_DENIED',
+        category: 'AUTH',
+        target: `App ${ticket.clientId}`,
+        source: detectSource(req),
+        status,
+        ipAddress: req.ip || 'unknown',
+        metadata: { scopes: ticket.scopes },
+      });
+
+    if (decision === 'deny') {
+      log('WARNING');
+      return res.json({
+        redirectUrl: appendQuery(ticket.redirectUri, {
+          ...(ticket.state ? { state: ticket.state } : {}),
+          error: 'access_denied',
+        }),
+      });
+    }
+
+    try {
+      const code = await createAuthorizationCode({
+        appId: ticket.appId,
+        userId: ticket.userId,
+        redirectUri: ticket.redirectUri,
+        scopes: ticket.scopes,
+        codeChallenge: ticket.codeChallenge,
+        codeChallengeMethod: ticket.codeChallengeMethod,
+      });
+      log('SUCCESS');
+      res.json({
+        redirectUrl: appendQuery(ticket.redirectUri, {
+          code,
+          ...(ticket.state ? { state: ticket.state } : {}),
+        }),
+      });
+    } catch (err) {
+      console.error('[oauth/authorize/decision]', (err as Error).message);
+      res.status(500).json({ error: 'Could not issue the authorization code' });
+    }
+  });
+
+  // ---- Token endpoint (RFC 6749 §4.1.3) — machine-to-machine ----
+  app.post('/api/v1/oauth/token', async (req, res) => {
+    const grantType = sanitizeText(req.body?.grant_type, 64);
+    if (grantType !== 'authorization_code') {
+      return res.status(400).json({
+        error: 'unsupported_grant_type',
+        error_description: 'Only authorization_code is supported',
+      });
+    }
+    const clientId = sanitizeText(req.body?.client_id, 128);
+    const clientSecret = typeof req.body?.client_secret === 'string' ? req.body.client_secret : '';
+    const rawCode = typeof req.body?.code === 'string' ? req.body.code : '';
+    const redirectUri = sanitizeText(req.body?.redirect_uri, 2048);
+    const verifier = typeof req.body?.code_verifier === 'string' ? req.body.code_verifier.slice(0, 256) : null;
+
+    if (!clientId || !clientSecret) return res.status(401).json({ error: 'invalid_client' });
+    const app = await authenticateClient(clientId, clientSecret);
+    if (!app) return res.status(401).json({ error: 'invalid_client' });
+    if (!rawCode) {
+      return res.status(400).json({ error: 'invalid_request', error_description: 'code is required' });
+    }
+    if (!redirectUri) {
+      return res.status(400).json({ error: 'invalid_request', error_description: 'redirect_uri is required' });
+    }
+
+    // Atomic single-use consumption: two racing exchanges can
+    // never both turn the same code into a token.
+    const record = await consumeAuthorizationCode(rawCode);
+    if (!record || record.appId !== app.id || record.redirectUri !== redirectUri) {
+      return res.status(400).json({
+        error: 'invalid_grant',
+        error_description: 'The authorization code is invalid, expired or already used',
+      });
+    }
+    if (!verifyPkce(verifier, record.codeChallenge, record.codeChallengeMethod)) {
+      return res.status(400).json({
+        error: 'invalid_grant',
+        error_description: 'PKCE verification failed',
+      });
+    }
+
+    const token = await createAccessToken({ appId: app.id, userId: record.userId, scopes: record.scopes });
+    persistAuditLog({
+      actorId: record.userId,
+      actorName: '',
+      actorEmail: '',
+      action: 'OAUTH_TOKEN_ISSUED',
+      category: 'AUTH',
+      target: `App ${app.clientId}`,
+      source: detectSource(req),
+      status: 'SUCCESS',
+      ipAddress: req.ip || 'unknown',
+      metadata: { scopes: record.scopes },
+    });
+    res.json({
+      access_token: token,
+      token_type: 'Bearer',
+      expires_in: Math.round(ACCESS_TOKEN_TTL_MS / 1000),
+      scope: record.scopes.join(' '),
+    });
+  });
+
+  // ---- Userinfo (OIDC-style) — the app's window into the profile ----
+  app.get('/api/v1/oauth/userinfo', async (req, res) => {
+    const auth = req.headers.authorization || '';
+    const rawToken = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+    const record = rawToken ? await resolveAccessToken(rawToken) : null;
+    if (!record) {
+      return res.status(401).json({
+        error: 'invalid_token',
+        error_description: 'The access token is invalid or expired',
+      });
+    }
+    try {
+      const result = await findUserById(record.userId);
+      if (!result) {
+        return res.status(401).json({
+          error: 'invalid_token',
+          error_description: 'The account no longer exists',
+        });
+      }
+      const profile: Record<string, unknown> = {
+        sub: result.id,
+        name: result.name,
+        preferred_username: result.username || '',
+        picture: result.avatarUrl || '',
+      };
+      if (record.scopes.includes('email')) {
+        profile.email = result.email;
+        profile.email_verified = true;
+      }
+      res.json(profile);
+    } catch (err) {
+      console.error('[oauth/userinfo]', (err as Error).message);
+      res.status(500).json({ error: 'Could not load the profile' });
+    }
+  });
+
+  // ---- Revocation (RFC 7009) — idempotent, always 200 ----
+  app.post('/api/v1/oauth/revoke', async (req, res) => {
+    const rawToken = typeof req.body?.token === 'string' ? req.body.token : '';
+    if (rawToken) {
+      try {
+        await revokeAccessToken(rawToken);
+      } catch (err) {
+        console.error('[oauth/revoke]', (err as Error).message);
+      }
+    }
+    res.json({ success: true });
+  });
+
   // Admin: permanently delete an account. Your own account is off-limits and
   // the last remaining ADMIN can never be removed — one admin always survives.
   app.delete('/api/v1/admin/users/:id', async (req, res) => {
@@ -3029,6 +3500,9 @@ export async function buildApp() {
         // Published work and the GitHub grant go with it too.
         purgePublishedData(id);
         await clearGitHubToken(id);
+        // Third-party OAuth apps, their codes and tokens
+        // (PG: FK cascade; memory: explicit sweep).
+        purgeOAuthAppData(id);
       }
       await clearAiChatHistory(id);
       await forgetAccount(id);

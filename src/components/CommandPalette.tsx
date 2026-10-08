@@ -5,6 +5,7 @@ import { SemanticSearchHit, SemanticSearchResponse } from '../types.ts';
 import {
   Search,
   Key,
+  KeyRound,
   Terminal,
   FileCode2,
   Activity,
@@ -107,6 +108,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({ isOpen, onClose 
     { id: 'download-exe', label: 'Download Windows Desktop Client (.EXE - DirectX Glass)', category: 'Clients & Downloads', icon: Laptop, view: 'downloads' },
     { id: 'overview', label: 'Welcome Center & Video Tutorials', category: 'Platform', icon: Layers, view: 'overview' },
     { id: 'keys', label: 'Create or Rotate API Key & Scopes', category: 'API Keys', icon: Key, view: 'keys' },
+    { id: 'oauth-apps', label: 'Register OAuth App (Sign in with Vanitas)', category: 'API Keys', icon: KeyRound, view: 'oauth-apps' },
     { id: 'playground', label: 'Open Interactive API Playground', category: 'Developer', icon: Terminal, view: 'playground' },
     { id: 'ai', label: 'Ask Vanitas AI Assistant & Code Diagnostics', category: 'Intelligence', icon: Sparkles, view: 'ai' },
     { id: 'docs', label: 'Search Developer Documentation & Scopes', category: 'Docs', icon: FileCode2, view: 'docs' },

@@ -1019,6 +1019,46 @@ alter table public.published_snippets enable row level security;
 alter table if exists public.admin_invites add column if not exists token_hash text not null default '';
 create unique index if not exists admin_invites_token_hash_idx
   on public.admin_invites (token_hash) where token_hash <> '';
+-- OAuth provider: third-party apps registered by users, plus the
+-- single-use authorization codes and access tokens the flow
+-- issues. Client secrets are scrypt hashes, codes/tokens are
+-- sha256 hashes \u2014 a dump alone mints nothing. All FK-cascade
+-- with the owning account and the app.
+create table if not exists public.oauth_apps (
+  id text primary key,
+  owner_id text not null references public.users(id) on delete cascade,
+  name text not null check (char_length(name) between 1 and 80),
+  client_id text not null unique,
+  client_secret_hash text not null,
+  redirect_uris jsonb not null default '[]',
+  scopes jsonb not null default '["profile"]',
+  created_at timestamptz not null default now()
+);
+create index if not exists oauth_apps_owner_idx on public.oauth_apps (owner_id, created_at desc);
+create table if not exists public.oauth_codes (
+  code_hash text primary key,
+  app_id text not null references public.oauth_apps(id) on delete cascade,
+  user_id text not null references public.users(id) on delete cascade,
+  redirect_uri text not null,
+  scopes jsonb not null default '["profile"]',
+  code_challenge text,
+  code_challenge_method text not null default 'plain' check (code_challenge_method in ('plain', 's256')),
+  used boolean not null default false,
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists oauth_codes_expiry_idx on public.oauth_codes (expires_at);
+create table if not exists public.oauth_tokens (
+  token_hash text primary key,
+  app_id text not null references public.oauth_apps(id) on delete cascade,
+  user_id text not null references public.users(id) on delete cascade,
+  scopes jsonb not null default '["profile"]',
+  revoked boolean not null default false,
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists oauth_tokens_expiry_idx on public.oauth_tokens (expires_at);
+create index if not exists oauth_tokens_user_idx on public.oauth_tokens (user_id);
 `;
     schemaReady = null;
   }
@@ -1299,7 +1339,7 @@ async function isUsernameTaken(username, exceptUserId) {
   return db.users.some((x) => (x.username || "").toLowerCase() === u && x.id !== exceptUserId);
 }
 function rowToUser(row) {
-  const iso2 = (v) => v instanceof Date ? v.toISOString() : v || void 0;
+  const iso3 = (v) => v instanceof Date ? v.toISOString() : v || void 0;
   return {
     id: row.id,
     email: row.email,
@@ -1315,8 +1355,8 @@ function rowToUser(row) {
     role: row.role === "ADMIN" ? "ADMIN" : "USER",
     verification: ["USER", "DEVELOPER", "ADMIN"].includes(row.verification) ? row.verification : "",
     twoFactorEnabled: !!row.two_factor_enabled,
-    createdAt: iso2(row.created_at) || (/* @__PURE__ */ new Date()).toISOString(),
-    lastLoginAt: iso2(row.last_login_at) || iso2(row.created_at) || (/* @__PURE__ */ new Date()).toISOString(),
+    createdAt: iso3(row.created_at) || (/* @__PURE__ */ new Date()).toISOString(),
+    lastLoginAt: iso3(row.last_login_at) || iso3(row.created_at) || (/* @__PURE__ */ new Date()).toISOString(),
     connectedAccounts: row.connected_accounts || { google: false, github: false, discord: false }
   };
 }
@@ -4560,6 +4600,343 @@ var init_publishStore = __esm({
   }
 });
 
+// src/server/oauthAppsStore.ts
+import crypto8 from "crypto";
+function isKnownOAuthScope(value) {
+  return OAUTH_SCOPES.includes(value);
+}
+function mapAppRow(row) {
+  const redirectUris = Array.isArray(row.redirect_uris) ? row.redirect_uris : [];
+  const scopes = Array.isArray(row.scopes) ? row.scopes : ["profile"];
+  return {
+    id: row.id,
+    ownerId: row.owner_id,
+    name: row.name,
+    clientId: row.client_id,
+    redirectUris: redirectUris.map(String),
+    scopes: scopes.map(String),
+    createdAt: iso2(row.created_at)
+  };
+}
+function scryptAsync2(password, salt, keylen) {
+  return new Promise((resolve, reject) => {
+    crypto8.scrypt(password, salt, keylen, { N: 16384, r: 8, p: 1 }, (err, key) => {
+      if (err) reject(err);
+      else resolve(key);
+    });
+  });
+}
+async function hashClientSecret(secret) {
+  const salt = crypto8.randomBytes(16);
+  const key = await scryptAsync2(secret, salt, 64);
+  return `scrypt$16384$8$1$${salt.toString("base64")}$${key.toString("base64")}`;
+}
+async function verifyClientSecret(secret, stored) {
+  const parts = stored.split("$");
+  if (parts.length !== 6 || parts[0] !== "scrypt") return false;
+  const N = Number(parts[1]);
+  const r = Number(parts[2]);
+  const p = Number(parts[3]);
+  if (![N, r, p].every((n) => Number.isFinite(n) && n > 0)) return false;
+  let salt;
+  let expected;
+  try {
+    salt = Buffer.from(parts[4], "base64");
+    expected = Buffer.from(parts[5], "base64");
+  } catch {
+    return false;
+  }
+  const actual = await scryptAsync2(secret, salt, expected.length);
+  const a = Buffer.from(actual);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || a.length === 0) return false;
+  return crypto8.timingSafeEqual(a, b);
+}
+function isValidRedirectUri(value) {
+  if (typeof value !== "string" || value.length > 2048) return false;
+  let u;
+  try {
+    u = new URL(value);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== "https:" && u.protocol !== "http:") return false;
+  if (u.username || u.password || u.hash) return false;
+  const host = u.hostname.toLowerCase();
+  if (host === "localhost" || host.endsWith(".localhost") || host === "127.0.0.1" || host === "::1") return false;
+  if (/^10\.|^172\.(1[6-9]|2\d|3[01])\.|^192\.168\./.test(host)) return false;
+  if (/^169\.254\.|^127\.|^0\.|^100\.6[4-9]\.|^100\.(7\d|8\d|9\d|1[01]\d|2[0-6]\d)\.|^22[4-9]\.|^23\d\./.test(host)) return false;
+  return true;
+}
+async function createOAuthApp(params) {
+  const app = {
+    id: secureId("oa"),
+    ownerId: params.ownerId,
+    name: params.name,
+    clientId: secureToken("vnt_oa_", 18),
+    redirectUris: params.redirectUris,
+    scopes: params.scopes,
+    createdAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  const clientSecret = secureToken("vnt_oa_sec_", 30);
+  if (!databasePool) {
+    memoryApps.push(app);
+    memoryApps.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+    memorySecrets.set(app.clientId, clientSecret);
+    return { app, clientSecret };
+  }
+  await ensureSchema();
+  const secretHash = await hashClientSecret(clientSecret);
+  await databasePool.query(
+    `insert into public.oauth_apps
+       (id, owner_id, name, client_id, client_secret_hash, redirect_uris, scopes)
+     values ($1, $2, $3, $4, $5, $6, $7)`,
+    [app.id, app.ownerId, app.name, app.clientId, secretHash, app.redirectUris, app.scopes]
+  );
+  return { app, clientSecret };
+}
+async function listOAuthApps(ownerId) {
+  if (!databasePool) {
+    return memoryApps.filter((a) => a.ownerId === ownerId);
+  }
+  await ensureSchema();
+  const r = await databasePool.query(
+    "select id, owner_id, name, client_id, redirect_uris, scopes, created_at from public.oauth_apps where owner_id = $1 order by created_at desc",
+    [ownerId]
+  );
+  return r.rows.map(mapAppRow);
+}
+async function lookupOAuthApp(clientId) {
+  const app = await findAppByClientId(clientId);
+  if (!app) return null;
+  return {
+    id: app.id,
+    ownerId: app.ownerId,
+    name: app.name,
+    clientId: app.clientId,
+    redirectUris: app.redirectUris,
+    scopes: app.scopes,
+    createdAt: app.createdAt
+  };
+}
+async function deleteOAuthApp(id, ownerId) {
+  if (!databasePool) {
+    const i = memoryApps.findIndex((a) => a.id === id && a.ownerId === ownerId);
+    if (i === -1) return false;
+    memorySecrets.delete(memoryApps[i].clientId);
+    memoryApps.splice(i, 1);
+    for (let j = memoryCodes.length - 1; j >= 0; j--) {
+      if (memoryCodes[j].appId === id) memoryCodes.splice(j, 1);
+    }
+    for (let j = memoryTokens2.length - 1; j >= 0; j--) {
+      if (memoryTokens2[j].appId === id) memoryTokens2.splice(j, 1);
+    }
+    return true;
+  }
+  await ensureSchema();
+  const r = await databasePool.query(
+    "delete from public.oauth_apps where id = $1 and owner_id = $2 returning id",
+    [id, ownerId]
+  );
+  return r.rowCount === 1;
+}
+async function findAppByClientId(clientId) {
+  if (!clientId || clientId.length > 128) return null;
+  if (!databasePool) {
+    const app = memoryApps.find((a) => a.clientId === clientId) || null;
+    return app ? { ...app, secretHash: "" } : null;
+  }
+  await ensureSchema();
+  const r = await databasePool.query(
+    "select * from public.oauth_apps where client_id = $1",
+    [clientId]
+  );
+  const row = r.rows[0];
+  return row ? { ...mapAppRow(row), secretHash: String(row.client_secret_hash || "") } : null;
+}
+async function authenticateClient(clientId, clientSecret) {
+  const app = await findAppByClientId(clientId);
+  if (!app) return null;
+  if (!databasePool) {
+    return memorySecrets.get(app.clientId) === clientSecret ? app : null;
+  }
+  const ok = await verifyClientSecret(clientSecret, app.secretHash);
+  return ok ? app : null;
+}
+async function createAuthorizationCode(params) {
+  const code = secureToken("vnt_code_", 30);
+  const record = {
+    codeHash: sha256Hex(code),
+    appId: params.appId,
+    userId: params.userId,
+    redirectUri: params.redirectUri,
+    scopes: params.scopes,
+    codeChallenge: params.codeChallenge,
+    codeChallengeMethod: params.codeChallengeMethod,
+    expiresAt: new Date(Date.now() + AUTH_CODE_TTL_MS).toISOString(),
+    used: false
+  };
+  if (!databasePool) {
+    memoryCodes.push(record);
+    return code;
+  }
+  await ensureSchema();
+  await databasePool.query(
+    `insert into public.oauth_codes
+       (code_hash, app_id, user_id, redirect_uri, scopes, code_challenge, code_challenge_method, expires_at)
+     values ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [
+      record.codeHash,
+      record.appId,
+      record.userId,
+      record.redirectUri,
+      record.scopes,
+      record.codeChallenge,
+      record.codeChallengeMethod,
+      record.expiresAt
+    ]
+  );
+  return code;
+}
+async function consumeAuthorizationCode(rawCode) {
+  if (!rawCode || rawCode.length > 256) return null;
+  const hash = sha256Hex(rawCode);
+  if (!databasePool) {
+    const record = memoryCodes.find((c) => c.codeHash === hash) || null;
+    if (!record || record.used || Date.parse(record.expiresAt) <= Date.now()) return null;
+    record.used = true;
+    return record;
+  }
+  await ensureSchema();
+  const r = await databasePool.query(
+    `update public.oauth_codes set used = true
+     where code_hash = $1 and used = false and expires_at > now()
+     returning *`,
+    [hash]
+  );
+  const row = r.rows[0];
+  if (!row) return null;
+  return {
+    codeHash: row.code_hash,
+    appId: row.app_id,
+    userId: row.user_id,
+    redirectUri: row.redirect_uri,
+    scopes: (Array.isArray(row.scopes) ? row.scopes : []).map(String),
+    codeChallenge: row.code_challenge || null,
+    codeChallengeMethod: row.code_challenge_method === "s256" ? "s256" : "plain",
+    expiresAt: iso2(row.expires_at),
+    used: true
+  };
+}
+async function createAccessToken(params) {
+  const token = secureToken("vnt_at_", 30);
+  const record = {
+    tokenHash: sha256Hex(token),
+    appId: params.appId,
+    userId: params.userId,
+    scopes: params.scopes,
+    expiresAt: new Date(Date.now() + ACCESS_TOKEN_TTL_MS).toISOString(),
+    revoked: false
+  };
+  if (!databasePool) {
+    memoryTokens2.push(record);
+    return token;
+  }
+  await ensureSchema();
+  await databasePool.query(
+    `insert into public.oauth_tokens (token_hash, app_id, user_id, scopes, expires_at)
+     values ($1, $2, $3, $4, $5)`,
+    [record.tokenHash, record.appId, record.userId, record.scopes, record.expiresAt]
+  );
+  return token;
+}
+async function resolveAccessToken(rawToken) {
+  if (!rawToken || rawToken.length > 256) return null;
+  const hash = sha256Hex(rawToken);
+  if (!databasePool) {
+    const record = memoryTokens2.find((t) => t.tokenHash === hash) || null;
+    if (!record || record.revoked || Date.parse(record.expiresAt) <= Date.now()) return null;
+    return record;
+  }
+  await ensureSchema();
+  const r = await databasePool.query(
+    "select * from public.oauth_tokens where token_hash = $1 and revoked = false and expires_at > now()",
+    [hash]
+  );
+  const row = r.rows[0];
+  if (!row) return null;
+  return {
+    tokenHash: row.token_hash,
+    appId: row.app_id,
+    userId: row.user_id,
+    scopes: (Array.isArray(row.scopes) ? row.scopes : []).map(String),
+    expiresAt: iso2(row.expires_at),
+    revoked: false
+  };
+}
+async function revokeAccessToken(rawToken) {
+  if (!rawToken || rawToken.length > 256) return false;
+  const hash = sha256Hex(rawToken);
+  if (!databasePool) {
+    const record = memoryTokens2.find((t) => t.tokenHash === hash);
+    if (!record) return false;
+    record.revoked = true;
+    return true;
+  }
+  await ensureSchema();
+  const r = await databasePool.query(
+    "update public.oauth_tokens set revoked = true where token_hash = $1 returning token_hash",
+    [hash]
+  );
+  return r.rowCount === 1;
+}
+function purgeOAuthAppData(ownerId) {
+  if (databasePool) return;
+  const appIds = new Set(memoryApps.filter((a) => a.ownerId === ownerId).map((a) => a.id));
+  for (const a of memoryApps.filter((a2) => a2.ownerId === ownerId)) memorySecrets.delete(a.clientId);
+  for (let i = memoryApps.length - 1; i >= 0; i--) {
+    if (memoryApps[i].ownerId === ownerId) memoryApps.splice(i, 1);
+  }
+  for (let i = memoryCodes.length - 1; i >= 0; i--) {
+    if (appIds.has(memoryCodes[i].appId) || memoryCodes[i].userId === ownerId) memoryCodes.splice(i, 1);
+  }
+  for (let i = memoryTokens2.length - 1; i >= 0; i--) {
+    if (appIds.has(memoryTokens2[i].appId) || memoryTokens2[i].userId === ownerId) memoryTokens2.splice(i, 1);
+  }
+}
+function verifyPkce(verifier, challenge, method) {
+  if (!challenge) return true;
+  if (!verifier || verifier.length < 43 || verifier.length > 128) return false;
+  if (!/^[A-Za-z0-9\-._~]+$/.test(verifier)) return false;
+  if (method === "s256") {
+    const expected = crypto8.createHash("sha256").update(verifier).digest("base64url");
+    const a2 = Buffer.from(expected);
+    const b2 = Buffer.from(challenge);
+    if (a2.length !== b2.length || a2.length === 0) return false;
+    return crypto8.timingSafeEqual(a2, b2);
+  }
+  const a = Buffer.from(verifier);
+  const b = Buffer.from(challenge);
+  if (a.length !== b.length || a.length === 0) return false;
+  return crypto8.timingSafeEqual(a, b);
+}
+var OAUTH_SCOPES, AUTH_CODE_TTL_MS, ACCESS_TOKEN_TTL_MS, memoryApps, memoryCodes, memoryTokens2, iso2, sha256Hex, memorySecrets;
+var init_oauthAppsStore = __esm({
+  "src/server/oauthAppsStore.ts"() {
+    init_pg();
+    init_security();
+    OAUTH_SCOPES = ["profile", "email"];
+    AUTH_CODE_TTL_MS = 10 * 60 * 1e3;
+    ACCESS_TOKEN_TTL_MS = 60 * 60 * 1e3;
+    memoryApps = [];
+    memoryCodes = [];
+    memoryTokens2 = [];
+    iso2 = (v) => v instanceof Date ? v.toISOString() : String(v || (/* @__PURE__ */ new Date()).toISOString());
+    sha256Hex = (value) => crypto8.createHash("sha256").update(value).digest("hex");
+    memorySecrets = /* @__PURE__ */ new Map();
+  }
+});
+
 // server.ts
 var server_exports = {};
 __export(server_exports, {
@@ -4569,7 +4946,7 @@ __export(server_exports, {
 import "dotenv/config";
 import express from "express";
 import path from "path";
-import crypto8 from "crypto";
+import crypto9 from "crypto";
 function mapSuggestion(row) {
   return {
     id: row.id,
@@ -4704,10 +5081,10 @@ async function publicCommentActivity(username) {
       [u]
     )
   ]);
-  const iso2 = (v) => v instanceof Date ? v.toISOString() : String(v);
+  const iso3 = (v) => v instanceof Date ? v.toISOString() : String(v);
   return {
     commentCount: countR.rows[0]?.count ?? 0,
-    recentComments: recentR.rows.map((r) => ({ docSlug: r.doc_id, body: r.body, createdAt: iso2(r.created_at) }))
+    recentComments: recentR.rows.map((r) => ({ docSlug: r.doc_id, body: r.body, createdAt: iso3(r.created_at) }))
   };
 }
 function mapAiChatRow(row) {
@@ -4921,6 +5298,8 @@ async function buildApp() {
   app.use("/api/v1/members/", rateLimit({ windowMs: 6e4, max: 60, perIpOnly: true }));
   app.use("/api/v1/github/", rateLimit({ windowMs: 6e4, max: 30 }));
   app.use("/api/v1/publish/", rateLimit({ windowMs: 6e4, max: 60, perIpOnly: true }));
+  app.use("/api/v1/oauth/", rateLimit({ windowMs: 6e4, max: 60, perIpOnly: true }));
+  app.use("/api/v1/oauth/token", rateLimit({ windowMs: 6e4, max: 30, perIpOnly: true }));
   app.use("/api/v1/youtube/", rateLimit({ windowMs: 6e4, max: 60 }));
   app.use("/api/v1/search/", rateLimit({ windowMs: 6e4, max: 60 }));
   app.use("/api/v1/semantic-search", rateLimit({ windowMs: 6e4, max: 60 }));
@@ -4959,7 +5338,7 @@ async function buildApp() {
   });
   app.use((req, _res, next) => {
     const incoming = sanitizeText(req.headers["x-request-id"], 64);
-    req.requestId = incoming || crypto8.randomUUID();
+    req.requestId = incoming || crypto9.randomUUID();
     next();
   });
   function detectSource(req) {
@@ -5451,6 +5830,7 @@ async function buildApp() {
         purgeMemoryMessages(actor.id);
         purgePublishedData(actor.id);
         await clearGitHubToken(actor.id);
+        purgeOAuthAppData(actor.id);
       }
       res.json({ success: true });
     } catch (err) {
@@ -5458,25 +5838,25 @@ async function buildApp() {
       res.status(500).json({ error: "Account deletion failed" });
     }
   });
-  const twoFactorStateKey = crypto8.createHash("sha256").update(process.env.DATABASE_URL || process.env.ADMIN_API_TOKEN || `local-${crypto8.randomBytes(32).toString("hex")}`).digest();
+  const twoFactorStateKey = crypto9.createHash("sha256").update(process.env.DATABASE_URL || process.env.ADMIN_API_TOKEN || `local-${crypto9.randomBytes(32).toString("hex")}`).digest();
   function currentSessionHash(req) {
     const auth = req.headers.authorization || "";
     const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
     if (!token.startsWith("vnt_sess_")) return void 0;
-    return crypto8.createHash("sha256").update(token).digest("hex");
+    return crypto9.createHash("sha256").update(token).digest("hex");
   }
   function makeTwoFactorState(userId) {
     const payload = Buffer.from(`${userId}.${Date.now() + 10 * 6e4}`).toString("base64url");
-    const sig = crypto8.createHmac("sha256", twoFactorStateKey).update(payload).digest("base64url");
+    const sig = crypto9.createHmac("sha256", twoFactorStateKey).update(payload).digest("base64url");
     return `${payload}.${sig}`;
   }
   function readTwoFactorState(state) {
     const [payload, sig] = state.split(".");
     if (!payload || !sig) return null;
-    const expect = crypto8.createHmac("sha256", twoFactorStateKey).update(payload).digest("base64url");
+    const expect = crypto9.createHmac("sha256", twoFactorStateKey).update(payload).digest("base64url");
     const a = Buffer.from(sig);
     const b = Buffer.from(expect);
-    if (a.length !== b.length || !crypto8.timingSafeEqual(a, b)) return null;
+    if (a.length !== b.length || !crypto9.timingSafeEqual(a, b)) return null;
     const [userId, expStr] = Buffer.from(payload, "base64url").toString().split(".");
     if (!userId || !expStr || Number(expStr) < Date.now()) return null;
     return userId;
@@ -6100,7 +6480,7 @@ async function buildApp() {
     ).catch((err) => console.error("[audit/persist]", err.message));
   }
   function mapAuditRow(row) {
-    const iso2 = (v) => v instanceof Date ? v.toISOString() : v || "";
+    const iso3 = (v) => v instanceof Date ? v.toISOString() : v || "";
     let metadata = {};
     try {
       metadata = typeof row.metadata === "string" ? JSON.parse(row.metadata) : row.metadata || {};
@@ -6109,7 +6489,7 @@ async function buildApp() {
     }
     return {
       id: row.id,
-      timestamp: iso2(row.timestamp),
+      timestamp: iso3(row.timestamp),
       actorId: row.actor_id,
       actorName: row.actor_name,
       actorEmail: row.actor_email,
@@ -6137,7 +6517,7 @@ async function buildApp() {
   }
   const memoryInvites = [];
   function mapInviteRow(row) {
-    const iso2 = (v) => v instanceof Date ? v.toISOString() : v || "";
+    const iso3 = (v) => v instanceof Date ? v.toISOString() : v || "";
     return {
       id: row.id,
       token: decryptInviteToken(row.token),
@@ -6149,21 +6529,21 @@ async function buildApp() {
       maxUses: Number(row.max_uses) || 1,
       uses: Number(row.uses) || 0,
       revoked: !!row.revoked,
-      expiresAt: iso2(row.expires_at),
-      createdAt: iso2(row.created_at)
+      expiresAt: iso3(row.expires_at),
+      createdAt: iso3(row.created_at)
     };
   }
   function inviteUsable(invite) {
     return !invite.revoked && invite.uses < invite.maxUses && Date.parse(invite.expiresAt) > Date.now();
   }
-  const inviteCryptoKey = databasePool ? process.env.INVITE_ENC_KEY && process.env.INVITE_ENC_KEY.length >= 32 ? crypto8.createHash("sha256").update(`vanitas.invite.v1|${process.env.INVITE_ENC_KEY}`).digest() : process.env.DATABASE_URL ? crypto8.createHash("sha256").update(`vanitas.invite.v1|${process.env.DATABASE_URL}`).digest() : null : null;
-  function sha256Hex(value) {
-    return crypto8.createHash("sha256").update(value).digest("hex");
+  const inviteCryptoKey = databasePool ? process.env.INVITE_ENC_KEY && process.env.INVITE_ENC_KEY.length >= 32 ? crypto9.createHash("sha256").update(`vanitas.invite.v1|${process.env.INVITE_ENC_KEY}`).digest() : process.env.DATABASE_URL ? crypto9.createHash("sha256").update(`vanitas.invite.v1|${process.env.DATABASE_URL}`).digest() : null : null;
+  function sha256Hex2(value) {
+    return crypto9.createHash("sha256").update(value).digest("hex");
   }
   function encryptInviteToken(token) {
     if (!inviteCryptoKey) return token;
-    const iv = crypto8.randomBytes(12);
-    const cipher = crypto8.createCipheriv("aes-256-gcm", inviteCryptoKey, iv);
+    const iv = crypto9.randomBytes(12);
+    const cipher = crypto9.createCipheriv("aes-256-gcm", inviteCryptoKey, iv);
     const ct = Buffer.concat([cipher.update(token, "utf8"), cipher.final()]);
     return `enc:v1:${Buffer.concat([iv, cipher.getAuthTag(), ct]).toString("base64url")}`;
   }
@@ -6172,7 +6552,7 @@ async function buildApp() {
     if (!inviteCryptoKey) return "";
     try {
       const raw = Buffer.from(stored.slice("enc:v1:".length), "base64url");
-      const decipher = crypto8.createDecipheriv("aes-256-gcm", inviteCryptoKey, raw.subarray(0, 12));
+      const decipher = crypto9.createDecipheriv("aes-256-gcm", inviteCryptoKey, raw.subarray(0, 12));
       decipher.setAuthTag(raw.subarray(12, 28));
       return Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString("utf8");
     } catch {
@@ -6183,7 +6563,7 @@ async function buildApp() {
     if (!databasePool) return memoryInvites.find((i) => i.token === token) || null;
     await ensureSchema();
     try {
-      const hash = sha256Hex(token);
+      const hash = sha256Hex2(token);
       let r = await databasePool.query("select * from public.admin_invites where token_hash = $1", [hash]);
       if (r.rows[0]) return mapInviteRow(r.rows[0]);
       r = await databasePool.query("select * from public.admin_invites where token = $1", [token]);
@@ -6241,7 +6621,7 @@ async function buildApp() {
       [
         invite.id,
         encryptInviteToken(invite.token),
-        sha256Hex(invite.token),
+        sha256Hex2(invite.token),
         invite.createdBy,
         invite.createdByName,
         invite.role,
@@ -6916,6 +7296,352 @@ async function buildApp() {
       res.status(500).send("Preview unavailable");
     }
   });
+  const oauthProviderKey = crypto9.createHash("sha256").update(
+    process.env.DATABASE_URL || process.env.ADMIN_API_TOKEN || `local-${crypto9.randomBytes(32).toString("hex")}`
+  ).digest();
+  function makeConsentTicket(t) {
+    const payload = Buffer.from(
+      JSON.stringify({ ...t, exp: Date.now() + AUTH_CODE_TTL_MS })
+    ).toString("base64url");
+    const sig = crypto9.createHmac("sha256", oauthProviderKey).update(payload).digest("base64url");
+    return `${payload}.${sig}`;
+  }
+  function readConsentTicket(ticket) {
+    if (typeof ticket !== "string" || ticket.length > 4096) return null;
+    const [p64, sig] = ticket.split(".");
+    if (!p64 || !sig) return null;
+    const expected = crypto9.createHmac("sha256", oauthProviderKey).update(p64).digest("base64url");
+    const a = Buffer.from(sig);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || a.length === 0 || !crypto9.timingSafeEqual(a, b)) return null;
+    let parsed;
+    try {
+      parsed = JSON.parse(Buffer.from(p64, "base64url").toString("utf8"));
+    } catch {
+      return null;
+    }
+    if (!parsed || typeof parsed !== "object") return null;
+    if (!Number.isFinite(parsed.exp) || parsed.exp <= Date.now()) return null;
+    if (typeof parsed.appId !== "string" || typeof parsed.clientId !== "string") return null;
+    if (typeof parsed.redirectUri !== "string" || typeof parsed.userId !== "string") return null;
+    if (!Array.isArray(parsed.scopes) || !parsed.scopes.every((s) => typeof s === "string")) {
+      return null;
+    }
+    if (parsed.codeChallenge != null && typeof parsed.codeChallenge !== "string") return null;
+    if (parsed.codeChallengeMethod !== "plain" && parsed.codeChallengeMethod !== "s256") return null;
+    return parsed;
+  }
+  async function validateAuthorizeRequest(query) {
+    const clientId = sanitizeText(query?.client_id, 128);
+    const redirectUri = sanitizeText(query?.redirect_uri, 2048);
+    const responseType = sanitizeText(query?.response_type, 32);
+    const state = typeof query?.state === "string" ? query.state.slice(0, 512) : "";
+    const scopeParam = sanitizeText(query?.scope, 200);
+    const challenge = typeof query?.code_challenge === "string" ? query.code_challenge.slice(0, 256) : "";
+    const methodRaw = sanitizeText(query?.code_challenge_method, 16);
+    if (responseType !== "code") return { ok: false, error: 'response_type must be "code"' };
+    if (!clientId) return { ok: false, error: "client_id is required" };
+    if (!redirectUri) return { ok: false, error: "redirect_uri is required" };
+    const app2 = await lookupOAuthApp(clientId);
+    if (!app2) return { ok: false, error: "Unknown client_id" };
+    if (!app2.redirectUris.includes(redirectUri)) {
+      return { ok: false, error: "redirect_uri does not match any URI registered for this app" };
+    }
+    const requested = scopeParam ? scopeParam.split(/\s+/).filter(Boolean) : app2.scopes;
+    if (requested.length === 0 || requested.length > 10) {
+      return { ok: false, error: "Invalid scope list" };
+    }
+    for (const s of requested) {
+      if (!isKnownOAuthScope(s)) return { ok: false, error: `Unknown scope "${s}"` };
+      if (!app2.scopes.includes(s)) {
+        return { ok: false, error: `Scope "${s}" was not granted to this app` };
+      }
+    }
+    if (methodRaw && methodRaw !== "plain" && methodRaw !== "s256") {
+      return { ok: false, error: 'code_challenge_method must be "plain" or "s256"' };
+    }
+    if (methodRaw && !challenge) {
+      return { ok: false, error: "code_challenge is required when code_challenge_method is set" };
+    }
+    if (!methodRaw && challenge) {
+      return { ok: false, error: "code_challenge_method is required when code_challenge is set" };
+    }
+    return {
+      ok: true,
+      app: app2,
+      redirectUri,
+      scopes: requested,
+      state,
+      codeChallenge: challenge || null,
+      codeChallengeMethod: methodRaw || "plain"
+    };
+  }
+  function appendQuery(uri, params) {
+    const u = new URL(uri);
+    for (const [k, v] of Object.entries(params)) u.searchParams.set(k, v);
+    return u.toString();
+  }
+  app.get("/api/v1/oauth/apps", async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
+    try {
+      res.json({ apps: await listOAuthApps(actor.id), availableScopes: ["profile", "email"] });
+    } catch (err) {
+      console.error("[oauth/apps]", err.message);
+      res.status(500).json({ error: "Could not load your apps" });
+    }
+  });
+  app.post("/api/v1/oauth/apps", async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
+    const name = sanitizeText(req.body?.name, 80).trim();
+    const redirectUris = (Array.isArray(req.body?.redirectUris) ? req.body.redirectUris : []).map((u) => sanitizeText(u, 2048).trim()).filter(Boolean);
+    const scopes = (Array.isArray(req.body?.scopes) ? req.body.scopes : ["profile"]).map((s) => sanitizeText(s, 32)).filter(Boolean);
+    if (name.length < 3) return res.status(400).json({ error: "App name must be at least 3 characters" });
+    if (redirectUris.length === 0 || redirectUris.length > 20) {
+      return res.status(400).json({ error: "Register between 1 and 20 redirect URIs" });
+    }
+    for (const u of redirectUris) {
+      if (!isValidRedirectUri(u)) {
+        return res.status(400).json({ error: `Invalid redirect URI: ${u.slice(0, 80)}` });
+      }
+    }
+    if (scopes.length === 0 || scopes.length > 5) {
+      return res.status(400).json({ error: "Pick between 1 and 5 scopes" });
+    }
+    for (const s of scopes) {
+      if (!isKnownOAuthScope(s)) return res.status(400).json({ error: `Unknown scope "${s}"` });
+    }
+    try {
+      const { app: app2, clientSecret } = await createOAuthApp({ ownerId: actor.id, name, redirectUris, scopes });
+      persistAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorEmail: actor.email,
+        action: "OAUTH_APP_CREATED",
+        category: "SECURITY",
+        target: `${name} (${app2.clientId})`,
+        source: detectSource(req),
+        status: "SUCCESS",
+        ipAddress: req.ip || "unknown",
+        metadata: { redirectUris, scopes }
+      });
+      res.status(201).json({
+        app: app2,
+        clientSecret,
+        revealNote: "The client secret is shown exactly once \u2014 store it in a secure vault."
+      });
+    } catch (err) {
+      console.error("[oauth/apps/create]", err.message);
+      res.status(500).json({ error: "Could not register the app" });
+    }
+  });
+  app.delete("/api/v1/oauth/apps/:id", async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
+    const id = sanitizeText(req.params.id, 64);
+    try {
+      const deleted = await deleteOAuthApp(id, actor.id);
+      if (!deleted) return res.status(404).json({ error: "App not found" });
+      persistAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorEmail: actor.email,
+        action: "OAUTH_APP_REVOKED",
+        category: "SECURITY",
+        target: `OAuth App: ${id}`,
+        source: detectSource(req),
+        status: "WARNING",
+        ipAddress: req.ip || "unknown",
+        metadata: {}
+      });
+      res.json({ success: true });
+    } catch (err) {
+      console.error("[oauth/apps/delete]", err.message);
+      res.status(500).json({ error: "Could not delete the app" });
+    }
+  });
+  app.get("/api/v1/oauth/authorize", async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
+    try {
+      const outcome = await validateAuthorizeRequest(req.query);
+      if (outcome.ok === false) return res.status(400).json({ error: outcome.error });
+      const ticket = makeConsentTicket({
+        appId: outcome.app.id,
+        clientId: outcome.app.clientId,
+        redirectUri: outcome.redirectUri,
+        scopes: outcome.scopes,
+        state: outcome.state,
+        codeChallenge: outcome.codeChallenge,
+        codeChallengeMethod: outcome.codeChallengeMethod,
+        userId: actor.id
+      });
+      res.json({
+        ticket,
+        app: { name: outcome.app.name, clientId: outcome.app.clientId, scopes: outcome.scopes },
+        redirectUri: outcome.redirectUri,
+        state: outcome.state
+      });
+    } catch (err) {
+      console.error("[oauth/authorize]", err.message);
+      res.status(500).json({ error: "Could not validate the authorize request" });
+    }
+  });
+  app.post("/api/v1/oauth/authorize/decision", async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
+    const ticket = readConsentTicket(sanitizeText(req.body?.ticket, 4096));
+    const decision = sanitizeText(req.body?.decision, 16);
+    if (!ticket) return res.status(400).json({ error: "Consent request is invalid or expired" });
+    if (ticket.userId !== actor.id) {
+      return res.status(403).json({ error: "The signed-in account does not match this consent request" });
+    }
+    if (decision !== "allow" && decision !== "deny") {
+      return res.status(400).json({ error: 'Decision must be "allow" or "deny"' });
+    }
+    const log = (status) => persistAuditLog({
+      actorId: actor.id,
+      actorName: actor.name,
+      actorEmail: actor.email,
+      action: decision === "allow" ? "OAUTH_CONSENT_GRANTED" : "OAUTH_CONSENT_DENIED",
+      category: "AUTH",
+      target: `App ${ticket.clientId}`,
+      source: detectSource(req),
+      status,
+      ipAddress: req.ip || "unknown",
+      metadata: { scopes: ticket.scopes }
+    });
+    if (decision === "deny") {
+      log("WARNING");
+      return res.json({
+        redirectUrl: appendQuery(ticket.redirectUri, {
+          ...ticket.state ? { state: ticket.state } : {},
+          error: "access_denied"
+        })
+      });
+    }
+    try {
+      const code = await createAuthorizationCode({
+        appId: ticket.appId,
+        userId: ticket.userId,
+        redirectUri: ticket.redirectUri,
+        scopes: ticket.scopes,
+        codeChallenge: ticket.codeChallenge,
+        codeChallengeMethod: ticket.codeChallengeMethod
+      });
+      log("SUCCESS");
+      res.json({
+        redirectUrl: appendQuery(ticket.redirectUri, {
+          code,
+          ...ticket.state ? { state: ticket.state } : {}
+        })
+      });
+    } catch (err) {
+      console.error("[oauth/authorize/decision]", err.message);
+      res.status(500).json({ error: "Could not issue the authorization code" });
+    }
+  });
+  app.post("/api/v1/oauth/token", async (req, res) => {
+    const grantType = sanitizeText(req.body?.grant_type, 64);
+    if (grantType !== "authorization_code") {
+      return res.status(400).json({
+        error: "unsupported_grant_type",
+        error_description: "Only authorization_code is supported"
+      });
+    }
+    const clientId = sanitizeText(req.body?.client_id, 128);
+    const clientSecret = typeof req.body?.client_secret === "string" ? req.body.client_secret : "";
+    const rawCode = typeof req.body?.code === "string" ? req.body.code : "";
+    const redirectUri = sanitizeText(req.body?.redirect_uri, 2048);
+    const verifier = typeof req.body?.code_verifier === "string" ? req.body.code_verifier.slice(0, 256) : null;
+    if (!clientId || !clientSecret) return res.status(401).json({ error: "invalid_client" });
+    const app2 = await authenticateClient(clientId, clientSecret);
+    if (!app2) return res.status(401).json({ error: "invalid_client" });
+    if (!rawCode) {
+      return res.status(400).json({ error: "invalid_request", error_description: "code is required" });
+    }
+    if (!redirectUri) {
+      return res.status(400).json({ error: "invalid_request", error_description: "redirect_uri is required" });
+    }
+    const record = await consumeAuthorizationCode(rawCode);
+    if (!record || record.appId !== app2.id || record.redirectUri !== redirectUri) {
+      return res.status(400).json({
+        error: "invalid_grant",
+        error_description: "The authorization code is invalid, expired or already used"
+      });
+    }
+    if (!verifyPkce(verifier, record.codeChallenge, record.codeChallengeMethod)) {
+      return res.status(400).json({
+        error: "invalid_grant",
+        error_description: "PKCE verification failed"
+      });
+    }
+    const token = await createAccessToken({ appId: app2.id, userId: record.userId, scopes: record.scopes });
+    persistAuditLog({
+      actorId: record.userId,
+      actorName: "",
+      actorEmail: "",
+      action: "OAUTH_TOKEN_ISSUED",
+      category: "AUTH",
+      target: `App ${app2.clientId}`,
+      source: detectSource(req),
+      status: "SUCCESS",
+      ipAddress: req.ip || "unknown",
+      metadata: { scopes: record.scopes }
+    });
+    res.json({
+      access_token: token,
+      token_type: "Bearer",
+      expires_in: Math.round(ACCESS_TOKEN_TTL_MS / 1e3),
+      scope: record.scopes.join(" ")
+    });
+  });
+  app.get("/api/v1/oauth/userinfo", async (req, res) => {
+    const auth = req.headers.authorization || "";
+    const rawToken = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+    const record = rawToken ? await resolveAccessToken(rawToken) : null;
+    if (!record) {
+      return res.status(401).json({
+        error: "invalid_token",
+        error_description: "The access token is invalid or expired"
+      });
+    }
+    try {
+      const result = await findUserById(record.userId);
+      if (!result) {
+        return res.status(401).json({
+          error: "invalid_token",
+          error_description: "The account no longer exists"
+        });
+      }
+      const profile = {
+        sub: result.id,
+        name: result.name,
+        preferred_username: result.username || "",
+        picture: result.avatarUrl || ""
+      };
+      if (record.scopes.includes("email")) {
+        profile.email = result.email;
+        profile.email_verified = true;
+      }
+      res.json(profile);
+    } catch (err) {
+      console.error("[oauth/userinfo]", err.message);
+      res.status(500).json({ error: "Could not load the profile" });
+    }
+  });
+  app.post("/api/v1/oauth/revoke", async (req, res) => {
+    const rawToken = typeof req.body?.token === "string" ? req.body.token : "";
+    if (rawToken) {
+      try {
+        await revokeAccessToken(rawToken);
+      } catch (err) {
+        console.error("[oauth/revoke]", err.message);
+      }
+    }
+    res.json({ success: true });
+  });
   app.delete("/api/v1/admin/users/:id", async (req, res) => {
     const actor = requireAdmin(req, res);
     if (!actor) return;
@@ -6954,6 +7680,7 @@ async function buildApp() {
         purgeMemoryMessages(id);
         purgePublishedData(id);
         await clearGitHubToken(id);
+        purgeOAuthAppData(id);
       }
       await clearAiChatHistory(id);
       await forgetAccount(id);
@@ -7135,7 +7862,7 @@ async function buildApp() {
   async function deliverWebhook(wh, event, data) {
     const payload = { event, timestamp: (/* @__PURE__ */ new Date()).toISOString(), data };
     const body = JSON.stringify(payload);
-    const signature = crypto8.createHmac("sha256", wh.secret).update(body).digest("hex");
+    const signature = crypto9.createHmac("sha256", wh.secret).update(body).digest("hex");
     const started = Date.now();
     let statusCode = 0;
     let ok = false;
@@ -7682,10 +8409,10 @@ async function buildApp() {
     }
   });
   const DOWNLOAD_LINK_TTL_MS = 10 * 60 * 1e3;
-  const downloadSignKey = crypto8.createHash("sha256").update(
-    `download-link:${process.env.DATABASE_URL || process.env.ADMIN_API_TOKEN || `local-${crypto8.randomBytes(32).toString("hex")}`}`
+  const downloadSignKey = crypto9.createHash("sha256").update(
+    `download-link:${process.env.DATABASE_URL || process.env.ADMIN_API_TOKEN || `local-${crypto9.randomBytes(32).toString("hex")}`}`
   ).digest();
-  const signDownloadLink = (type, exp, uid) => crypto8.createHmac("sha256", downloadSignKey).update(`${type}|${exp}|${uid}`).digest("base64url");
+  const signDownloadLink = (type, exp, uid) => crypto9.createHmac("sha256", downloadSignKey).update(`${type}|${exp}|${uid}`).digest("base64url");
   app.get("/api/v1/download/releases", (_req, res) => {
     res.json({
       success: true,
@@ -7724,7 +8451,7 @@ async function buildApp() {
         if (typeValid && sig && Number.isFinite(exp) && exp > now && exp <= now + DOWNLOAD_LINK_TTL_MS) {
           const expected = Buffer.from(signDownloadLink(type, exp, uid), "utf8");
           const given = Buffer.from(sig, "utf8");
-          valid = expected.length === given.length && crypto8.timingSafeEqual(expected, given);
+          valid = expected.length === given.length && crypto9.timingSafeEqual(expected, given);
         }
         if (!valid) return res.status(401).json({ error: "Authentication required" });
         actor = db.users.find((u) => u.id === uid) || {
@@ -7812,6 +8539,7 @@ var init_server = __esm({
     init_apiKeyStore();
     init_githubStore();
     init_publishStore();
+    init_oauthAppsStore();
     init_security();
     memoryComments = [];
     memoryAiChat = [];

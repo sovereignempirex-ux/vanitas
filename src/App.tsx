@@ -26,6 +26,8 @@ import { ProfileView } from './components/views/ProfileView.tsx';
 import { DownloadsView } from './components/views/DownloadsView.tsx';
 import { SocialView } from './components/views/SocialView.tsx';
 import { PublishView } from './components/views/PublishView.tsx';
+import { OAuthAppsView } from './components/views/OAuthAppsView.tsx';
+import { OAuthConsentView } from './components/views/OAuthConsentView.tsx';
 
 const AppContent: React.FC = () => {
   const { activeView, user, authLoading } = useAuth();
@@ -39,12 +41,22 @@ const AppContent: React.FC = () => {
   const inviteToken = path.startsWith('/invite/') ? path.slice('/invite/'.length) : null;
   // Public profile: /u/<username> (shareable @username page, no shell).
   const publicProfileName = path.startsWith('/u/') ? path.slice('/u/'.length) : null;
+  // OAuth consent: /oauth/consent (third-party sign-in, no shell).
+  const oauthConsent = path === '/oauth/consent';
 
   // Per-view SEO: keep title/description/canonical/OG in sync with what is on
   // screen (auth pages first, then the signed-in dashboard view).
   useEffect(() => {
     if (publicProfileName) {
       return; // ProfilePage owns its metadata (needs the fetched bio/name)
+    }
+    if (oauthConsent) {
+      setPageSeo({
+        title: 'Sign in with Vanitas',
+        description:
+          'Authorize a third-party application to sign you in with your Vanitas account.',
+      });
+      return;
     }
     if (inviteToken) {
       setPageSeo(seoForInvitePage());
@@ -103,6 +115,8 @@ const AppContent: React.FC = () => {
         return <SocialView />;
       case 'publish':
         return <PublishView />;
+      case 'oauth-apps':
+        return <OAuthAppsView />;
       default:
         return <OverviewView />;
     }
@@ -120,6 +134,23 @@ const AppContent: React.FC = () => {
   // Public profile — standalone page, no shell (like /invite/<token>).
   if (publicProfileName !== null) {
     return <ProfilePage username={publicProfileName} />;
+  }
+
+  // OAuth consent — standalone sign-in page for third-party
+  // apps. Signed-out visitors land on the login page; after
+  // signing in they return here (the `next` parameter in
+  // the URL) to grant or deny consent.
+  if (oauthConsent) {
+    if (authLoading) {
+      return (
+        <div className="min-h-screen vnt-app-bg flex flex-col items-center justify-center gap-4 text-slate-300">
+          <div className="h-10 w-10 rounded-2xl border-2 border-cyan-400/30 border-t-cyan-300 animate-spin" />
+          <p className="font-mono text-xs tracking-widest text-cyan-300">VERIFYING SESSION…</p>
+        </div>
+      );
+    }
+    if (!user) return <AuthPage mode="login" />;
+    return <OAuthConsentView />;
   }
 
   // REAL ACCOUNTS ONLY: the dashboard is gated behind server-verified auth.

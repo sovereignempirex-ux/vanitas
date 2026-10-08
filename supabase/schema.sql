@@ -310,6 +310,51 @@ create unique index if not exists user_identities_user_provider_uniq
   on public.user_identities (user_id, provider);
 create index if not exists user_identities_user_idx on public.user_identities (user_id);
 
+-- ---------------------------------------------------------------------------
+-- OAuth provider: third-party apps registered by users, plus the
+-- single-use authorization codes and access tokens the flow issues.
+-- Client secrets are scrypt hashes; codes and tokens are sha256
+-- hashes — a database dump alone can never mint a working credential.
+-- Everything cascade-deletes with the owning account or app.
+-- ---------------------------------------------------------------------------
+create table if not exists public.oauth_apps (
+  id text primary key,
+  owner_id text not null references public.users(id) on delete cascade,
+  name text not null check (char_length(name) between 1 and 80),
+  client_id text not null unique,
+  client_secret_hash text not null,
+  redirect_uris jsonb not null default '[]',
+  scopes jsonb not null default '["profile"]',
+  created_at timestamptz not null default now()
+);
+create index if not exists oauth_apps_owner_idx on public.oauth_apps (owner_id, created_at desc);
+
+create table if not exists public.oauth_codes (
+  code_hash text primary key,
+  app_id text not null references public.oauth_apps(id) on delete cascade,
+  user_id text not null references public.users(id) on delete cascade,
+  redirect_uri text not null,
+  scopes jsonb not null default '["profile"]',
+  code_challenge text,
+  code_challenge_method text not null default 'plain' check (code_challenge_method in ('plain', 's256')),
+  used boolean not null default false,
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists oauth_codes_expiry_idx on public.oauth_codes (expires_at);
+
+create table if not exists public.oauth_tokens (
+  token_hash text primary key,
+  app_id text not null references public.oauth_apps(id) on delete cascade,
+  user_id text not null references public.users(id) on delete cascade,
+  scopes jsonb not null default '["profile"]',
+  revoked boolean not null default false,
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists oauth_tokens_expiry_idx on public.oauth_tokens (expires_at);
+create index if not exists oauth_tokens_user_idx on public.oauth_tokens (user_id);
+
 -- RLS for auth tables: deny direct browser access — server role only.
 alter table public.users enable row level security;
 alter table public.auth_sessions enable row level security;
@@ -335,7 +380,8 @@ declare
   vanitas_tables constant text[] := array[
     'product_suggestions', 'api_keys', 'audit_logs', 'admin_invites', 'webhooks',
     'comments', 'users', 'auth_sessions', 'user_identities', 'ai_chat_messages', 'direct_messages',
-    'github_tokens', 'published_projects', 'published_snippets'
+    'github_tokens', 'published_projects', 'published_snippets',
+    'oauth_apps', 'oauth_codes', 'oauth_tokens'
   ];
 begin
   foreach tbl in array vanitas_tables loop

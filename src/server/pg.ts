@@ -158,6 +158,46 @@ alter table public.published_snippets enable row level security;
 alter table if exists public.admin_invites add column if not exists token_hash text not null default '';
 create unique index if not exists admin_invites_token_hash_idx
   on public.admin_invites (token_hash) where token_hash <> '';
+-- OAuth provider: third-party apps registered by users, plus the
+-- single-use authorization codes and access tokens the flow
+-- issues. Client secrets are scrypt hashes, codes/tokens are
+-- sha256 hashes — a dump alone mints nothing. All FK-cascade
+-- with the owning account and the app.
+create table if not exists public.oauth_apps (
+  id text primary key,
+  owner_id text not null references public.users(id) on delete cascade,
+  name text not null check (char_length(name) between 1 and 80),
+  client_id text not null unique,
+  client_secret_hash text not null,
+  redirect_uris jsonb not null default '[]',
+  scopes jsonb not null default '["profile"]',
+  created_at timestamptz not null default now()
+);
+create index if not exists oauth_apps_owner_idx on public.oauth_apps (owner_id, created_at desc);
+create table if not exists public.oauth_codes (
+  code_hash text primary key,
+  app_id text not null references public.oauth_apps(id) on delete cascade,
+  user_id text not null references public.users(id) on delete cascade,
+  redirect_uri text not null,
+  scopes jsonb not null default '["profile"]',
+  code_challenge text,
+  code_challenge_method text not null default 'plain' check (code_challenge_method in ('plain', 's256')),
+  used boolean not null default false,
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists oauth_codes_expiry_idx on public.oauth_codes (expires_at);
+create table if not exists public.oauth_tokens (
+  token_hash text primary key,
+  app_id text not null references public.oauth_apps(id) on delete cascade,
+  user_id text not null references public.users(id) on delete cascade,
+  scopes jsonb not null default '["profile"]',
+  revoked boolean not null default false,
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists oauth_tokens_expiry_idx on public.oauth_tokens (expires_at);
+create index if not exists oauth_tokens_user_idx on public.oauth_tokens (user_id);
 `;
 
 let schemaReady: Promise<void> | null = null;

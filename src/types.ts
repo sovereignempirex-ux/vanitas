@@ -604,6 +604,33 @@ export interface GitHubRepoInfo {
   sizeKb: number;
 }
 
+/** A third-party OAuth application registered by the user.
+ *  The client secret is returned exactly once — on creation. */
+export interface OAuthApp {
+  id: string;
+  ownerId: string;
+  name: string;
+  clientId: string;
+  redirectUris: string[];
+  scopes: string[];
+  createdAt: string;
+}
+
+/** Validated authorize request + signed consent ticket. */
+export interface OAuthAuthorizeValidation {
+  ticket: string;
+  app: { name: string; clientId: string; scopes: string[] };
+  redirectUri: string;
+  state: string;
+}
+
+/** OAuth scope definitions shown in the consent screen. */
+export interface OAuthScopeInfo {
+  id: string;
+  label: string;
+  description: string;
+}
+
 export interface ExternalDatabaseConfig {
   id: string;
   name: string;

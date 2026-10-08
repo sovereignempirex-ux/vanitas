@@ -142,6 +142,7 @@ Open `http://localhost:3000`. This uses free/open-source software locally; hosti
 - **Session Management** — JWT-based sessions with refresh tokens
 - **2FA / Passkeys** — TOTP and WebAuthn support
 - **Connected Accounts** — Link/unlink OAuth providers safely
+- **OAuth Provider** — Third-party apps can offer "Sign in with Vanitas" (authorization-code flow + PKCE)
 
 ### 🛡️ Security
 - **Granular RBAC** — USER and ADMIN roles with permission-based access
@@ -767,6 +768,42 @@ All routes are served by `server.ts` (Express). Unless noted, authentication is
 | `PATCH` | `/api/v1/api-keys/:id/scopes` | Change scopes | Bearer |
 | `PATCH` | `/api/v1/api-keys/:id/rate-limit` | Change rate/quota policy | Bearer |
 | `GET` | `/api/v1/api-keys/usage-analytics` | Time-series usage | Bearer |
+
+### OAuth provider ("Sign in with Vanitas")
+
+Vanitas doubles as an OAuth 2.0 authorization server. Register a
+third-party application in the dashboard (OAuth Apps) and send its
+users through the standard authorization-code flow with PKCE.
+
+| Method | Endpoint | Description | Auth |
+|--------|----------|-------------|------|
+| `GET` | `/api/v1/oauth/apps` | List your registered apps | Bearer |
+| `POST` | `/api/v1/oauth/apps` | Register an app → `clientSecret` shown once | Bearer |
+| `DELETE` | `/api/v1/oauth/apps/:id` | Revoke an app (codes + tokens die with it) | Bearer |
+| `GET` | `/api/v1/oauth/authorize` | Validate an authorize request → consent ticket | Bearer |
+| `POST` | `/api/v1/oauth/authorize/decision` | Allow/deny → single-use code (via redirect URL) | Bearer |
+| `POST` | `/api/v1/oauth/token` | Exchange code + client secret → access token | client credentials |
+| `GET` | `/api/v1/oauth/userinfo` | OIDC-style profile for a valid access token | Bearer (access token) |
+| `POST` | `/api/v1/oauth/revoke` | RFC 7009 token revocation (idempotent) | client |
+
+Browser flow (the consent page is the SPA route `/oauth/consent`):
+
+1. The app sends the user to
+   `https://<vanitas>/oauth/consent?client_id=…&redirect_uri=…&response_type=code&state=…`
+   (optionally `code_challenge` + `code_challenge_method=s256` for PKCE).
+2. Signed-out visitors land on `/login?next=…`; after signing in they
+   return to the consent screen.
+3. The screen shows the app name, requested scopes (`profile`, `email`)
+   and the exact redirect URI — the user allows or denies.
+4. On allow, the browser is redirected to the app's registered
+   `redirect_uri?code=vnt_code_…&state=…` (single-use, 10-minute code).
+5. The app exchanges the code at `POST /api/v1/oauth/token` with its
+   `client_id` + `client_secret` (+ `code_verifier` for PKCE) and
+   receives a 1-hour `Bearer` access token, then reads the profile at
+   `/api/v1/oauth/userinfo`.
+
+Secrets at rest: client secrets are scrypt-hashed, codes and tokens are
+sha256-hashed — a database dump alone can never mint a credential.
 
 ### Public API (key-authenticated)
 
