@@ -33,6 +33,7 @@ import {
   HelpCircle,
   MessageSquare,
   Rocket,
+  Server,
 } from 'lucide-react';
 
 interface CommandPaletteProps {
@@ -126,6 +127,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({ isOpen, onClose 
           { id: 'admin-permissions', label: 'System Permissions Matrix', category: 'Admin Center', icon: Lock, view: 'admin-permissions' },
           { id: 'admin-flags', label: 'Toggle Feature Flags', category: 'Admin Center', icon: Sliders, view: 'admin-flags' },
           { id: 'admin-emergency', label: 'Emergency Controls & Killswitch', category: 'Admin Center', icon: AlertOctagon, view: 'admin-emergency' },
+          { id: 'server-orders', label: 'Review Server Requests & Plan Catalog', category: 'Admin Center', icon: Server, view: 'server-orders' },
         ]
       : []),
   ];

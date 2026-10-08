@@ -647,6 +647,65 @@ export interface OAuthAuthorizeValidation {
   state: string;
 }
 
+// ---------------------------------------------------------------------------
+// Server request orders — admin-authored plan catalog + the intake queue
+// that fills up from the embeddable widget and the public API.
+// ---------------------------------------------------------------------------
+
+/** Lifecycle of a server request: intake → review → hand-off (or refusal). */
+export type ServerRequestStatus = 'pending' | 'approved' | 'delivered' | 'rejected';
+
+/** A hosting plan published by an admin; the public catalog the widget reads. */
+export interface ServerPlan {
+  id: string;
+  name: string;
+  /** One-line spec summary ("2 vCPU · 4 GB · 80 GB NVMe"). */
+  specs: string;
+  /** Display price ("$12 / mo", "custom quote"). */
+  price: string;
+  description: string;
+  active: boolean;
+  createdAt: string;
+}
+
+/** One incoming request in the admin queue (admin/session view — full data). */
+export interface ServerRequest {
+  id: string;
+  planId: string;
+  /** Snapshot of the plan name at submission time. */
+  planName: string;
+  requesterName: string;
+  requesterEmail: string;
+  note: string;
+  status: ServerRequestStatus;
+  /** Shown to the requester: progress note or rejection reason. */
+  reviewNote: string;
+  host: string;
+  sshPort: number;
+  sshUser: string;
+  credentialsNote: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** What the track-token holder (the submitter) is allowed to see. */
+export interface ServerRequestTrackView {
+  id: string;
+  planName: string;
+  requesterName: string;
+  status: ServerRequestStatus;
+  reviewNote: string;
+  createdAt: string;
+  updatedAt: string;
+  /** Present only once the request is delivered. */
+  delivery: {
+    host: string;
+    sshPort: number;
+    sshUser: string;
+    credentialsNote: string;
+  } | null;
+}
+
 export interface ExternalDatabaseConfig {
   id: string;
   name: string;

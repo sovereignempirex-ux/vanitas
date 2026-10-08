@@ -205,6 +205,37 @@ alter table if exists public.users add column if not exists email_verified boole
 -- OAuth provider: public clients (SPA/mobile) hold no secret and must use
 -- PKCE; confidential clients authenticate with their scrypt secret hash.
 alter table if exists public.oauth_apps add column if not exists is_public boolean not null default false;
+-- Server request orders ("طلب سيرفرات"): an admin-authored plan catalog
+-- plus the intake queue. plan_name is a snapshot so a request keeps its
+-- label even after the plan is edited or deleted (no FK on purpose).
+create table if not exists public.server_plans (
+  id text primary key,
+  name text not null check (char_length(name) between 1 and 80),
+  specs text not null default '',
+  price text not null default '',
+  description text not null default '',
+  active boolean not null default true,
+  created_at timestamptz not null default now()
+);
+create table if not exists public.server_requests (
+  id text primary key,
+  plan_id text not null default '',
+  plan_name text not null check (char_length(plan_name) between 1 and 120),
+  requester_name text not null check (char_length(requester_name) between 1 and 80),
+  requester_email text not null check (char_length(requester_email) between 3 and 160),
+  note text not null default '',
+  status text not null default 'pending' check (status in ('pending','approved','delivered','rejected')),
+  review_note text not null default '',
+  host text not null default '',
+  ssh_port int not null default 22,
+  ssh_user text not null default '',
+  credentials_note text not null default '',
+  track_token_hash text not null unique,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists server_requests_status_idx on public.server_requests (status, created_at desc);
+create index if not exists server_requests_track_idx on public.server_requests (track_token_hash);
 `;
 
 let schemaReady: Promise<void> | null = null;

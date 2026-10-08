@@ -26,6 +26,7 @@ const SUITES = [
   { file: 'api-key-test.mjs', server: true, why: 'key lifecycle + scopes' },
   { file: 'downloads-test.mjs', server: true, why: 'download catalog + counts' },
   { file: 'comments-test.mjs', server: true, why: 'threading + moderation' },
+  { file: 'server-orders-test.mjs', server: true, why: 'server-request orders + embed + sandbox console' },
 ];
 
 const PORT = process.env.TEST_PORT || '3000';

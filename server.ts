@@ -50,7 +50,20 @@ import {
   ACCESS_TOKEN_TTL_MS,
 } from './src/server/oauthAppsStore.ts';
 import type { OAuthApp } from './src/server/oauthAppsStore.ts';
-import { ClientSource, UserRole, PermissionScope, ProductSuggestion, ApiKey, User, AuditLog, VerificationType, AdminInvite, WebhookEndpoint, WebhookDeliveryLog, PublicUserComment, ProfileLink, SocialAccount, SocialConversation, DirectMessage } from './src/types.ts';
+import {
+  listServerPlans,
+  getServerPlan,
+  createServerPlan,
+  updateServerPlan,
+  deleteServerPlan,
+  createServerRequest,
+  listServerRequests,
+  getServerRequest,
+  findServerRequestByTrackToken,
+  updateServerRequest,
+  isServerRequestStatus,
+} from './src/server/serverOrdersStore.ts';
+import { ClientSource, UserRole, PermissionScope, ProductSuggestion, ApiKey, User, AuditLog, VerificationType, AdminInvite, WebhookEndpoint, WebhookDeliveryLog, PublicUserComment, ProfileLink, SocialAccount, SocialConversation, DirectMessage, ServerRequest } from './src/types.ts';
 import { getActorUser, requireAdmin, rateLimit, sanitizeText, sanitizeUrl, csvCell, parsePagination, secureToken, secureId, isValidScope } from './src/server/security.ts';
 
 function mapSuggestion(row: Record<string, any>): ProductSuggestion {
@@ -529,6 +542,26 @@ export async function buildApp() {
     }
   }
 
+  // PUBLIC SERVER-ORDER SURFACE — the embeddable widget and third-party
+  // integrations call the catalog / submission / tracking endpoints from
+  // OTHER origins, so this family answers with '*' (registered before the
+  // hardened same-origin CORS below, so no allowlist echo can overwrite
+  // the wildcard). Safe because nothing here is cookie-authenticated: submission is
+  // anonymous + rate-limited, tracking is a bearer token in the URL, and
+  // the admin routes keep session auth — a foreign page still cannot read
+  // anyone's session or forge a bearer header it never receives.
+  const publicServersCors = (req: Request, res: Response, next: NextFunction) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    if (req.method === 'OPTIONS') {
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      res.setHeader('Access-Control-Max-Age', '86400');
+      return res.status(204).end();
+    }
+    next();
+  };
+  app.use('/api/v1/servers/', publicServersCors);
+
   // Hardened CORS — same-origin by default, allowlist via FRONTEND_URL.
   // '*' is deliberately NOT treated as "reflect any origin": that would let
   // every website on the internet call this API from a visitor's browser.
@@ -590,6 +623,12 @@ export async function buildApp() {
   // so the shared surface gets a wider 120/min ceiling.
   app.use('/api/v1/oauth/', rateLimit({ windowMs: 60_000, max: 120, perIpOnly: true }));
   app.use('/api/v1/oauth/token', rateLimit({ windowMs: 60_000, max: 30, perIpOnly: true }));
+  // Server-order surface: a general 120/min per-IP ceiling for catalog
+  // reads and the admin queue, a tighter shared bucket for the request
+  // path itself (submission + status tracking + admin list), and the
+  // anonymous submission POST gets its own small budget at the route.
+  app.use('/api/v1/servers/', rateLimit({ windowMs: 60_000, max: 120, perIpOnly: true }));
+  app.use('/api/v1/servers/requests', rateLimit({ windowMs: 60_000, max: 40, perIpOnly: true }));
   app.use('/api/v1/youtube/', rateLimit({ windowMs: 60_000, max: 60 }));
   app.use('/api/v1/search/', rateLimit({ windowMs: 60_000, max: 60 }));
   app.use('/api/v1/semantic-search', rateLimit({ windowMs: 60_000, max: 60 }));
@@ -2762,18 +2801,132 @@ export async function buildApp() {
   /** Render user HTML inside a sandboxed iframe: opaque origin,
    *  no same-origin access to this platform, no forms, no
    *  popups, no top-level navigation. The srcdoc attribute
-   *  value is escaped so the wrapper page itself stays inert. */
-  function serveSandboxPreview(res: Response, title: string, html: string): void {
+   *  value is escaped so the wrapper page itself stays inert.
+   *
+   *  The wrapper doubles as a CONSOLE:
+   *    - a bridge script (/embed/sandbox-bridge.js) is injected
+   *      into the previewed document so console output, crashes
+   *      and page events stream up to the wrapper;
+   *    - the SANDBOX TERMINAL at the bottom evaluates JavaScript
+   *      against the running page (plus refresh / phone-width
+   *      controls) — everything a developer needs to poke at the
+   *      preview without leaving the sandbox.
+   *  Both wrapper scripts are EXTERNAL files: this platform serves
+   *  a strict CSP (script-src 'self'), which blocks inline script. */
+  function serveSandboxPreview(res: Response, title: string, rawHtml: string): void {
     const esc = (s: string) =>
       s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+    // Inject the bridge ABOVE the page's own code so it wraps console
+    // before anything runs: top of <head> → after <body>/<html>/doctype
+    // → before </head> → prepended (bare fragments).
+    const BRIDGE_TAG = '<script src="/embed/sandbox-bridge.js"></script>';
+    const injectBridge = (source: string): string => {
+      const head = /<head[^>]*>/i.exec(source);
+      if (head) {
+        const at = head.index + head[0].length;
+        return source.slice(0, at) + BRIDGE_TAG + source.slice(at);
+      }
+      for (const re of [/<body[^>]*>/i, /<html[^>]*>/i, /<!doctype[^>]*>/i]) {
+        const m = re.exec(source);
+        if (m) {
+          const at = m.index + m[0].length;
+          return source.slice(0, at) + BRIDGE_TAG + source.slice(at);
+        }
+      }
+      const closeHead = /<\/head\s*>/i.exec(source);
+      if (closeHead) return source.slice(0, closeHead.index) + BRIDGE_TAG + source.slice(closeHead.index);
+      return BRIDGE_TAG + source;
+    };
+
     // srcdoc needs & and " escaped (attribute context); the
     // browser then parses the decoded value as the frame document.
-    const srcdoc = html.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+    const srcdoc = injectBridge(rawHtml).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.send(
-      `<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n<title>${esc(title)} — Sandbox Preview</title>\n<style>html,body{margin:0;height:100%;background:#0b1120}.bar{display:flex;align-items:center;gap:.5rem;padding:.5rem .75rem;font:12px/1.4 system-ui,sans-serif;color:#94a3b8;border-bottom:1px solid #1e293b}.dot{width:8px;height:8px;border-radius:50%;background:#f59e0b;flex:none}iframe{width:100%;height:calc(100% - 38px);border:0;display:block}</style>\n</head>\n<body>\n<div class="bar"><span class="dot"></span><span>Sandboxed preview — isolated opaque origin, no access to this platform</span></div>\n<iframe title="sandbox" sandbox="allow-scripts" srcdoc="${srcdoc}"></iframe>\n</body>\n</html>`,
-    );
+    res.send(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${esc(title)} — Sandbox Preview</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:#0b1120;font:12px/1.4 system-ui,-apple-system,sans-serif;color:#94a3b8}
+body{display:flex;flex-direction:column;overflow:hidden}
+.bar{display:flex;align-items:center;gap:.5rem;padding:.45rem .7rem;background:#0d1526;border-bottom:1px solid #1e293b;flex:none}
+.dot{width:8px;height:8px;border-radius:50%;background:#f59e0b;box-shadow:0 0 8px rgba(245,158,11,.55);flex:none}
+.label{color:#cbd5e1;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:42vw}
+.label strong{color:#fbbf24;letter-spacing:.09em;font-size:10px}
+.badges{display:flex;gap:.35rem}
+.badge{font:600 10px/1 ui-monospace,SFMono-Regular,Menlo,monospace;padding:3px 6px;border-radius:6px;background:#1e293b;color:#94a3b8}
+.badge[hidden]{display:none}
+.badge.err{background:#881337;color:#fda4af}
+.grow{flex:1}
+.bar button{font:600 11px system-ui,sans-serif;color:#94a3b8;background:#111c33;border:1px solid #24334d;border-radius:8px;padding:.35rem .6rem;cursor:pointer}
+.bar button:hover{color:#e2e8f0;border-color:#3b5478}
+.bar button.on{background:#0e3a52;border-color:#22d3ee;color:#67e8f9}
+.stage{position:relative;flex:1;min-height:0;display:flex;justify-content:center}
+.stage iframe{flex:1;width:100%;height:100%;border:0;display:block;background:#fff}
+body.phone .stage iframe{max-width:390px;box-shadow:0 0 0 1px #1e293b,0 18px 60px -24px #000}
+.loader{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font:600 11px ui-monospace,monospace;letter-spacing:.16em;color:#38bdf8;background:#0b1120;z-index:2}
+.loader[hidden]{display:none}
+.term{flex:none;height:38vh;min-height:170px;display:flex;flex-direction:column;background:#070d1a;border-top:1px solid #1e293b}
+.term[hidden]{display:none}
+.term-head{display:flex;align-items:center;gap:.6rem;padding:.4rem .7rem;border-bottom:1px solid #16203a}
+.term-title{font:700 10px ui-monospace,monospace;letter-spacing:.16em;color:#34d399;flex:none}
+.term-hint{flex:1;font-size:10px;color:#64748b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.term-hint code{color:#94a3b8;background:#111c33;border-radius:4px;padding:1px 4px}
+.term-head button{font:600 10px system-ui;color:#94a3b8;background:#111c33;border:1px solid #24334d;border-radius:6px;padding:.25rem .55rem;cursor:pointer}
+.term-head button:hover{color:#e2e8f0;border-color:#3b5478}
+.term-out{flex:1;overflow-y:auto;padding:.5rem .7rem;font:11px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;word-break:break-word}
+.term-out .t{color:#334155;margin-right:.5rem}
+.term-out .l{color:#cbd5e1}
+.term-out .l-warn{color:#fbbf24}
+.term-out .l-error{color:#fb7185}
+.term-out .l-sys{color:#38bdf8}
+.term-out .l-cmd{color:#a78bfa}
+.term-out .l-result{color:#34d399}
+.term-cmd{display:flex;align-items:center;gap:.5rem;padding:.45rem .7rem;border-top:1px solid #16203a;background:#0a1222}
+.term-cmd .ps{font:700 11px ui-monospace,monospace;color:#22d3ee;flex:none}
+.term-cmd input{flex:1;background:transparent;border:0;outline:none;color:#e2e8f0;font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
+</style>
+</head>
+<body>
+<header class="bar">
+  <span class="dot"></span>
+  <span class="label"><strong>SANDBOXED</strong>&nbsp; ${esc(title)}</span>
+  <span class="badges">
+    <span id="badge-err" class="badge err" hidden>0</span>
+    <span id="badge-log" class="badge" hidden>0</span>
+  </span>
+  <span class="grow"></span>
+  <button id="btn-width" type="button" title="Phone-width viewport">Phone</button>
+  <button id="btn-refresh" type="button" title="Reload the sandboxed page">Refresh</button>
+  <button id="btn-console" type="button" title="Open the sandbox terminal">Terminal</button>
+  <button id="btn-back" type="button" title="Back to the dashboard">Back</button>
+</header>
+<main class="stage" id="stage">
+  <div class="loader" id="loader">LOADING SANDBOX…</div>
+  <iframe id="frame" title="sandbox" sandbox="allow-scripts" referrerpolicy="no-referrer" srcdoc="${srcdoc}"></iframe>
+</main>
+<section class="term" id="term" hidden aria-label="Sandbox terminal">
+  <div class="term-head">
+    <span class="term-title">SANDBOX TERMINAL</span>
+    <span class="term-hint">JS runs against the previewed page — try <code>help</code> or <code>document.title</code></span>
+    <button id="term-clear" type="button">Clear</button>
+    <button id="term-close" type="button" aria-label="Close terminal">✕</button>
+  </div>
+  <div class="term-out" id="term-out" role="log" aria-live="polite"></div>
+  <form class="term-cmd" id="term-form" autocomplete="off">
+    <span class="ps">vnt ▸</span>
+    <input id="term-input" type="text" placeholder="eval code inside the sandbox…" spellcheck="false" aria-label="Terminal input">
+  </form>
+</section>
+<script src="/embed/sandbox-console.js"></script>
+</body>
+</html>`);
   }
 
   // Is this account connected to GitHub? (never returns the token)
@@ -3575,6 +3728,330 @@ export async function buildApp() {
       }
     }
     res.json({ success: true });
+  });
+
+  // ---------------------------------------------------------------------------
+  // SERVER REQUEST ORDERS — "طلب سيرفرات"
+  //
+  // Two doors into ONE queue:
+  //   1. PUBLIC — the embeddable widget on any website (or a raw curl)
+  //      reads the plan catalog, submits a request, and later follows its
+  //      status with the one-time track token. CORS '*' because it runs on
+  //      foreign origins; anonymous, validated, rate-limited.
+  //   2. ADMIN — the signed-in ADMIN reviews the queue in the dashboard:
+  //      approve / reject with a note, then mark a delivery with the real
+  //      connection details. Only the track-token holder can read those.
+  // ---------------------------------------------------------------------------
+
+  const REQUEST_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+  const serverRequestAdminView = (row: ServerRequest) => ({
+    id: row.id,
+    planId: row.planId,
+    planName: row.planName,
+    requesterName: row.requesterName,
+    requesterEmail: row.requesterEmail,
+    note: row.note,
+    status: row.status,
+    reviewNote: row.reviewNote,
+    host: row.host,
+    sshPort: row.sshPort,
+    sshUser: row.sshUser,
+    credentialsNote: row.credentialsNote,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  });
+
+  // What the track-token holder sees: identity of the request + status,
+  // delivery block only after the admin marks it delivered. The token
+  // hash and the requester's email never leave the server here.
+  const serverRequestTrackView = (row: ServerRequest) => ({
+    id: row.id,
+    planName: row.planName,
+    requesterName: row.requesterName,
+    status: row.status,
+    reviewNote: row.reviewNote,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    delivery:
+      row.status === 'delivered'
+        ? { host: row.host, sshPort: row.sshPort, sshUser: row.sshUser, credentialsNote: row.credentialsNote }
+        : null,
+  });
+
+  // ---- Public: the active plan catalog the widget/API renders ----
+  app.get('/api/v1/servers/plans', async (req, res) => {
+    // `?all=1` includes inactive plans — that view is admin-only.
+    if (typeof req.query.all === 'string' && req.query.all) {
+      const actor = requireAdmin(req, res);
+      if (!actor) return;
+    }
+    try {
+      const plans = await listServerPlans({
+        includeInactive: typeof req.query.all === 'string' && !!req.query.all,
+      });
+      res.json({ plans });
+    } catch (err) {
+      console.error('[servers/plans]', (err as Error).message);
+      res.status(500).json({ error: 'Could not load the plan catalog' });
+    }
+  });
+
+  // ---- Public: anonymous submission (embed widget / third-party API) ----
+  app.post(
+    '/api/v1/servers/requests',
+    rateLimit({ windowMs: 60_000, max: 15, perIpOnly: true }),
+    async (req, res) => {
+      try {
+        // Honeypot: the `website` field is invisible to humans — a bot
+        // that fills every input gets rejected without touching storage.
+        if (typeof req.body?.website === 'string' && req.body.website.trim()) {
+          return res.status(400).json({ error: 'Submission rejected' });
+        }
+        const planId = sanitizeText(req.body?.planId, 64).trim();
+        const name = sanitizeText(req.body?.name, 80).trim();
+        const email = sanitizeText(req.body?.email, 160).trim().toLowerCase();
+        const note = sanitizeText(req.body?.note, 1000).trim();
+
+        if (!name || name.length < 2) {
+          return res.status(400).json({ error: 'Your name is required (at least 2 characters)' });
+        }
+        if (!email || email.length > 160 || !REQUEST_EMAIL_RE.test(email)) {
+          return res.status(400).json({ error: 'A valid email address is required' });
+        }
+        if (!planId) return res.status(400).json({ error: 'Pick a plan first' });
+        const plan = await getServerPlan(planId);
+        if (!plan || !plan.active) {
+          return res.status(400).json({ error: 'That plan is not accepting requests right now' });
+        }
+
+        const { request, trackToken } = await createServerRequest({
+          planId: plan.id,
+          planName: plan.name,
+          requesterName: name,
+          requesterEmail: email,
+          note,
+        });
+        res.status(201).json({
+          id: request.id,
+          status: request.status,
+          planName: request.planName,
+          // Shown exactly once — only its sha256 is ever stored.
+          trackToken,
+          trackPath: `/embed/track.html?token=${encodeURIComponent(trackToken)}`,
+        });
+      } catch (err) {
+        console.error('[servers/requests/create]', (err as Error).message);
+        res.status(500).json({ error: 'Could not submit the request' });
+      }
+    },
+  );
+
+  // ---- Public: status lookup with the bearer track token (no account) ----
+  app.get('/api/v1/servers/requests/track/:token', async (req, res) => {
+    try {
+      const token = sanitizeText(req.params.token, 128);
+      const row = token ? await findServerRequestByTrackToken(token) : null;
+      if (!row) return res.status(404).json({ error: 'No request matches this tracking token' });
+      res.json({ request: serverRequestTrackView(row) });
+    } catch (err) {
+      console.error('[servers/requests/track]', (err as Error).message);
+      res.status(500).json({ error: 'Could not load the request' });
+    }
+  });
+
+  // ---- Admin: the intake queue ----
+  app.get('/api/v1/servers/requests', async (req, res) => {
+    const actor = requireAdmin(req, res);
+    if (!actor) return;
+    try {
+      const statusParam = typeof req.query.status === 'string' ? req.query.status : '';
+      if (statusParam && !isServerRequestStatus(statusParam)) {
+        return res.status(400).json({ error: 'Unknown status filter' });
+      }
+      // Explicit narrowing: '' (no filter) and unknown values are excluded above.
+      const statusFilter = isServerRequestStatus(statusParam) ? statusParam : undefined;
+      const rows = await listServerRequests(statusFilter);
+      res.json({ requests: rows.map(serverRequestAdminView) });
+    } catch (err) {
+      console.error('[servers/requests/list]', (err as Error).message);
+      res.status(500).json({ error: 'Could not load the request queue' });
+    }
+  });
+
+  // ---- Admin: move a request through the queue ----
+  app.patch('/api/v1/servers/requests/:id', async (req, res) => {
+    const actor = requireAdmin(req, res);
+    if (!actor) return;
+    const id = sanitizeText(req.params.id, 64);
+    try {
+      const current = await getServerRequest(id);
+      if (!current) return res.status(404).json({ error: 'Request not found' });
+
+      const patch: {
+        status?: ServerRequest['status'];
+        reviewNote?: string;
+        host?: string;
+        sshPort?: number;
+        sshUser?: string;
+        credentialsNote?: string;
+      } = {};
+      if (req.body?.status !== undefined) {
+        if (!isServerRequestStatus(req.body.status)) {
+          return res.status(400).json({ error: 'status must be pending, approved, delivered or rejected' });
+        }
+        patch.status = req.body.status;
+      }
+      if (req.body?.reviewNote !== undefined) patch.reviewNote = sanitizeText(req.body.reviewNote, 500);
+      if (req.body?.host !== undefined) patch.host = sanitizeText(req.body.host, 200).trim();
+      if (req.body?.sshUser !== undefined) patch.sshUser = sanitizeText(req.body.sshUser, 60).trim();
+      if (req.body?.credentialsNote !== undefined) patch.credentialsNote = sanitizeText(req.body.credentialsNote, 1000);
+      if (req.body?.sshPort !== undefined) {
+        const port = Number(req.body.sshPort);
+        if (!Number.isInteger(port) || port < 1 || port > 65535) {
+          return res.status(400).json({ error: 'sshPort must be an integer between 1 and 65535' });
+        }
+        patch.sshPort = port;
+      }
+      if (Object.keys(patch).length === 0) {
+        return res.status(400).json({ error: 'Nothing to update' });
+      }
+      // A delivery without a host would strand the requester.
+      const nextHost = patch.host !== undefined ? patch.host : current.host;
+      if ((patch.status ?? current.status) === 'delivered' && !nextHost) {
+        return res.status(400).json({ error: 'Add the server host before marking this request delivered' });
+      }
+
+      const updated = await updateServerRequest(id, patch);
+      if (!updated) return res.status(404).json({ error: 'Request not found' });
+
+      persistAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorEmail: actor.email,
+        action: patch.status && patch.status !== current.status ? 'SERVER_REQUEST_STATUS' : 'SERVER_REQUEST_UPDATED',
+        category: 'ADMIN',
+        target: `${current.requesterEmail} (${current.planName})`,
+        source: detectSource(req),
+        status: patch.status === 'rejected' ? 'WARNING' : 'SUCCESS',
+        ipAddress: req.ip || 'unknown',
+        metadata: { from: current.status, to: updated.status },
+      });
+      res.json({ request: serverRequestAdminView(updated) });
+    } catch (err) {
+      console.error('[servers/requests/update]', (err as Error).message);
+      res.status(500).json({ error: 'Could not update the request' });
+    }
+  });
+
+  // ---- Admin: plan catalog CRUD ----
+  app.post('/api/v1/servers/plans', async (req, res) => {
+    const actor = requireAdmin(req, res);
+    if (!actor) return;
+    try {
+      const name = sanitizeText(req.body?.name, 80).trim();
+      const specs = sanitizeText(req.body?.specs, 300).trim();
+      const price = sanitizeText(req.body?.price, 120).trim();
+      const description = sanitizeText(req.body?.description, 1000).trim();
+      if (name.length < 3) return res.status(400).json({ error: 'Plan name must be at least 3 characters' });
+
+      const plan = await createServerPlan({
+        name,
+        specs,
+        price,
+        description,
+        active: req.body?.active !== false,
+      });
+      persistAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorEmail: actor.email,
+        action: 'SERVER_PLAN_CREATED',
+        category: 'ADMIN',
+        target: plan.name,
+        source: detectSource(req),
+        status: 'SUCCESS',
+        ipAddress: req.ip || 'unknown',
+        metadata: { planId: plan.id },
+      });
+      res.status(201).json({ plan });
+    } catch (err) {
+      console.error('[servers/plans/create]', (err as Error).message);
+      res.status(500).json({ error: 'Could not create the plan' });
+    }
+  });
+
+  app.patch('/api/v1/servers/plans/:id', async (req, res) => {
+    const actor = requireAdmin(req, res);
+    if (!actor) return;
+    const id = sanitizeText(req.params.id, 64);
+    try {
+      const patch: {
+        name?: string;
+        specs?: string;
+        price?: string;
+        description?: string;
+        active?: boolean;
+      } = {};
+      if (req.body?.name !== undefined) {
+        const name = sanitizeText(req.body.name, 80).trim();
+        if (name.length < 3) return res.status(400).json({ error: 'Plan name must be at least 3 characters' });
+        patch.name = name;
+      }
+      if (req.body?.specs !== undefined) patch.specs = sanitizeText(req.body.specs, 300).trim();
+      if (req.body?.price !== undefined) patch.price = sanitizeText(req.body.price, 120).trim();
+      if (req.body?.description !== undefined) patch.description = sanitizeText(req.body.description, 1000).trim();
+      if (req.body?.active !== undefined) patch.active = req.body.active === true;
+      if (Object.keys(patch).length === 0) return res.status(400).json({ error: 'Nothing to update' });
+
+      const plan = await updateServerPlan(id, patch);
+      if (!plan) return res.status(404).json({ error: 'Plan not found' });
+      persistAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorEmail: actor.email,
+        action: 'SERVER_PLAN_UPDATED',
+        category: 'ADMIN',
+        target: plan.name,
+        source: detectSource(req),
+        status: 'SUCCESS',
+        ipAddress: req.ip || 'unknown',
+        metadata: { planId: plan.id },
+      });
+      res.json({ plan });
+    } catch (err) {
+      console.error('[servers/plans/update]', (err as Error).message);
+      res.status(500).json({ error: 'Could not update the plan' });
+    }
+  });
+
+  app.delete('/api/v1/servers/plans/:id', async (req, res) => {
+    const actor = requireAdmin(req, res);
+    if (!actor) return;
+    const id = sanitizeText(req.params.id, 64);
+    try {
+      // Resolve first so the audit trail names the plan, not just its id.
+      const existing = await getServerPlan(id);
+      if (!existing) return res.status(404).json({ error: 'Plan not found' });
+      const deleted = await deleteServerPlan(id);
+      if (!deleted) return res.status(404).json({ error: 'Plan not found' });
+      persistAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorEmail: actor.email,
+        action: 'SERVER_PLAN_DELETED',
+        category: 'ADMIN',
+        target: existing.name,
+        source: detectSource(req),
+        status: 'WARNING',
+        ipAddress: req.ip || 'unknown',
+        metadata: { planId: id },
+      });
+      res.json({ success: true });
+    } catch (err) {
+      console.error('[servers/plans/delete]', (err as Error).message);
+      res.status(500).json({ error: 'Could not delete the plan' });
+    }
   });
 
   // Admin: permanently delete an account. Your own account is off-limits and

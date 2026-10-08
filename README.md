@@ -175,15 +175,18 @@ Open `http://localhost:3000`. This uses free/open-source software locally; hosti
 - System logs with pagination and filters
 - Security alerts and monitoring
 - Emergency controls (maintenance mode, force logout, block source)
+- Server request orders («طلب سيرفرات») — hosting intake queue with a pending → approved → delivered | rejected lifecycle, plan catalog CRUD and one-time track tokens
 
 ### 👤 User Dashboard
 - Profile management (avatar, display name, bio)
+- Publishing & sandbox previews with a real JS terminal console (streamed `console.*`/errors, in-page eval, phone-width)
 - Security center (2FA, sessions, login history)
 - API keys and usage
 - Developer portal and documentation
 - Activity feed and notifications
 - Connected accounts management
 - Account directory search and private messaging (real accounts only — never seeded)
+- Embeddable server-order widget for third-party sites (`/embed/server-orders.js`, CORS `*` public API, accountless tracking page)
 
 ### 🔔 Notifications
 - New login / new device alerts
@@ -821,6 +824,63 @@ sha256-hashed — a database dump alone can never mint a credential.
 Expired codes/tokens are swept opportunistically; a wrong PKCE verifier
 burns the code (single-use consumption caps verifier guessing).
 
+### Server Requests — «طلب سيرفرات» (hosting request orders)
+
+A queue of real hosting requests with a full lifecycle
+(`pending → approved → delivered | rejected`), fed from two doors:
+
+1. **Embeddable widget** — drop one script tag on *any* website:
+
+   ```html
+   <script src="https://YOUR-HOST/embed/server-orders.js"
+           data-label="Request a Server"
+           data-plan="spl_…"                 <!-- optional preselection -->
+           data-position="bottom-left"       <!-- optional -->
+           defer></script>
+   ```
+
+   It renders a floating button + panel in a closed shadow root (host
+   CSS/JS cannot touch it), reads the public plan catalog, submits the
+   form and shows the **one-time tracking token**. The embedding page
+   can listen: `window.addEventListener('vanitas:server-request', e =>
+   /* { id, status, planName, trackToken, trackPath } */)`, and drive
+   it programmatically via `VanitasServers.open() / .close() /
+   .track(token)`.
+
+2. **Public API** (no auth, `Access-Control-Allow-Origin: *`,
+   rate-limited, honeypot + validation on submit):
+
+   | Method | Endpoint | Description |
+   |--------|----------|-------------|
+   | `GET` | `/api/v1/servers/plans` | Active plan catalog (`?all=1` = admin) |
+   | `POST` | `/api/v1/servers/requests` | Submit an anonymous request |
+   | `GET` | `/api/v1/servers/requests/track/:token` | Status by track token |
+
+   `POST` answers `201` with `trackToken` **exactly once** — only its
+   sha256 is stored, so a DB dump cannot re-derive it. The token
+   unlocks `/embed/track.html?token=…` (accountless status page:
+   status, review note, and — only after delivery — host/port/user/
+   credentials). A `website` honeypot field and a 15/min per-IP budget
+   keep bots out of the queue.
+
+**Admin side (Dashboard → Admin Center → Server Requests):** review the
+queue, attach a review note, approve/reject, and mark deliveries with
+the real connection details (a delivery without a host is rejected
+server-side). The plan catalog (`server_plans`) is authored here too —
+requests snapshot `plan_name`, so editing or deleting a plan never
+re-writes history. Every admin action is audit-logged
+(`SERVER_REQUEST_*`, category `ADMIN`); anonymous submissions are not
+(disclosure/flood hygiene).
+
+**Sandbox console:** every sandboxed preview (`/publish/…/preview`)
+now hosts a **SANDBOX TERMINAL** — a real JS console driven against the
+previewed page (`console.*`, errors and unhandled rejections stream up
+from an injected `/embed/sandbox-bridge.js`; evaluate code in the
+page's global scope, refresh, flip to phone width). The preview
+wrapper's scripts are external files so the platform's
+`script-src 'self'` CSP stays intact; `vercel.json` relaxes CSP for
+preview responses only.
+
 ### Public API (key-authenticated)
 
 | Method | Endpoint | Scope | Description |
@@ -885,6 +945,13 @@ burns the code (single-use consumption caps verifier guessing).
 | `GET` | `/api/v1/publish/snippets/:id` | Snippet detail |
 | `DELETE` | `/api/v1/publish/snippets/:id` | Delete own snippet (owner/admin) |
 | `GET` | `/api/v1/publish/snippets/:id/preview` | Sandboxed preview (HTML snippets) |
+| `GET` | `/api/v1/servers/plans` | Public server plan catalog (CORS `*`) |
+| `POST` | `/api/v1/servers/requests` | Submit a server request (CORS `*`, honeypot) |
+| `GET` | `/api/v1/servers/requests/track/:token` | Track a request by its one-time token (CORS `*`) |
+| `GET` | `/api/v1/servers/requests` | The intake queue, filterable by status | ADMIN |
+| `PATCH` | `/api/v1/servers/requests/:id` | Approve/reject/deliver with hand-off details | ADMIN |
+| `GET/POST` | `/api/v1/servers/plans[?all=1]` | Plan catalog (public active / admin all) | ADMIN* |
+| `PATCH/DELETE` | `/api/v1/servers/plans/:id` | Edit or remove a plan | ADMIN |
 
 ---
 
@@ -920,6 +987,7 @@ If you discover a security vulnerability, please email **security@vanitas.dev** 
 | Authentication | Login, OAuth, logout, sessions |
 | Authorization | Role checks, permission enforcement |
 | API Keys | Create, scope validation, rotate, revoke |
+| Server Orders | Plan CRUD, submit validation, honeypot, track token, admin lifecycle, embed files, sandbox console |
 | Audit Logs | Pagination, filters, CSV export |
 | Security | Unauthorized requests, rate limits |
 

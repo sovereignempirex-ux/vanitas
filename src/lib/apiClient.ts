@@ -38,6 +38,10 @@ import {
   OAuthApp,
   OAuthAuthorizeValidation,
   OAuthGrant,
+  ServerPlan,
+  ServerRequest,
+  ServerRequestStatus,
+  ServerRequestTrackView,
 } from '../types.ts';
 
 class ApiClient {
@@ -344,6 +348,64 @@ class ApiClient {
     return this.request<{ redirectUrl: string }>('/oauth/authorize/decision', {
       method: 'POST', body: JSON.stringify({ ticket, decision }),
     });
+  }
+
+  // ---- Server request orders ("طلب سيرفرات") ----
+  // Admin/session methods for the dashboard queue. The PUBLIC catalog,
+  // anonymous submission and track-token lookup live on the public
+  // servers surface (embed widget / third-party API) and are called
+  // with plain fetch from there, not through this client.
+
+  /** Plans for the admin editor — includes inactive ones (`all=1`). */
+  async listServerPlansAdmin() {
+    return this.request<{ plans: ServerPlan[] }>('/servers/plans?all=1');
+  }
+
+  async createServerPlan(params: { name: string; specs?: string; price?: string; description?: string; active?: boolean }) {
+    return this.request<{ plan: ServerPlan }>('/servers/plans', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+  }
+
+  async updateServerPlan(
+    id: string,
+    patch: Partial<Pick<ServerPlan, 'name' | 'specs' | 'price' | 'description' | 'active'>>,
+  ) {
+    return this.request<{ plan: ServerPlan }>(`/servers/plans/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    });
+  }
+
+  async deleteServerPlan(id: string) {
+    return this.request<{ success: boolean }>(`/servers/plans/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  /** The admin intake queue, newest first; filter by lifecycle status. */
+  async listServerRequests(status?: ServerRequestStatus | '') {
+    const q = status ? `?status=${encodeURIComponent(status)}` : '';
+    return this.request<{ requests: ServerRequest[] }>(`/servers/requests${q}`);
+  }
+
+  /** Move a request through the queue / attach delivery details. */
+  async updateServerRequest(
+    id: string,
+    patch: Partial<
+      Pick<ServerRequest, 'status' | 'reviewNote' | 'host' | 'sshPort' | 'sshUser' | 'credentialsNote'>
+    >,
+  ) {
+    return this.request<{ request: ServerRequest }>(`/servers/requests/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    });
+  }
+
+  /** Status lookup with a track token (also used by the dashboard preview). */
+  async trackServerRequest(token: string) {
+    return this.request<{ request: ServerRequestTrackView }>(
+      `/servers/requests/track/${encodeURIComponent(token)}`,
+    );
   }
 
   // Real two-factor authentication (RFC 6238 TOTP).

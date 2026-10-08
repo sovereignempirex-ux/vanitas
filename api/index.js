@@ -1066,6 +1066,37 @@ alter table if exists public.users add column if not exists email_verified boole
 -- OAuth provider: public clients (SPA/mobile) hold no secret and must use
 -- PKCE; confidential clients authenticate with their scrypt secret hash.
 alter table if exists public.oauth_apps add column if not exists is_public boolean not null default false;
+-- Server request orders ("\u0637\u0644\u0628 \u0633\u064A\u0631\u0641\u0631\u0627\u062A"): an admin-authored plan catalog
+-- plus the intake queue. plan_name is a snapshot so a request keeps its
+-- label even after the plan is edited or deleted (no FK on purpose).
+create table if not exists public.server_plans (
+  id text primary key,
+  name text not null check (char_length(name) between 1 and 80),
+  specs text not null default '',
+  price text not null default '',
+  description text not null default '',
+  active boolean not null default true,
+  created_at timestamptz not null default now()
+);
+create table if not exists public.server_requests (
+  id text primary key,
+  plan_id text not null default '',
+  plan_name text not null check (char_length(plan_name) between 1 and 120),
+  requester_name text not null check (char_length(requester_name) between 1 and 80),
+  requester_email text not null check (char_length(requester_email) between 3 and 160),
+  note text not null default '',
+  status text not null default 'pending' check (status in ('pending','approved','delivered','rejected')),
+  review_note text not null default '',
+  host text not null default '',
+  ssh_port int not null default 22,
+  ssh_user text not null default '',
+  credentials_note text not null default '',
+  track_token_hash text not null unique,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists server_requests_status_idx on public.server_requests (status, created_at desc);
+create index if not exists server_requests_track_idx on public.server_requests (track_token_hash);
 `;
     schemaReady = null;
   }
@@ -1346,7 +1377,7 @@ async function isUsernameTaken(username, exceptUserId) {
   return db.users.some((x) => (x.username || "").toLowerCase() === u && x.id !== exceptUserId);
 }
 function rowToUser(row) {
-  const iso3 = (v) => v instanceof Date ? v.toISOString() : v || void 0;
+  const iso4 = (v) => v instanceof Date ? v.toISOString() : v || void 0;
   return {
     id: row.id,
     email: row.email,
@@ -1363,8 +1394,8 @@ function rowToUser(row) {
     verification: ["USER", "DEVELOPER", "ADMIN"].includes(row.verification) ? row.verification : "",
     twoFactorEnabled: !!row.two_factor_enabled,
     emailVerified: !!row.email_verified,
-    createdAt: iso3(row.created_at) || (/* @__PURE__ */ new Date()).toISOString(),
-    lastLoginAt: iso3(row.last_login_at) || iso3(row.created_at) || (/* @__PURE__ */ new Date()).toISOString(),
+    createdAt: iso4(row.created_at) || (/* @__PURE__ */ new Date()).toISOString(),
+    lastLoginAt: iso4(row.last_login_at) || iso4(row.created_at) || (/* @__PURE__ */ new Date()).toISOString(),
     connectedAccounts: row.connected_accounts || { google: false, github: false, discord: false }
   };
 }
@@ -5068,6 +5099,224 @@ var init_oauthAppsStore = __esm({
   }
 });
 
+// src/server/serverOrdersStore.ts
+import crypto9 from "crypto";
+function isServerRequestStatus(value) {
+  return typeof value === "string" && SERVER_REQUEST_STATUSES.includes(value);
+}
+function mapPlanRow(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    specs: row.specs || "",
+    price: row.price || "",
+    description: row.description || "",
+    active: !!row.active,
+    createdAt: iso3(row.created_at) || (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+function mapRequestRow(row) {
+  return {
+    id: row.id,
+    planId: row.plan_id || "",
+    planName: row.plan_name,
+    requesterName: row.requester_name,
+    requesterEmail: row.requester_email,
+    note: row.note || "",
+    status: isServerRequestStatus(row.status) ? row.status : "pending",
+    reviewNote: row.review_note || "",
+    host: row.host || "",
+    sshPort: Number(row.ssh_port) || 22,
+    sshUser: row.ssh_user || "",
+    credentialsNote: row.credentials_note || "",
+    trackTokenHash: row.track_token_hash,
+    createdAt: iso3(row.created_at) || (/* @__PURE__ */ new Date()).toISOString(),
+    updatedAt: iso3(row.updated_at) || (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+async function listServerPlans(opts = {}) {
+  if (!databasePool) {
+    return memoryPlans.filter((p) => opts.includeInactive ? true : p.active).slice().sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+  }
+  await ensureSchema();
+  const r = await databasePool.query(
+    opts.includeInactive ? "select * from public.server_plans order by created_at desc" : "select * from public.server_plans where active = true order by created_at desc"
+  );
+  return r.rows.map(mapPlanRow);
+}
+async function getServerPlan(id) {
+  if (!databasePool) return memoryPlans.find((p) => p.id === id) || null;
+  await ensureSchema();
+  const r = await databasePool.query("select * from public.server_plans where id = $1", [id]);
+  return r.rows[0] ? mapPlanRow(r.rows[0]) : null;
+}
+async function createServerPlan(params) {
+  const plan = {
+    id: secureId("spl"),
+    name: params.name,
+    specs: params.specs,
+    price: params.price,
+    description: params.description,
+    active: params.active !== false,
+    createdAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  if (!databasePool) {
+    memoryPlans.unshift(plan);
+    return plan;
+  }
+  await ensureSchema();
+  await databasePool.query(
+    `insert into public.server_plans (id, name, specs, price, description, active)
+     values ($1, $2, $3, $4, $5, $6)`,
+    [plan.id, plan.name, plan.specs, plan.price, plan.description, plan.active]
+  );
+  return plan;
+}
+async function updateServerPlan(id, patch) {
+  if (!databasePool) {
+    const plan = memoryPlans.find((p) => p.id === id);
+    if (!plan) return null;
+    Object.assign(plan, patch);
+    return plan;
+  }
+  await ensureSchema();
+  const r = await databasePool.query(
+    `update public.server_plans set
+       name = coalesce($2, name),
+       specs = coalesce($3, specs),
+       price = coalesce($4, price),
+       description = coalesce($5, description),
+       active = coalesce($6, active)
+     where id = $1
+     returning *`,
+    [
+      id,
+      patch.name ?? null,
+      patch.specs ?? null,
+      patch.price ?? null,
+      patch.description ?? null,
+      patch.active ?? null
+    ]
+  );
+  return r.rows[0] ? mapPlanRow(r.rows[0]) : null;
+}
+async function deleteServerPlan(id) {
+  if (!databasePool) {
+    const idx = memoryPlans.findIndex((p) => p.id === id);
+    if (idx === -1) return false;
+    memoryPlans.splice(idx, 1);
+    return true;
+  }
+  await ensureSchema();
+  const r = await databasePool.query("delete from public.server_plans where id = $1 returning id", [id]);
+  return (r.rowCount ?? 0) > 0;
+}
+async function createServerRequest(params) {
+  const trackToken = secureToken("vnt_strk_", 24);
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+  const request = {
+    id: secureId("sreq"),
+    planId: params.planId,
+    planName: params.planName,
+    requesterName: params.requesterName,
+    requesterEmail: params.requesterEmail,
+    note: params.note,
+    status: "pending",
+    reviewNote: "",
+    host: "",
+    sshPort: 22,
+    sshUser: "",
+    credentialsNote: "",
+    trackTokenHash: sha256Hex2(trackToken),
+    createdAt: nowIso,
+    updatedAt: nowIso
+  };
+  if (!databasePool) {
+    memoryRequests.unshift(request);
+    return { request, trackToken };
+  }
+  await ensureSchema();
+  await databasePool.query(
+    `insert into public.server_requests
+       (id, plan_id, plan_name, requester_name, requester_email, note, status, track_token_hash, created_at, updated_at)
+     values ($1, $2, $3, $4, $5, $6, 'pending', $7, now(), now())`,
+    [request.id, request.planId, request.planName, request.requesterName, request.requesterEmail, request.note, request.trackTokenHash]
+  );
+  return { request, trackToken };
+}
+async function listServerRequests(status, limit = 500) {
+  if (!databasePool) {
+    return memoryRequests.filter((r2) => status ? r2.status === status : true).slice().sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)).slice(0, limit);
+  }
+  await ensureSchema();
+  const r = status ? await databasePool.query(
+    "select * from public.server_requests where status = $1 order by created_at desc limit $2",
+    [status, limit]
+  ) : await databasePool.query("select * from public.server_requests order by created_at desc limit $1", [limit]);
+  return r.rows.map(mapRequestRow);
+}
+async function getServerRequest(id) {
+  if (!databasePool) return memoryRequests.find((r2) => r2.id === id) || null;
+  await ensureSchema();
+  const r = await databasePool.query("select * from public.server_requests where id = $1", [id]);
+  return r.rows[0] ? mapRequestRow(r.rows[0]) : null;
+}
+async function findServerRequestByTrackToken(token) {
+  if (!token) return null;
+  const hash = sha256Hex2(token);
+  if (!databasePool) return memoryRequests.find((r2) => r2.trackTokenHash === hash) || null;
+  await ensureSchema();
+  const r = await databasePool.query("select * from public.server_requests where track_token_hash = $1", [hash]);
+  return r.rows[0] ? mapRequestRow(r.rows[0]) : null;
+}
+async function updateServerRequest(id, patch) {
+  const apply = (row) => {
+    Object.assign(row, patch);
+    row.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    return row;
+  };
+  if (!databasePool) {
+    const row = memoryRequests.find((r2) => r2.id === id);
+    if (!row) return null;
+    return apply(row);
+  }
+  await ensureSchema();
+  const r = await databasePool.query(
+    `update public.server_requests set
+       status = coalesce($2, status),
+       review_note = coalesce($3, review_note),
+       host = coalesce($4, host),
+       ssh_port = coalesce($5, ssh_port),
+       ssh_user = coalesce($6, ssh_user),
+       credentials_note = coalesce($7, credentials_note),
+       updated_at = now()
+     where id = $1
+     returning *`,
+    [
+      id,
+      patch.status ?? null,
+      patch.reviewNote ?? null,
+      patch.host ?? null,
+      patch.sshPort ?? null,
+      patch.sshUser ?? null,
+      patch.credentialsNote ?? null
+    ]
+  );
+  return r.rows[0] ? mapRequestRow(r.rows[0]) : null;
+}
+var SERVER_REQUEST_STATUSES, sha256Hex2, iso3, memoryPlans, memoryRequests;
+var init_serverOrdersStore = __esm({
+  "src/server/serverOrdersStore.ts"() {
+    init_pg();
+    init_security();
+    SERVER_REQUEST_STATUSES = ["pending", "approved", "delivered", "rejected"];
+    sha256Hex2 = (value) => crypto9.createHash("sha256").update(value).digest("hex");
+    iso3 = (v) => v instanceof Date ? v.toISOString() : v || void 0;
+    memoryPlans = [];
+    memoryRequests = [];
+  }
+});
+
 // server.ts
 var server_exports = {};
 __export(server_exports, {
@@ -5077,7 +5326,7 @@ __export(server_exports, {
 import "dotenv/config";
 import express from "express";
 import path from "path";
-import crypto9 from "crypto";
+import crypto10 from "crypto";
 function mapSuggestion(row) {
   return {
     id: row.id,
@@ -5212,10 +5461,10 @@ async function publicCommentActivity(username) {
       [u]
     )
   ]);
-  const iso3 = (v) => v instanceof Date ? v.toISOString() : String(v);
+  const iso4 = (v) => v instanceof Date ? v.toISOString() : String(v);
   return {
     commentCount: countR.rows[0]?.count ?? 0,
-    recentComments: recentR.rows.map((r) => ({ docSlug: r.doc_id, body: r.body, createdAt: iso3(r.created_at) }))
+    recentComments: recentR.rows.map((r) => ({ docSlug: r.doc_id, body: r.body, createdAt: iso4(r.created_at) }))
   };
 }
 function mapAiChatRow(row) {
@@ -5403,6 +5652,17 @@ async function buildApp() {
       return false;
     }
   }
+  const publicServersCors = (req, res, next) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    if (req.method === "OPTIONS") {
+      res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+      res.setHeader("Access-Control-Max-Age", "86400");
+      return res.status(204).end();
+    }
+    next();
+  };
+  app.use("/api/v1/servers/", publicServersCors);
   app.use((req, res, next) => {
     const allowed = (process.env.FRONTEND_URL || "").split(",").map((s) => s.trim()).filter((s) => s && s !== "*");
     const origin = req.headers.origin;
@@ -5431,6 +5691,8 @@ async function buildApp() {
   app.use("/api/v1/publish/", rateLimit({ windowMs: 6e4, max: 60, perIpOnly: true }));
   app.use("/api/v1/oauth/", rateLimit({ windowMs: 6e4, max: 120, perIpOnly: true }));
   app.use("/api/v1/oauth/token", rateLimit({ windowMs: 6e4, max: 30, perIpOnly: true }));
+  app.use("/api/v1/servers/", rateLimit({ windowMs: 6e4, max: 120, perIpOnly: true }));
+  app.use("/api/v1/servers/requests", rateLimit({ windowMs: 6e4, max: 40, perIpOnly: true }));
   app.use("/api/v1/youtube/", rateLimit({ windowMs: 6e4, max: 60 }));
   app.use("/api/v1/search/", rateLimit({ windowMs: 6e4, max: 60 }));
   app.use("/api/v1/semantic-search", rateLimit({ windowMs: 6e4, max: 60 }));
@@ -5469,7 +5731,7 @@ async function buildApp() {
   });
   app.use((req, _res, next) => {
     const incoming = sanitizeText(req.headers["x-request-id"], 64);
-    req.requestId = incoming || crypto9.randomUUID();
+    req.requestId = incoming || crypto10.randomUUID();
     next();
   });
   function detectSource(req) {
@@ -5969,25 +6231,25 @@ async function buildApp() {
       res.status(500).json({ error: "Account deletion failed" });
     }
   });
-  const twoFactorStateKey = crypto9.createHash("sha256").update(process.env.DATABASE_URL || process.env.ADMIN_API_TOKEN || `local-${crypto9.randomBytes(32).toString("hex")}`).digest();
+  const twoFactorStateKey = crypto10.createHash("sha256").update(process.env.DATABASE_URL || process.env.ADMIN_API_TOKEN || `local-${crypto10.randomBytes(32).toString("hex")}`).digest();
   function currentSessionHash(req) {
     const auth = req.headers.authorization || "";
     const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
     if (!token.startsWith("vnt_sess_")) return void 0;
-    return crypto9.createHash("sha256").update(token).digest("hex");
+    return crypto10.createHash("sha256").update(token).digest("hex");
   }
   function makeTwoFactorState(userId) {
     const payload = Buffer.from(`${userId}.${Date.now() + 10 * 6e4}`).toString("base64url");
-    const sig = crypto9.createHmac("sha256", twoFactorStateKey).update(payload).digest("base64url");
+    const sig = crypto10.createHmac("sha256", twoFactorStateKey).update(payload).digest("base64url");
     return `${payload}.${sig}`;
   }
   function readTwoFactorState(state) {
     const [payload, sig] = state.split(".");
     if (!payload || !sig) return null;
-    const expect = crypto9.createHmac("sha256", twoFactorStateKey).update(payload).digest("base64url");
+    const expect = crypto10.createHmac("sha256", twoFactorStateKey).update(payload).digest("base64url");
     const a = Buffer.from(sig);
     const b = Buffer.from(expect);
-    if (a.length !== b.length || !crypto9.timingSafeEqual(a, b)) return null;
+    if (a.length !== b.length || !crypto10.timingSafeEqual(a, b)) return null;
     const [userId, expStr] = Buffer.from(payload, "base64url").toString().split(".");
     if (!userId || !expStr || Number(expStr) < Date.now()) return null;
     return userId;
@@ -6611,7 +6873,7 @@ async function buildApp() {
     ).catch((err) => console.error("[audit/persist]", err.message));
   }
   function mapAuditRow(row) {
-    const iso3 = (v) => v instanceof Date ? v.toISOString() : v || "";
+    const iso4 = (v) => v instanceof Date ? v.toISOString() : v || "";
     let metadata = {};
     try {
       metadata = typeof row.metadata === "string" ? JSON.parse(row.metadata) : row.metadata || {};
@@ -6620,7 +6882,7 @@ async function buildApp() {
     }
     return {
       id: row.id,
-      timestamp: iso3(row.timestamp),
+      timestamp: iso4(row.timestamp),
       actorId: row.actor_id,
       actorName: row.actor_name,
       actorEmail: row.actor_email,
@@ -6648,7 +6910,7 @@ async function buildApp() {
   }
   const memoryInvites = [];
   function mapInviteRow(row) {
-    const iso3 = (v) => v instanceof Date ? v.toISOString() : v || "";
+    const iso4 = (v) => v instanceof Date ? v.toISOString() : v || "";
     return {
       id: row.id,
       token: decryptInviteToken(row.token),
@@ -6660,21 +6922,21 @@ async function buildApp() {
       maxUses: Number(row.max_uses) || 1,
       uses: Number(row.uses) || 0,
       revoked: !!row.revoked,
-      expiresAt: iso3(row.expires_at),
-      createdAt: iso3(row.created_at)
+      expiresAt: iso4(row.expires_at),
+      createdAt: iso4(row.created_at)
     };
   }
   function inviteUsable(invite) {
     return !invite.revoked && invite.uses < invite.maxUses && Date.parse(invite.expiresAt) > Date.now();
   }
-  const inviteCryptoKey = databasePool ? process.env.INVITE_ENC_KEY && process.env.INVITE_ENC_KEY.length >= 32 ? crypto9.createHash("sha256").update(`vanitas.invite.v1|${process.env.INVITE_ENC_KEY}`).digest() : process.env.DATABASE_URL ? crypto9.createHash("sha256").update(`vanitas.invite.v1|${process.env.DATABASE_URL}`).digest() : null : null;
-  function sha256Hex2(value) {
-    return crypto9.createHash("sha256").update(value).digest("hex");
+  const inviteCryptoKey = databasePool ? process.env.INVITE_ENC_KEY && process.env.INVITE_ENC_KEY.length >= 32 ? crypto10.createHash("sha256").update(`vanitas.invite.v1|${process.env.INVITE_ENC_KEY}`).digest() : process.env.DATABASE_URL ? crypto10.createHash("sha256").update(`vanitas.invite.v1|${process.env.DATABASE_URL}`).digest() : null : null;
+  function sha256Hex3(value) {
+    return crypto10.createHash("sha256").update(value).digest("hex");
   }
   function encryptInviteToken(token) {
     if (!inviteCryptoKey) return token;
-    const iv = crypto9.randomBytes(12);
-    const cipher = crypto9.createCipheriv("aes-256-gcm", inviteCryptoKey, iv);
+    const iv = crypto10.randomBytes(12);
+    const cipher = crypto10.createCipheriv("aes-256-gcm", inviteCryptoKey, iv);
     const ct = Buffer.concat([cipher.update(token, "utf8"), cipher.final()]);
     return `enc:v1:${Buffer.concat([iv, cipher.getAuthTag(), ct]).toString("base64url")}`;
   }
@@ -6683,7 +6945,7 @@ async function buildApp() {
     if (!inviteCryptoKey) return "";
     try {
       const raw = Buffer.from(stored.slice("enc:v1:".length), "base64url");
-      const decipher = crypto9.createDecipheriv("aes-256-gcm", inviteCryptoKey, raw.subarray(0, 12));
+      const decipher = crypto10.createDecipheriv("aes-256-gcm", inviteCryptoKey, raw.subarray(0, 12));
       decipher.setAuthTag(raw.subarray(12, 28));
       return Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString("utf8");
     } catch {
@@ -6694,7 +6956,7 @@ async function buildApp() {
     if (!databasePool) return memoryInvites.find((i) => i.token === token) || null;
     await ensureSchema();
     try {
-      const hash = sha256Hex2(token);
+      const hash = sha256Hex3(token);
       let r = await databasePool.query("select * from public.admin_invites where token_hash = $1", [hash]);
       if (r.rows[0]) return mapInviteRow(r.rows[0]);
       r = await databasePool.query("select * from public.admin_invites where token = $1", [token]);
@@ -6752,7 +7014,7 @@ async function buildApp() {
       [
         invite.id,
         encryptInviteToken(invite.token),
-        sha256Hex2(invite.token),
+        sha256Hex3(invite.token),
         invite.createdBy,
         invite.createdByName,
         invite.role,
@@ -7198,26 +7460,111 @@ async function buildApp() {
       res.status(502).json({ error: "GitHub API request failed" });
     }
   }
-  function serveSandboxPreview(res, title, html) {
+  function serveSandboxPreview(res, title, rawHtml) {
     const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-    const srcdoc = html.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+    const BRIDGE_TAG = '<script src="/embed/sandbox-bridge.js"></script>';
+    const injectBridge = (source) => {
+      const head = /<head[^>]*>/i.exec(source);
+      if (head) {
+        const at = head.index + head[0].length;
+        return source.slice(0, at) + BRIDGE_TAG + source.slice(at);
+      }
+      for (const re of [/<body[^>]*>/i, /<html[^>]*>/i, /<!doctype[^>]*>/i]) {
+        const m = re.exec(source);
+        if (m) {
+          const at = m.index + m[0].length;
+          return source.slice(0, at) + BRIDGE_TAG + source.slice(at);
+        }
+      }
+      const closeHead = /<\/head\s*>/i.exec(source);
+      if (closeHead) return source.slice(0, closeHead.index) + BRIDGE_TAG + source.slice(closeHead.index);
+      return BRIDGE_TAG + source;
+    };
+    const srcdoc = injectBridge(rawHtml).replace(/&/g, "&amp;").replace(/"/g, "&quot;");
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.setHeader("X-Content-Type-Options", "nosniff");
-    res.send(
-      `<!doctype html>
+    res.send(`<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${esc(title)} \u2014 Sandbox Preview</title>
-<style>html,body{margin:0;height:100%;background:#0b1120}.bar{display:flex;align-items:center;gap:.5rem;padding:.5rem .75rem;font:12px/1.4 system-ui,sans-serif;color:#94a3b8;border-bottom:1px solid #1e293b}.dot{width:8px;height:8px;border-radius:50%;background:#f59e0b;flex:none}iframe{width:100%;height:calc(100% - 38px);border:0;display:block}</style>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:#0b1120;font:12px/1.4 system-ui,-apple-system,sans-serif;color:#94a3b8}
+body{display:flex;flex-direction:column;overflow:hidden}
+.bar{display:flex;align-items:center;gap:.5rem;padding:.45rem .7rem;background:#0d1526;border-bottom:1px solid #1e293b;flex:none}
+.dot{width:8px;height:8px;border-radius:50%;background:#f59e0b;box-shadow:0 0 8px rgba(245,158,11,.55);flex:none}
+.label{color:#cbd5e1;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:42vw}
+.label strong{color:#fbbf24;letter-spacing:.09em;font-size:10px}
+.badges{display:flex;gap:.35rem}
+.badge{font:600 10px/1 ui-monospace,SFMono-Regular,Menlo,monospace;padding:3px 6px;border-radius:6px;background:#1e293b;color:#94a3b8}
+.badge[hidden]{display:none}
+.badge.err{background:#881337;color:#fda4af}
+.grow{flex:1}
+.bar button{font:600 11px system-ui,sans-serif;color:#94a3b8;background:#111c33;border:1px solid #24334d;border-radius:8px;padding:.35rem .6rem;cursor:pointer}
+.bar button:hover{color:#e2e8f0;border-color:#3b5478}
+.bar button.on{background:#0e3a52;border-color:#22d3ee;color:#67e8f9}
+.stage{position:relative;flex:1;min-height:0;display:flex;justify-content:center}
+.stage iframe{flex:1;width:100%;height:100%;border:0;display:block;background:#fff}
+body.phone .stage iframe{max-width:390px;box-shadow:0 0 0 1px #1e293b,0 18px 60px -24px #000}
+.loader{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font:600 11px ui-monospace,monospace;letter-spacing:.16em;color:#38bdf8;background:#0b1120;z-index:2}
+.loader[hidden]{display:none}
+.term{flex:none;height:38vh;min-height:170px;display:flex;flex-direction:column;background:#070d1a;border-top:1px solid #1e293b}
+.term[hidden]{display:none}
+.term-head{display:flex;align-items:center;gap:.6rem;padding:.4rem .7rem;border-bottom:1px solid #16203a}
+.term-title{font:700 10px ui-monospace,monospace;letter-spacing:.16em;color:#34d399;flex:none}
+.term-hint{flex:1;font-size:10px;color:#64748b;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.term-hint code{color:#94a3b8;background:#111c33;border-radius:4px;padding:1px 4px}
+.term-head button{font:600 10px system-ui;color:#94a3b8;background:#111c33;border:1px solid #24334d;border-radius:6px;padding:.25rem .55rem;cursor:pointer}
+.term-head button:hover{color:#e2e8f0;border-color:#3b5478}
+.term-out{flex:1;overflow-y:auto;padding:.5rem .7rem;font:11px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;word-break:break-word}
+.term-out .t{color:#334155;margin-right:.5rem}
+.term-out .l{color:#cbd5e1}
+.term-out .l-warn{color:#fbbf24}
+.term-out .l-error{color:#fb7185}
+.term-out .l-sys{color:#38bdf8}
+.term-out .l-cmd{color:#a78bfa}
+.term-out .l-result{color:#34d399}
+.term-cmd{display:flex;align-items:center;gap:.5rem;padding:.45rem .7rem;border-top:1px solid #16203a;background:#0a1222}
+.term-cmd .ps{font:700 11px ui-monospace,monospace;color:#22d3ee;flex:none}
+.term-cmd input{flex:1;background:transparent;border:0;outline:none;color:#e2e8f0;font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
+</style>
 </head>
 <body>
-<div class="bar"><span class="dot"></span><span>Sandboxed preview \u2014 isolated opaque origin, no access to this platform</span></div>
-<iframe title="sandbox" sandbox="allow-scripts" srcdoc="${srcdoc}"></iframe>
+<header class="bar">
+  <span class="dot"></span>
+  <span class="label"><strong>SANDBOXED</strong>&nbsp; ${esc(title)}</span>
+  <span class="badges">
+    <span id="badge-err" class="badge err" hidden>0</span>
+    <span id="badge-log" class="badge" hidden>0</span>
+  </span>
+  <span class="grow"></span>
+  <button id="btn-width" type="button" title="Phone-width viewport">Phone</button>
+  <button id="btn-refresh" type="button" title="Reload the sandboxed page">Refresh</button>
+  <button id="btn-console" type="button" title="Open the sandbox terminal">Terminal</button>
+  <button id="btn-back" type="button" title="Back to the dashboard">Back</button>
+</header>
+<main class="stage" id="stage">
+  <div class="loader" id="loader">LOADING SANDBOX\u2026</div>
+  <iframe id="frame" title="sandbox" sandbox="allow-scripts" referrerpolicy="no-referrer" srcdoc="${srcdoc}"></iframe>
+</main>
+<section class="term" id="term" hidden aria-label="Sandbox terminal">
+  <div class="term-head">
+    <span class="term-title">SANDBOX TERMINAL</span>
+    <span class="term-hint">JS runs against the previewed page \u2014 try <code>help</code> or <code>document.title</code></span>
+    <button id="term-clear" type="button">Clear</button>
+    <button id="term-close" type="button" aria-label="Close terminal">\u2715</button>
+  </div>
+  <div class="term-out" id="term-out" role="log" aria-live="polite"></div>
+  <form class="term-cmd" id="term-form" autocomplete="off">
+    <span class="ps">vnt \u25B8</span>
+    <input id="term-input" type="text" placeholder="eval code inside the sandbox\u2026" spellcheck="false" aria-label="Terminal input">
+  </form>
+</section>
+<script src="/embed/sandbox-console.js"></script>
 </body>
-</html>`
-    );
+</html>`);
   }
   app.get("/api/v1/github/status", async (req, res) => {
     const actor = getActorUser(req);
@@ -7427,24 +7774,24 @@ async function buildApp() {
       res.status(500).send("Preview unavailable");
     }
   });
-  const oauthProviderKey = crypto9.createHash("sha256").update(
-    process.env.DATABASE_URL || process.env.ADMIN_API_TOKEN || `local-${crypto9.randomBytes(32).toString("hex")}`
+  const oauthProviderKey = crypto10.createHash("sha256").update(
+    process.env.DATABASE_URL || process.env.ADMIN_API_TOKEN || `local-${crypto10.randomBytes(32).toString("hex")}`
   ).digest();
   function makeConsentTicket(t) {
     const payload = Buffer.from(
       JSON.stringify({ ...t, exp: Date.now() + AUTH_CODE_TTL_MS })
     ).toString("base64url");
-    const sig = crypto9.createHmac("sha256", oauthProviderKey).update(payload).digest("base64url");
+    const sig = crypto10.createHmac("sha256", oauthProviderKey).update(payload).digest("base64url");
     return `${payload}.${sig}`;
   }
   function readConsentTicket(ticket) {
     if (typeof ticket !== "string" || ticket.length > 4096) return null;
     const [p64, sig] = ticket.split(".");
     if (!p64 || !sig) return null;
-    const expected = crypto9.createHmac("sha256", oauthProviderKey).update(p64).digest("base64url");
+    const expected = crypto10.createHmac("sha256", oauthProviderKey).update(p64).digest("base64url");
     const a = Buffer.from(sig);
     const b = Buffer.from(expected);
-    if (a.length !== b.length || a.length === 0 || !crypto9.timingSafeEqual(a, b)) return null;
+    if (a.length !== b.length || a.length === 0 || !crypto10.timingSafeEqual(a, b)) return null;
     let parsed;
     try {
       parsed = JSON.parse(Buffer.from(p64, "base64url").toString("utf8"));
@@ -7863,6 +8210,268 @@ async function buildApp() {
     }
     res.json({ success: true });
   });
+  const REQUEST_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const serverRequestAdminView = (row) => ({
+    id: row.id,
+    planId: row.planId,
+    planName: row.planName,
+    requesterName: row.requesterName,
+    requesterEmail: row.requesterEmail,
+    note: row.note,
+    status: row.status,
+    reviewNote: row.reviewNote,
+    host: row.host,
+    sshPort: row.sshPort,
+    sshUser: row.sshUser,
+    credentialsNote: row.credentialsNote,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt
+  });
+  const serverRequestTrackView = (row) => ({
+    id: row.id,
+    planName: row.planName,
+    requesterName: row.requesterName,
+    status: row.status,
+    reviewNote: row.reviewNote,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    delivery: row.status === "delivered" ? { host: row.host, sshPort: row.sshPort, sshUser: row.sshUser, credentialsNote: row.credentialsNote } : null
+  });
+  app.get("/api/v1/servers/plans", async (req, res) => {
+    if (typeof req.query.all === "string" && req.query.all) {
+      const actor = requireAdmin(req, res);
+      if (!actor) return;
+    }
+    try {
+      const plans = await listServerPlans({
+        includeInactive: typeof req.query.all === "string" && !!req.query.all
+      });
+      res.json({ plans });
+    } catch (err) {
+      console.error("[servers/plans]", err.message);
+      res.status(500).json({ error: "Could not load the plan catalog" });
+    }
+  });
+  app.post(
+    "/api/v1/servers/requests",
+    rateLimit({ windowMs: 6e4, max: 15, perIpOnly: true }),
+    async (req, res) => {
+      try {
+        if (typeof req.body?.website === "string" && req.body.website.trim()) {
+          return res.status(400).json({ error: "Submission rejected" });
+        }
+        const planId = sanitizeText(req.body?.planId, 64).trim();
+        const name = sanitizeText(req.body?.name, 80).trim();
+        const email = sanitizeText(req.body?.email, 160).trim().toLowerCase();
+        const note = sanitizeText(req.body?.note, 1e3).trim();
+        if (!name || name.length < 2) {
+          return res.status(400).json({ error: "Your name is required (at least 2 characters)" });
+        }
+        if (!email || email.length > 160 || !REQUEST_EMAIL_RE.test(email)) {
+          return res.status(400).json({ error: "A valid email address is required" });
+        }
+        if (!planId) return res.status(400).json({ error: "Pick a plan first" });
+        const plan = await getServerPlan(planId);
+        if (!plan || !plan.active) {
+          return res.status(400).json({ error: "That plan is not accepting requests right now" });
+        }
+        const { request, trackToken } = await createServerRequest({
+          planId: plan.id,
+          planName: plan.name,
+          requesterName: name,
+          requesterEmail: email,
+          note
+        });
+        res.status(201).json({
+          id: request.id,
+          status: request.status,
+          planName: request.planName,
+          // Shown exactly once — only its sha256 is ever stored.
+          trackToken,
+          trackPath: `/embed/track.html?token=${encodeURIComponent(trackToken)}`
+        });
+      } catch (err) {
+        console.error("[servers/requests/create]", err.message);
+        res.status(500).json({ error: "Could not submit the request" });
+      }
+    }
+  );
+  app.get("/api/v1/servers/requests/track/:token", async (req, res) => {
+    try {
+      const token = sanitizeText(req.params.token, 128);
+      const row = token ? await findServerRequestByTrackToken(token) : null;
+      if (!row) return res.status(404).json({ error: "No request matches this tracking token" });
+      res.json({ request: serverRequestTrackView(row) });
+    } catch (err) {
+      console.error("[servers/requests/track]", err.message);
+      res.status(500).json({ error: "Could not load the request" });
+    }
+  });
+  app.get("/api/v1/servers/requests", async (req, res) => {
+    const actor = requireAdmin(req, res);
+    if (!actor) return;
+    try {
+      const statusParam = typeof req.query.status === "string" ? req.query.status : "";
+      if (statusParam && !isServerRequestStatus(statusParam)) {
+        return res.status(400).json({ error: "Unknown status filter" });
+      }
+      const statusFilter = isServerRequestStatus(statusParam) ? statusParam : void 0;
+      const rows = await listServerRequests(statusFilter);
+      res.json({ requests: rows.map(serverRequestAdminView) });
+    } catch (err) {
+      console.error("[servers/requests/list]", err.message);
+      res.status(500).json({ error: "Could not load the request queue" });
+    }
+  });
+  app.patch("/api/v1/servers/requests/:id", async (req, res) => {
+    const actor = requireAdmin(req, res);
+    if (!actor) return;
+    const id = sanitizeText(req.params.id, 64);
+    try {
+      const current = await getServerRequest(id);
+      if (!current) return res.status(404).json({ error: "Request not found" });
+      const patch = {};
+      if (req.body?.status !== void 0) {
+        if (!isServerRequestStatus(req.body.status)) {
+          return res.status(400).json({ error: "status must be pending, approved, delivered or rejected" });
+        }
+        patch.status = req.body.status;
+      }
+      if (req.body?.reviewNote !== void 0) patch.reviewNote = sanitizeText(req.body.reviewNote, 500);
+      if (req.body?.host !== void 0) patch.host = sanitizeText(req.body.host, 200).trim();
+      if (req.body?.sshUser !== void 0) patch.sshUser = sanitizeText(req.body.sshUser, 60).trim();
+      if (req.body?.credentialsNote !== void 0) patch.credentialsNote = sanitizeText(req.body.credentialsNote, 1e3);
+      if (req.body?.sshPort !== void 0) {
+        const port = Number(req.body.sshPort);
+        if (!Number.isInteger(port) || port < 1 || port > 65535) {
+          return res.status(400).json({ error: "sshPort must be an integer between 1 and 65535" });
+        }
+        patch.sshPort = port;
+      }
+      if (Object.keys(patch).length === 0) {
+        return res.status(400).json({ error: "Nothing to update" });
+      }
+      const nextHost = patch.host !== void 0 ? patch.host : current.host;
+      if ((patch.status ?? current.status) === "delivered" && !nextHost) {
+        return res.status(400).json({ error: "Add the server host before marking this request delivered" });
+      }
+      const updated = await updateServerRequest(id, patch);
+      if (!updated) return res.status(404).json({ error: "Request not found" });
+      persistAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorEmail: actor.email,
+        action: patch.status && patch.status !== current.status ? "SERVER_REQUEST_STATUS" : "SERVER_REQUEST_UPDATED",
+        category: "ADMIN",
+        target: `${current.requesterEmail} (${current.planName})`,
+        source: detectSource(req),
+        status: patch.status === "rejected" ? "WARNING" : "SUCCESS",
+        ipAddress: req.ip || "unknown",
+        metadata: { from: current.status, to: updated.status }
+      });
+      res.json({ request: serverRequestAdminView(updated) });
+    } catch (err) {
+      console.error("[servers/requests/update]", err.message);
+      res.status(500).json({ error: "Could not update the request" });
+    }
+  });
+  app.post("/api/v1/servers/plans", async (req, res) => {
+    const actor = requireAdmin(req, res);
+    if (!actor) return;
+    try {
+      const name = sanitizeText(req.body?.name, 80).trim();
+      const specs = sanitizeText(req.body?.specs, 300).trim();
+      const price = sanitizeText(req.body?.price, 120).trim();
+      const description = sanitizeText(req.body?.description, 1e3).trim();
+      if (name.length < 3) return res.status(400).json({ error: "Plan name must be at least 3 characters" });
+      const plan = await createServerPlan({
+        name,
+        specs,
+        price,
+        description,
+        active: req.body?.active !== false
+      });
+      persistAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorEmail: actor.email,
+        action: "SERVER_PLAN_CREATED",
+        category: "ADMIN",
+        target: plan.name,
+        source: detectSource(req),
+        status: "SUCCESS",
+        ipAddress: req.ip || "unknown",
+        metadata: { planId: plan.id }
+      });
+      res.status(201).json({ plan });
+    } catch (err) {
+      console.error("[servers/plans/create]", err.message);
+      res.status(500).json({ error: "Could not create the plan" });
+    }
+  });
+  app.patch("/api/v1/servers/plans/:id", async (req, res) => {
+    const actor = requireAdmin(req, res);
+    if (!actor) return;
+    const id = sanitizeText(req.params.id, 64);
+    try {
+      const patch = {};
+      if (req.body?.name !== void 0) {
+        const name = sanitizeText(req.body.name, 80).trim();
+        if (name.length < 3) return res.status(400).json({ error: "Plan name must be at least 3 characters" });
+        patch.name = name;
+      }
+      if (req.body?.specs !== void 0) patch.specs = sanitizeText(req.body.specs, 300).trim();
+      if (req.body?.price !== void 0) patch.price = sanitizeText(req.body.price, 120).trim();
+      if (req.body?.description !== void 0) patch.description = sanitizeText(req.body.description, 1e3).trim();
+      if (req.body?.active !== void 0) patch.active = req.body.active === true;
+      if (Object.keys(patch).length === 0) return res.status(400).json({ error: "Nothing to update" });
+      const plan = await updateServerPlan(id, patch);
+      if (!plan) return res.status(404).json({ error: "Plan not found" });
+      persistAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorEmail: actor.email,
+        action: "SERVER_PLAN_UPDATED",
+        category: "ADMIN",
+        target: plan.name,
+        source: detectSource(req),
+        status: "SUCCESS",
+        ipAddress: req.ip || "unknown",
+        metadata: { planId: plan.id }
+      });
+      res.json({ plan });
+    } catch (err) {
+      console.error("[servers/plans/update]", err.message);
+      res.status(500).json({ error: "Could not update the plan" });
+    }
+  });
+  app.delete("/api/v1/servers/plans/:id", async (req, res) => {
+    const actor = requireAdmin(req, res);
+    if (!actor) return;
+    const id = sanitizeText(req.params.id, 64);
+    try {
+      const existing = await getServerPlan(id);
+      if (!existing) return res.status(404).json({ error: "Plan not found" });
+      const deleted = await deleteServerPlan(id);
+      if (!deleted) return res.status(404).json({ error: "Plan not found" });
+      persistAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorEmail: actor.email,
+        action: "SERVER_PLAN_DELETED",
+        category: "ADMIN",
+        target: existing.name,
+        source: detectSource(req),
+        status: "WARNING",
+        ipAddress: req.ip || "unknown",
+        metadata: { planId: id }
+      });
+      res.json({ success: true });
+    } catch (err) {
+      console.error("[servers/plans/delete]", err.message);
+      res.status(500).json({ error: "Could not delete the plan" });
+    }
+  });
   app.delete("/api/v1/admin/users/:id", async (req, res) => {
     const actor = requireAdmin(req, res);
     if (!actor) return;
@@ -8083,7 +8692,7 @@ async function buildApp() {
   async function deliverWebhook(wh, event, data) {
     const payload = { event, timestamp: (/* @__PURE__ */ new Date()).toISOString(), data };
     const body = JSON.stringify(payload);
-    const signature = crypto9.createHmac("sha256", wh.secret).update(body).digest("hex");
+    const signature = crypto10.createHmac("sha256", wh.secret).update(body).digest("hex");
     const started = Date.now();
     let statusCode = 0;
     let ok = false;
@@ -8630,10 +9239,10 @@ async function buildApp() {
     }
   });
   const DOWNLOAD_LINK_TTL_MS = 10 * 60 * 1e3;
-  const downloadSignKey = crypto9.createHash("sha256").update(
-    `download-link:${process.env.DATABASE_URL || process.env.ADMIN_API_TOKEN || `local-${crypto9.randomBytes(32).toString("hex")}`}`
+  const downloadSignKey = crypto10.createHash("sha256").update(
+    `download-link:${process.env.DATABASE_URL || process.env.ADMIN_API_TOKEN || `local-${crypto10.randomBytes(32).toString("hex")}`}`
   ).digest();
-  const signDownloadLink = (type, exp, uid) => crypto9.createHmac("sha256", downloadSignKey).update(`${type}|${exp}|${uid}`).digest("base64url");
+  const signDownloadLink = (type, exp, uid) => crypto10.createHmac("sha256", downloadSignKey).update(`${type}|${exp}|${uid}`).digest("base64url");
   app.get("/api/v1/download/releases", (_req, res) => {
     res.json({
       success: true,
@@ -8672,7 +9281,7 @@ async function buildApp() {
         if (typeValid && sig && Number.isFinite(exp) && exp > now && exp <= now + DOWNLOAD_LINK_TTL_MS) {
           const expected = Buffer.from(signDownloadLink(type, exp, uid), "utf8");
           const given = Buffer.from(sig, "utf8");
-          valid = expected.length === given.length && crypto9.timingSafeEqual(expected, given);
+          valid = expected.length === given.length && crypto10.timingSafeEqual(expected, given);
         }
         if (!valid) return res.status(401).json({ error: "Authentication required" });
         actor = db.users.find((u) => u.id === uid) || {
@@ -8761,6 +9370,7 @@ var init_server = __esm({
     init_githubStore();
     init_publishStore();
     init_oauthAppsStore();
+    init_serverOrdersStore();
     init_security();
     memoryComments = [];
     memoryAiChat = [];

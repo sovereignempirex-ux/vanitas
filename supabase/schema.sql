@@ -364,6 +364,42 @@ create table if not exists public.oauth_tokens (
 create index if not exists oauth_tokens_expiry_idx on public.oauth_tokens (expires_at);
 create index if not exists oauth_tokens_user_idx on public.oauth_tokens (user_id);
 
+-- ---------------------------------------------------------------------------
+-- Server request orders ("طلب سيرفرات"). Plans are authored by an admin;
+-- requests arrive from the embeddable widget or the public API and move
+-- pending → approved → delivered | rejected. plan_name is a snapshot: a
+-- request keeps its label even if the plan later changes or disappears
+-- (deliberately no FK). The tracking token is stored as sha256 only.
+-- ---------------------------------------------------------------------------
+create table if not exists public.server_plans (
+  id text primary key,
+  name text not null check (char_length(name) between 1 and 80),
+  specs text not null default '',
+  price text not null default '',
+  description text not null default '',
+  active boolean not null default true,
+  created_at timestamptz not null default now()
+);
+create table if not exists public.server_requests (
+  id text primary key,
+  plan_id text not null default '',
+  plan_name text not null check (char_length(plan_name) between 1 and 120),
+  requester_name text not null check (char_length(requester_name) between 1 and 80),
+  requester_email text not null check (char_length(requester_email) between 3 and 160),
+  note text not null default '',
+  status text not null default 'pending' check (status in ('pending','approved','delivered','rejected')),
+  review_note text not null default '',
+  host text not null default '',
+  ssh_port int not null default 22,
+  ssh_user text not null default '',
+  credentials_note text not null default '',
+  track_token_hash text not null unique,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists server_requests_status_idx on public.server_requests (status, created_at desc);
+create index if not exists server_requests_track_idx on public.server_requests (track_token_hash);
+
 -- RLS for auth tables: deny direct browser access — server role only.
 alter table public.users enable row level security;
 alter table public.auth_sessions enable row level security;
@@ -390,7 +426,8 @@ declare
     'product_suggestions', 'api_keys', 'audit_logs', 'admin_invites', 'webhooks',
     'comments', 'users', 'auth_sessions', 'user_identities', 'ai_chat_messages', 'direct_messages',
     'github_tokens', 'published_projects', 'published_snippets',
-    'oauth_apps', 'oauth_codes', 'oauth_tokens'
+    'oauth_apps', 'oauth_codes', 'oauth_tokens',
+    'server_plans', 'server_requests'
   ];
 begin
   foreach tbl in array vanitas_tables loop

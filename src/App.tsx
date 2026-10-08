@@ -27,6 +27,7 @@ import { DownloadsView } from './components/views/DownloadsView.tsx';
 import { SocialView } from './components/views/SocialView.tsx';
 import { PublishView } from './components/views/PublishView.tsx';
 import { OAuthAppsView } from './components/views/OAuthAppsView.tsx';
+import { ServerOrdersView } from './components/views/ServerOrdersView.tsx';
 import { OAuthConsentView } from './components/views/OAuthConsentView.tsx';
 
 const AppContent: React.FC = () => {
@@ -117,6 +118,8 @@ const AppContent: React.FC = () => {
         return <PublishView />;
       case 'oauth-apps':
         return <OAuthAppsView />;
+      case 'server-orders':
+        return <ServerOrdersView />;
       default:
         return <OverviewView />;
     }

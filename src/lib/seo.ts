@@ -72,6 +72,11 @@ export const VIEW_SEO: Record<string, SeoEntry> = {
     description:
       'Register third-party applications, issue client credentials and review every app authorized to sign in with your Vanitas account.',
   },
+  'server-orders': {
+    title: 'Server Requests',
+    description:
+      'Review incoming server hosting requests, move them through pending → approved → delivered, and publish the plan catalog served by the embeddable widget.',
+  },
   security: {
     title: 'Security Center',
     description:

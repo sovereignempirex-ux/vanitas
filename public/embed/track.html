@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Track your server request — Vanitas</title>
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;min-height:100%;background:#0b1120;color:#cbd5e1;
+    font:14px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+  body{display:flex;justify-content:center;padding:32px 16px}
+  .wrap{width:100%;max-width:520px}
+  h1{margin:0 0 6px;font-size:20px;color:#f1f5f9}
+  .sub{margin:0 0 20px;font-size:13px;color:#64748b}
+  form{display:flex;gap:8px;flex-wrap:wrap}
+  input{flex:1;min-width:220px;padding:11px 13px;border-radius:10px;background:rgba(2,6,23,.72);
+    border:1px solid rgba(148,163,184,.25);color:#e2e8f0;font:13px ui-monospace,SFMono-Regular,Menlo,monospace;
+    outline:none}
+  input:focus{border-color:#38bdf8}
+  button{padding:11px 18px;border:0;border-radius:10px;background:#0ea5e9;color:#04101d;
+    font:700 13px system-ui,sans-serif;cursor:pointer}
+  button:hover{background:#38bdf8}
+  button[disabled]{opacity:.55;cursor:default}
+  #err{width:100%;margin:10px 0 0;padding:9px 11px;border-radius:8px;background:rgba(244,63,94,.12);
+    color:#fda4af;font-size:12px}
+  #err[hidden]{display:none}
+  #result{margin-top:20px}
+  #result[hidden]{display:none}
+  .head{display:flex;align-items:center;gap:10px;margin-bottom:4px}
+  .head h2{margin:0;font-size:16px;color:#f1f5f9}
+  .badge{display:inline-block;padding:3px 10px;border-radius:999px;font:700 10px/1.5 system-ui,sans-serif;
+    text-transform:uppercase;letter-spacing:.08em}
+  .st-pending{background:rgba(245,158,11,.15);color:#fcd34d}
+  .st-approved{background:rgba(59,130,246,.15);color:#93c5fd}
+  .st-delivered{background:rgba(16,185,129,.15);color:#6ee7b7}
+  .st-rejected{background:rgba(244,63,94,.15);color:#fda4af}
+  .card{margin-top:12px;padding:14px;border-radius:12px;background:rgba(2,6,23,.6);
+    border:1px solid rgba(148,163,184,.16)}
+  .card+.card{margin-top:10px}
+  .card h3{margin:0 0 10px;font-size:12px;color:#94a3b8;text-transform:uppercase;letter-spacing:.08em}
+  dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:7px 12px;font-size:13px}
+  dt{color:#64748b}
+  dd{margin:0;color:#e2e8f0;word-break:break-word}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#7dd3fc;user-select:all}
+  .note{margin-top:12px;padding:10px 12px;border-radius:8px;background:rgba(56,189,248,.08);
+    border-left:2px solid #38bdf8;font-size:13px;color:#bae6fd;white-space:pre-wrap}
+  footer{margin-top:22px;font-size:12px}
+  footer a{color:#7dd3fc}
+</style>
+</head>
+<body>
+<main class="wrap">
+  <h1>Server request status</h1>
+  <p class="sub">Paste the tracking token you received when you submitted your request — no account needed.</p>
+  <form id="form">
+    <input id="token" type="text" placeholder="vnt_strk_…" spellcheck="false" autocomplete="off" aria-label="Tracking token">
+    <button id="go" type="submit">Check status</button>
+    <p id="err" hidden></p>
+  </form>
+  <section id="result" hidden aria-live="polite"></section>
+  <footer><a href="/">← Vanitas home</a></footer>
+</main>
+<script src="/embed/track.js"></script>
+</body>
+</html>

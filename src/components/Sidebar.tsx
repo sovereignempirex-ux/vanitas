@@ -24,6 +24,7 @@ import {
   Download,
   MessagesSquare,
   Rocket,
+  Server,
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -77,6 +78,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isMobileOpen, setIsMobileOpen 
       { id: 'admin-center', label: 'Overview & Users', icon: Users, badge: 'RBAC' },
       { id: 'admin-moderation', label: 'Moderation & Suggestions', icon: MessageSquare, badge: 'Live' },
       { id: 'admin-logs', label: 'Audit Logs & CSV', icon: ScrollText, badge: null },
+      { id: 'server-orders', label: 'Server Requests', icon: Server, badge: 'Orders' },
       { id: 'admin-permissions', label: 'Permissions Matrix', icon: Lock, badge: null },
       { id: 'admin-flags', label: 'Feature Flags', icon: Sliders, badge: null },
       { id: 'admin-emergency', label: 'Emergency Controls', icon: AlertOctagon, badge: 'Critical' },
