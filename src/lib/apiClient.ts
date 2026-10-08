@@ -37,6 +37,7 @@ import {
   PublishedSnippet,
   OAuthApp,
   OAuthAuthorizeValidation,
+  OAuthGrant,
 } from '../types.ts';
 
 class ApiClient {
@@ -296,16 +297,40 @@ class ApiClient {
     return this.request<{ apps: OAuthApp[]; availableScopes: string[] }>('/oauth/apps');
   }
 
-  /** Register a third-party app. The client secret comes back
-   *  exactly once — the UI must show it in a reveal-once block. */
-  async createOAuthApp(params: { name: string; redirectUris: string[]; scopes: string[] }) {
-    return this.request<{ app: OAuthApp; clientSecret: string; revealNote: string }>('/oauth/apps', {
+  /** Register a third-party app. `type: 'public'` (SPA/mobile) mints NO
+   *  secret — PKCE becomes mandatory instead. Confidential apps get the
+   *  client secret back exactly once, in a reveal-once block. */
+  async createOAuthApp(params: {
+    name: string;
+    redirectUris: string[];
+    scopes: string[];
+    type?: 'confidential' | 'public';
+  }) {
+    return this.request<{ app: OAuthApp; clientSecret: string | null; revealNote: string }>('/oauth/apps', {
       method: 'POST', body: JSON.stringify(params),
     });
   }
 
   async deleteOAuthApp(id: string) {
     return this.request<{ success: boolean }>(`/oauth/apps/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  /** Apps with live access to this account (the "authorized apps" review). */
+  async listOAuthGrants() {
+    return this.request<{ grants: OAuthGrant[] }>('/oauth/grants');
+  }
+
+  /** Cut every live token this account granted to one app. */
+  async revokeOAuthGrant(appId: string) {
+    return this.request<{ success: boolean; revoked: number }>(
+      `/oauth/grants/${encodeURIComponent(appId)}`,
+      { method: 'DELETE' },
+    );
+  }
+
+  /** Withdraw every connected app at once ("sign out of all"). */
+  async revokeAllOAuthGrants() {
+    return this.request<{ success: boolean; revoked: number }>('/oauth/grants', { method: 'DELETE' });
   }
 
   /** Validate an incoming authorize request (called by the

@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useAuth } from '../../context/AuthContext.tsx';
 import { api } from '../../lib/apiClient.ts';
 import { OAuthAuthorizeValidation } from '../../types.ts';
+import { scopeMeta } from '../../lib/oauthScopes.ts';
 import {
   ShieldCheck,
   ShieldX,
@@ -16,19 +17,14 @@ import {
   AtSign,
   Image as ImageIcon,
   LogIn,
+  Unlink,
 } from 'lucide-react';
 
-const SCOPE_DETAILS: Record<string, { label: string; description: string; icon: React.ReactNode }> = {
-  profile: {
-    label: 'Basic profile',
-    description: 'Your public name, @username and avatar picture.',
-    icon: <UserIcon className="h-4 w-4 text-cyan-300" />,
-  },
-  email: {
-    label: 'Email address',
-    description: 'Your verified account email address.',
-    icon: <Mail className="h-4 w-4 text-cyan-300" />,
-  },
+/** Icons per scope id — the label/description text lives in the shared
+ *  oauthScopes module so consent and registration can never drift. */
+const SCOPE_ICONS: Record<string, React.ReactNode> = {
+  profile: <UserIcon className="h-4 w-4 text-cyan-300" />,
+  email: <Mail className="h-4 w-4 text-cyan-300" />,
 };
 
 type Phase =
@@ -179,17 +175,19 @@ export const OAuthConsentView: React.FC = () => {
                   This app will receive
                 </p>
                 {data.app.scopes.map((scope) => {
-                  const info = SCOPE_DETAILS[scope];
+                  const info = scopeMeta(scope);
                   return (
                     <div
                       key={scope}
                       className="flex items-start gap-3 rounded-xl border border-white/10 bg-slate-950/40 px-4 py-3"
                     >
-                      <span className="mt-0.5 flex-none">{info?.icon || <AtSign className="h-4 w-4 text-cyan-300" />}</span>
+                      <span className="mt-0.5 flex-none">
+                        {SCOPE_ICONS[scope] || <AtSign className="h-4 w-4 text-cyan-300" />}
+                      </span>
                       <div className="min-w-0">
-                        <p className="text-xs font-bold text-white">{info?.label || scope}</p>
+                        <p className="text-xs font-bold text-white">{info.label}</p>
                         <p className="mt-0.5 text-[11px] leading-relaxed text-slate-400">
-                          {info?.description || 'Access to the requested scope.'}
+                          {info.description}
                         </p>
                       </div>
                       <code className="ml-auto flex-none font-mono text-[10px] text-cyan-300/70">
@@ -229,6 +227,14 @@ export const OAuthConsentView: React.FC = () => {
                     returns to: {data.redirectUri}
                   </span>
                 </div>
+                {data.state && (
+                  <div className="mt-1.5 flex items-center gap-2">
+                    <AtSign className="h-3.5 w-3.5 flex-none text-slate-600" />
+                    <span className="truncate font-mono text-[11px] text-slate-600">
+                      state: {data.state}
+                    </span>
+                  </div>
+                )}
               </div>
 
               {/* Decisions */}
@@ -258,6 +264,11 @@ export const OAuthConsentView: React.FC = () => {
               <p className="mt-4 flex items-center justify-center gap-1.5 text-center text-[11px] text-slate-600">
                 <AlertTriangle className="h-3.5 w-3.5" />
                 Only allow this if you recognize the application and trust its redirect address.
+              </p>
+              <p className="mt-2 flex items-center justify-center gap-1.5 text-center text-[11px] text-slate-600">
+                <Unlink className="h-3.5 w-3.5" />
+                You can withdraw this access anytime from{' '}
+                <span className="text-slate-500">Dashboard → OAuth Apps → Apps with access</span>.
               </p>
             </>
           )}

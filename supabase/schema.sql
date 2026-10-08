@@ -179,9 +179,14 @@ create table if not exists public.users (
   location text not null default '',
   tech_tags jsonb not null default '[]',
   connected_accounts jsonb not null default '{"google":false,"github":false,"discord":false}',
+  -- Email proven by a social provider (or a verified-address link).
+  -- Password signups stay false — /oauth/userinfo reports it honestly.
+  email_verified boolean not null default false,
   created_at timestamptz not null default now(),
   last_login_at timestamptz
 );
+-- Upgrades for databases created before this column existed.
+alter table if exists public.users add column if not exists email_verified boolean not null default false;
 create unique index if not exists users_email_uniq on public.users (lower(email));
 create unique index if not exists users_username_unique_idx on public.users (lower(username)) where username <> '';
 create index if not exists users_role_idx on public.users (role);
@@ -323,10 +328,14 @@ create table if not exists public.oauth_apps (
   name text not null check (char_length(name) between 1 and 80),
   client_id text not null unique,
   client_secret_hash text not null,
+  -- Public client (SPA/mobile): holds no secret, PKCE mandatory.
+  -- Confidential client (server): authenticates with the secret hash.
+  is_public boolean not null default false,
   redirect_uris jsonb not null default '[]',
   scopes jsonb not null default '["profile"]',
   created_at timestamptz not null default now()
 );
+alter table if exists public.oauth_apps add column if not exists is_public boolean not null default false;
 create index if not exists oauth_apps_owner_idx on public.oauth_apps (owner_id, created_at desc);
 
 create table if not exists public.oauth_codes (

@@ -198,6 +198,13 @@ create table if not exists public.oauth_tokens (
 );
 create index if not exists oauth_tokens_expiry_idx on public.oauth_tokens (expires_at);
 create index if not exists oauth_tokens_user_idx on public.oauth_tokens (user_id);
+-- Email verification status. Only a social provider can prove an address
+-- (see upsertOAuthUser); password signups stay false, and /oauth/userinfo
+-- reports the column as-is instead of claiming verification.
+alter table if exists public.users add column if not exists email_verified boolean not null default false;
+-- OAuth provider: public clients (SPA/mobile) hold no secret and must use
+-- PKCE; confidential clients authenticate with their scrypt secret hash.
+alter table if exists public.oauth_apps add column if not exists is_public boolean not null default false;
 `;
 
 let schemaReady: Promise<void> | null = null;

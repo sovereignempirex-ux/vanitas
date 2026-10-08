@@ -192,6 +192,7 @@ export function rowToUser(row: Record<string, any>): User {
     role: row.role === 'ADMIN' ? 'ADMIN' : 'USER',
     verification: ['USER', 'DEVELOPER', 'ADMIN'].includes(row.verification) ? row.verification : '',
     twoFactorEnabled: !!row.two_factor_enabled,
+    emailVerified: !!row.email_verified,
     createdAt: iso(row.created_at) || new Date().toISOString(),
     lastLoginAt: iso(row.last_login_at) || iso(row.created_at) || new Date().toISOString(),
     connectedAccounts: row.connected_accounts || { google: false, github: false, discord: false },
@@ -265,6 +266,7 @@ export async function createAccount(params: { email: string; password: string; n
     role,
     verification: '',
     twoFactorEnabled: false,
+    emailVerified: false, // password signup — never proven
     createdAt: new Date().toISOString(),
     lastLoginAt: new Date().toISOString(),
     connectedAccounts: { google: false, github: false, discord: false },
@@ -928,6 +930,10 @@ export async function upsertOAuthUser(p: OAuthIdentityParams): Promise<User> {
   if (!providerId) throw new Error('oauth profile missing provider id');
   const identityKey = `${provider}:${providerId}`;
   const email = p.emailVerified && p.email ? p.email.trim().toLowerCase().slice(0, 120) : '';
+  // The address only ever lands on the account when the PROVIDER says it is
+  // verified (see the line above) — so `email` being set is itself the proof
+  // that this identity's email is trustworthy. Password signups never get it.
+  const emailVerified = !!email;
   const name = (p.name || 'OAuth User').trim().slice(0, 80) || 'OAuth User';
   const avatarUrl = String(p.avatarUrl || '').slice(0, 500) || DEFAULT_AVATAR;
   const nowIso = new Date().toISOString();
@@ -956,8 +962,12 @@ export async function upsertOAuthUser(p: OAuthIdentityParams): Promise<User> {
             'insert into public.user_identities (provider, provider_id, user_id) values ($1, $2, $3) on conflict (provider, provider_id) do nothing',
             [provider, providerId, row.id],
           );
+          // The provider just proved this address belongs to the user —
+          // the account's email is verified now (it may have started as
+          // a password signup without any verification).
+          await databasePool.query('update public.users set email_verified = true where id = $1', [row.id]);
           await markSocialLogin(row.id, provider);
-          return withConnectedAccount(rowToUser({ ...row, last_login_at: nowIso }), provider);
+          return withConnectedAccount(rowToUser({ ...row, last_login_at: nowIso, email_verified: true }), provider);
         }
       }
 
@@ -976,13 +986,13 @@ export async function upsertOAuthUser(p: OAuthIdentityParams): Promise<User> {
         username = await uniqueUsernameFromEmailPg(email || `${provider}${providerId}`);
         await client.query(
           `with new_user as (
-             insert into public.users (id, email, name, username, avatar_url, role, password_hash, created_at, last_login_at)
-             values ($1, lower($2), $3, $4, $5, $6, '', now(), now())
+             insert into public.users (id, email, name, username, avatar_url, role, password_hash, email_verified, created_at, last_login_at)
+             values ($1, lower($2), $3, $4, $5, $6, '', $7, now(), now())
              returning id
            )
            insert into public.user_identities (provider, provider_id, user_id)
-           select $7, $8, id from new_user`,
-          [id, email || fallbackOAuthEmail(provider, providerId), name, username, avatarUrl, finalRole, provider, providerId],
+           select $8, $9, id from new_user`,
+          [id, email || fallbackOAuthEmail(provider, providerId), name, username, avatarUrl, finalRole, emailVerified, provider, providerId],
         );
         await client.query('commit');
       } catch (err) {
@@ -1016,6 +1026,8 @@ export async function upsertOAuthUser(p: OAuthIdentityParams): Promise<User> {
     if (byEmail) {
       memoryIdentities.set(identityKey, byEmail.id);
       byEmail.lastLoginAt = nowIso;
+      // The provider proved the address — see the note in the PG branch.
+      byEmail.emailVerified = true;
       return withConnectedAccount(byEmail, provider);
     }
   }
@@ -1028,6 +1040,7 @@ export async function upsertOAuthUser(p: OAuthIdentityParams): Promise<User> {
     role: await pickInitialRole(email),
     verification: '',
     twoFactorEnabled: false,
+    emailVerified,
     createdAt: nowIso,
     lastLoginAt: nowIso,
     connectedAccounts: { google: false, github: false, discord: false },

@@ -40,6 +40,9 @@ import {
   resolveAccessToken,
   revokeAccessToken,
   purgeOAuthAppData,
+  listUserGrants,
+  revokeUserGrants,
+  revokeAllUserGrants,
   verifyPkce,
   isValidRedirectUri,
   isKnownOAuthScope,
@@ -582,8 +585,10 @@ export async function buildApp() {
   // OAuth provider surface. The authorize-validation + consent
   // decision endpoints are path-parameter-free but hit by
   // browsers; the token endpoint exchanges credentials, so it
-  // gets a tighter per-IP budget against spraying.
-  app.use('/api/v1/oauth/', rateLimit({ windowMs: 60_000, max: 60, perIpOnly: true }));
+  // gets a tighter per-IP budget against spraying. userinfo is
+  // machine-to-machine (one egress IP per third-party backend),
+  // so the shared surface gets a wider 120/min ceiling.
+  app.use('/api/v1/oauth/', rateLimit({ windowMs: 60_000, max: 120, perIpOnly: true }));
   app.use('/api/v1/oauth/token', rateLimit({ windowMs: 60_000, max: 30, perIpOnly: true }));
   app.use('/api/v1/youtube/', rateLimit({ windowMs: 60_000, max: 60 }));
   app.use('/api/v1/search/', rateLimit({ windowMs: 60_000, max: 60 }));
@@ -3138,6 +3143,12 @@ export async function buildApp() {
     if (!methodRaw && challenge) {
       return { ok: false, error: 'code_challenge_method is required when code_challenge is set' };
     }
+    // A public client holds no secret — possession of the PKCE verifier
+    // is the ONLY thing standing between an intercepted code and an
+    // attacker, so the flow may not start without a challenge.
+    if (app.isPublic && !challenge) {
+      return { ok: false, error: 'PKCE (code_challenge) is required for public clients' };
+    }
 
     return {
       ok: true,
@@ -3172,6 +3183,14 @@ export async function buildApp() {
     const actor = getActorUser(req);
     if (!actor) return res.status(401).json({ error: 'Authentication required' });
     const name = sanitizeText(req.body?.name, 80).trim();
+    // App type: 'confidential' (server-side, holds a secret) or 'public'
+    // (SPA/mobile — ships in the open, so no secret is ever minted and
+    // the authorize request MUST carry PKCE).
+    const typeRaw = sanitizeText(req.body?.type, 16);
+    if (typeRaw && typeRaw !== 'confidential' && typeRaw !== 'public') {
+      return res.status(400).json({ error: 'type must be "confidential" or "public"' });
+    }
+    const isPublic = typeRaw === 'public';
     const redirectUris = (Array.isArray(req.body?.redirectUris) ? req.body.redirectUris : [])
       .map((u: unknown) => sanitizeText(u, 2048).trim())
       .filter(Boolean);
@@ -3185,7 +3204,7 @@ export async function buildApp() {
     }
     for (const u of redirectUris) {
       if (!isValidRedirectUri(u)) {
-        return res.status(400).json({ error: `Invalid redirect URI: ${u.slice(0, 80)}` });
+        return res.status(400).json({ error: `Invalid redirect URI: ${u.slice(0, 80)} — https required (loopback http allowed)` });
       }
     }
     if (scopes.length === 0 || scopes.length > 5) {
@@ -3196,7 +3215,7 @@ export async function buildApp() {
     }
 
     try {
-      const { app, clientSecret } = await createOAuthApp({ ownerId: actor.id, name, redirectUris, scopes });
+      const { app, clientSecret } = await createOAuthApp({ ownerId: actor.id, name, redirectUris, scopes, isPublic });
       persistAuditLog({
         actorId: actor.id,
         actorName: actor.name,
@@ -3207,12 +3226,14 @@ export async function buildApp() {
         source: detectSource(req),
         status: 'SUCCESS',
         ipAddress: req.ip || 'unknown',
-        metadata: { redirectUris, scopes },
+        metadata: { redirectUris, scopes, type: isPublic ? 'public' : 'confidential' },
       });
       res.status(201).json({
         app,
         clientSecret,
-        revealNote: 'The client secret is shown exactly once — store it in a secure vault.',
+        revealNote: clientSecret
+          ? 'The client secret is shown exactly once — store it in a secure vault.'
+          : 'Public client: no secret exists. PKCE (code_challenge) is mandatory on every authorize request.',
       });
     } catch (err) {
       console.error('[oauth/apps/create]', (err as Error).message);
@@ -3225,6 +3246,9 @@ export async function buildApp() {
     if (!actor) return res.status(401).json({ error: 'Authentication required' });
     const id = sanitizeText(req.params.id, 64);
     try {
+      // Resolve first so the audit trail names the app, not just its id.
+      const owned = (await listOAuthApps(actor.id)).find((a) => a.id === id);
+      if (!owned) return res.status(404).json({ error: 'App not found' });
       const deleted = await deleteOAuthApp(id, actor.id);
       if (!deleted) return res.status(404).json({ error: 'App not found' });
       persistAuditLog({
@@ -3233,7 +3257,7 @@ export async function buildApp() {
         actorEmail: actor.email,
         action: 'OAUTH_APP_REVOKED',
         category: 'SECURITY',
-        target: `OAuth App: ${id}`,
+        target: `${owned.name} (${owned.clientId})`,
         source: detectSource(req),
         status: 'WARNING',
         ipAddress: req.ip || 'unknown',
@@ -3243,6 +3267,73 @@ export async function buildApp() {
     } catch (err) {
       console.error('[oauth/apps/delete]', (err as Error).message);
       res.status(500).json({ error: 'Could not delete the app' });
+    }
+  });
+
+  // ---- User-facing grants: review & withdraw every authorized app ----
+  // A user must always be able to see what they granted and take it back
+  // without hunting for the third-party app that received it.
+  app.get('/api/v1/oauth/grants', async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
+    try {
+      res.json({ grants: await listUserGrants(actor.id) });
+    } catch (err) {
+      console.error('[oauth/grants]', (err as Error).message);
+      res.status(500).json({ error: 'Could not load your authorized apps' });
+    }
+  });
+
+  // Revoke every live token this user granted to one app.
+  app.delete('/api/v1/oauth/grants/:appId', async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
+    const appId = sanitizeText(req.params.appId, 64);
+    try {
+      const revoked = await revokeUserGrants(actor.id, appId);
+      if (revoked > 0) {
+        persistAuditLog({
+          actorId: actor.id,
+          actorName: actor.name,
+          actorEmail: actor.email,
+          action: 'OAUTH_GRANT_REVOKED',
+          category: 'AUTH',
+          target: `OAuth App: ${appId}`,
+          source: detectSource(req),
+          status: 'WARNING',
+          ipAddress: req.ip || 'unknown',
+          metadata: { revoked },
+        });
+      }
+      res.json({ success: true, revoked });
+    } catch (err) {
+      console.error('[oauth/grants/delete]', (err as Error).message);
+      res.status(500).json({ error: 'Could not revoke the grant' });
+    }
+  });
+
+  // Withdraw EVERY grant at once — the OAuth twin of "Sign Out of All".
+  app.delete('/api/v1/oauth/grants', async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: 'Authentication required' });
+    try {
+      const revoked = await revokeAllUserGrants(actor.id);
+      persistAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorEmail: actor.email,
+        action: 'OAUTH_GRANTS_REVOKED_ALL',
+        category: 'AUTH',
+        target: 'All connected apps',
+        source: detectSource(req),
+        status: 'WARNING',
+        ipAddress: req.ip || 'unknown',
+        metadata: { revoked },
+      });
+      res.json({ success: true, revoked });
+    } catch (err) {
+      console.error('[oauth/grants/revoke-all]', (err as Error).message);
+      res.status(500).json({ error: 'Could not revoke grants' });
     }
   });
 
@@ -3356,9 +3447,19 @@ export async function buildApp() {
     const redirectUri = sanitizeText(req.body?.redirect_uri, 2048);
     const verifier = typeof req.body?.code_verifier === 'string' ? req.body.code_verifier.slice(0, 256) : null;
 
-    if (!clientId || !clientSecret) return res.status(401).json({ error: 'invalid_client' });
-    const app = await authenticateClient(clientId, clientSecret);
+    if (!clientId) return res.status(401).json({ error: 'invalid_client' });
+    const app = await lookupOAuthApp(clientId);
     if (!app) return res.status(401).json({ error: 'invalid_client' });
+    if (app.isPublic) {
+      // Public client (SPA/mobile): no secret exists. Authentication is
+      // client_id + the PKCE verifier — the code always carries a
+      // challenge because authorize enforces it for public clients.
+      // (A secret sent here is ignored; the app is public by design.)
+    } else if (!clientSecret) {
+      return res.status(401).json({ error: 'invalid_client' });
+    } else if (!(await authenticateClient(clientId, clientSecret))) {
+      return res.status(401).json({ error: 'invalid_client' });
+    }
     if (!rawCode) {
       return res.status(400).json({ error: 'invalid_request', error_description: 'code is required' });
     }
@@ -3375,6 +3476,14 @@ export async function buildApp() {
         error_description: 'The authorization code is invalid, expired or already used',
       });
     }
+    // Defense in depth: a public app's code must ALWAYS carry a challenge
+    // (enforced at authorize), so the verifier is never optional here.
+    if (app.isPublic && !record.codeChallenge) {
+      return res.status(400).json({
+        error: 'invalid_grant',
+        error_description: 'This code was issued without PKCE and cannot serve a public client',
+      });
+    }
     if (!verifyPkce(verifier, record.codeChallenge, record.codeChallengeMethod)) {
       return res.status(400).json({
         error: 'invalid_grant',
@@ -3383,13 +3492,16 @@ export async function buildApp() {
     }
 
     const token = await createAccessToken({ appId: app.id, userId: record.userId, scopes: record.scopes });
+    // Name the consenting user in the audit trail (blank actor rows are
+    // useless when reviewing "who granted this app access").
+    const grantor = await findUserById(record.userId).catch(() => null);
     persistAuditLog({
       actorId: record.userId,
-      actorName: '',
-      actorEmail: '',
+      actorName: grantor?.name || 'deleted user',
+      actorEmail: grantor?.email || '',
       action: 'OAUTH_TOKEN_ISSUED',
       category: 'AUTH',
-      target: `App ${app.clientId}`,
+      target: `App ${app.clientId} (${app.name})`,
       source: detectSource(req),
       status: 'SUCCESS',
       ipAddress: req.ip || 'unknown',
@@ -3409,6 +3521,12 @@ export async function buildApp() {
     const rawToken = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
     const record = rawToken ? await resolveAccessToken(rawToken) : null;
     if (!record) {
+      // RFC 6750: a 401 must carry the challenge so the client knows
+      // WHICH scheme failed and why, without guessing.
+      res.setHeader(
+        'WWW-Authenticate',
+        'Bearer error="invalid_token", error_description="The access token is invalid or expired"',
+      );
       return res.status(401).json({
         error: 'invalid_token',
         error_description: 'The access token is invalid or expired',
@@ -3417,6 +3535,10 @@ export async function buildApp() {
     try {
       const result = await findUserById(record.userId);
       if (!result) {
+        res.setHeader(
+          'WWW-Authenticate',
+          'Bearer error="invalid_token", error_description="The account no longer exists"',
+        );
         return res.status(401).json({
           error: 'invalid_token',
           error_description: 'The account no longer exists',
@@ -3430,7 +3552,10 @@ export async function buildApp() {
       };
       if (record.scopes.includes('email')) {
         profile.email = result.email;
-        profile.email_verified = true;
+        // Honest by design: true only when a social provider proved the
+        // address (see authStore). Password signups are reported false —
+        // third-party apps must never treat an unproven email as verified.
+        profile.email_verified = result.emailVerified === true;
       }
       res.json(profile);
     } catch (err) {

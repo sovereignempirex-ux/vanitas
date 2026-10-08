@@ -59,6 +59,10 @@ export interface User {
   /** Verification badge granted by an admin — see VerificationType. */
   verification: VerificationType;
   twoFactorEnabled: boolean;
+  /** True only when the account's email was proven by a social provider
+   *  (Google/GitHub/Discord verified it) or linked via a verified address.
+   *  Password signups stay false — Vanitas never claims otherwise. */
+  emailVerified?: boolean;
   createdAt: string;
   lastLoginAt: string;
   connectedAccounts: {
@@ -605,15 +609,34 @@ export interface GitHubRepoInfo {
 }
 
 /** A third-party OAuth application registered by the user.
- *  The client secret is returned exactly once — on creation. */
+ *  The client secret is returned exactly once — on creation —
+ *  and only for confidential apps; public clients (SPA/mobile)
+ *  authenticate with PKCE and never receive a secret. */
 export interface OAuthApp {
   id: string;
   ownerId: string;
   name: string;
   clientId: string;
+  /** Public client → PKCE required, no secret exists. */
+  isPublic: boolean;
   redirectUris: string[];
   scopes: string[];
   createdAt: string;
+}
+
+/** An app the signed-in user has granted access to their account
+ *  (one entry per app, aggregated across its active tokens). */
+export interface OAuthGrant {
+  appId: string;
+  name: string;
+  clientId: string;
+  isPublic: boolean;
+  scopes: string[];
+  /** Newest token issued for this app. */
+  grantedAt: string;
+  /** Expiry of the newest token. */
+  expiresAt: string;
+  activeTokens: number;
 }
 
 /** Validated authorize request + signed consent ticket. */
@@ -622,13 +645,6 @@ export interface OAuthAuthorizeValidation {
   app: { name: string; clientId: string; scopes: string[] };
   redirectUri: string;
   state: string;
-}
-
-/** OAuth scope definitions shown in the consent screen. */
-export interface OAuthScopeInfo {
-  id: string;
-  label: string;
-  description: string;
 }
 
 export interface ExternalDatabaseConfig {

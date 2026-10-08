@@ -67,6 +67,11 @@ export const VIEW_SEO: Record<string, SeoEntry> = {
     title: 'Audit Logs',
     description: 'Search and export the immutable audit trail of authentication, key and gateway events on Vanitas.',
   },
+  'oauth-apps': {
+    title: 'OAuth Apps',
+    description:
+      'Register third-party applications, issue client credentials and review every app authorized to sign in with your Vanitas account.',
+  },
   security: {
     title: 'Security Center',
     description:

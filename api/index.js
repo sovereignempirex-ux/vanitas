@@ -1059,6 +1059,13 @@ create table if not exists public.oauth_tokens (
 );
 create index if not exists oauth_tokens_expiry_idx on public.oauth_tokens (expires_at);
 create index if not exists oauth_tokens_user_idx on public.oauth_tokens (user_id);
+-- Email verification status. Only a social provider can prove an address
+-- (see upsertOAuthUser); password signups stay false, and /oauth/userinfo
+-- reports the column as-is instead of claiming verification.
+alter table if exists public.users add column if not exists email_verified boolean not null default false;
+-- OAuth provider: public clients (SPA/mobile) hold no secret and must use
+-- PKCE; confidential clients authenticate with their scrypt secret hash.
+alter table if exists public.oauth_apps add column if not exists is_public boolean not null default false;
 `;
     schemaReady = null;
   }
@@ -1355,6 +1362,7 @@ function rowToUser(row) {
     role: row.role === "ADMIN" ? "ADMIN" : "USER",
     verification: ["USER", "DEVELOPER", "ADMIN"].includes(row.verification) ? row.verification : "",
     twoFactorEnabled: !!row.two_factor_enabled,
+    emailVerified: !!row.email_verified,
     createdAt: iso3(row.created_at) || (/* @__PURE__ */ new Date()).toISOString(),
     lastLoginAt: iso3(row.last_login_at) || iso3(row.created_at) || (/* @__PURE__ */ new Date()).toISOString(),
     connectedAccounts: row.connected_accounts || { google: false, github: false, discord: false }
@@ -1408,6 +1416,8 @@ async function createAccount(params) {
     role,
     verification: "",
     twoFactorEnabled: false,
+    emailVerified: false,
+    // password signup — never proven
     createdAt: (/* @__PURE__ */ new Date()).toISOString(),
     lastLoginAt: (/* @__PURE__ */ new Date()).toISOString(),
     connectedAccounts: { google: false, github: false, discord: false }
@@ -1902,6 +1912,7 @@ async function upsertOAuthUser(p) {
   if (!providerId) throw new Error("oauth profile missing provider id");
   const identityKey = `${provider}:${providerId}`;
   const email = p.emailVerified && p.email ? p.email.trim().toLowerCase().slice(0, 120) : "";
+  const emailVerified = !!email;
   const name = (p.name || "OAuth User").trim().slice(0, 80) || "OAuth User";
   const avatarUrl = String(p.avatarUrl || "").slice(0, 500) || DEFAULT_AVATAR;
   const nowIso = (/* @__PURE__ */ new Date()).toISOString();
@@ -1926,8 +1937,9 @@ async function upsertOAuthUser(p) {
             "insert into public.user_identities (provider, provider_id, user_id) values ($1, $2, $3) on conflict (provider, provider_id) do nothing",
             [provider, providerId, row.id]
           );
+          await databasePool.query("update public.users set email_verified = true where id = $1", [row.id]);
           await markSocialLogin(row.id, provider);
-          return withConnectedAccount(rowToUser({ ...row, last_login_at: nowIso }), provider);
+          return withConnectedAccount(rowToUser({ ...row, last_login_at: nowIso, email_verified: true }), provider);
         }
       }
       const client = await databasePool.connect();
@@ -1942,13 +1954,13 @@ async function upsertOAuthUser(p) {
         username = await uniqueUsernameFromEmailPg(email || `${provider}${providerId}`);
         await client.query(
           `with new_user as (
-             insert into public.users (id, email, name, username, avatar_url, role, password_hash, created_at, last_login_at)
-             values ($1, lower($2), $3, $4, $5, $6, '', now(), now())
+             insert into public.users (id, email, name, username, avatar_url, role, password_hash, email_verified, created_at, last_login_at)
+             values ($1, lower($2), $3, $4, $5, $6, '', $7, now(), now())
              returning id
            )
            insert into public.user_identities (provider, provider_id, user_id)
-           select $7, $8, id from new_user`,
-          [id, email || fallbackOAuthEmail(provider, providerId), name, username, avatarUrl, finalRole, provider, providerId]
+           select $8, $9, id from new_user`,
+          [id, email || fallbackOAuthEmail(provider, providerId), name, username, avatarUrl, finalRole, emailVerified, provider, providerId]
         );
         await client.query("commit");
       } catch (err) {
@@ -1980,6 +1992,7 @@ async function upsertOAuthUser(p) {
     if (byEmail) {
       memoryIdentities.set(identityKey, byEmail.id);
       byEmail.lastLoginAt = nowIso;
+      byEmail.emailVerified = true;
       return withConnectedAccount(byEmail, provider);
     }
   }
@@ -1992,6 +2005,7 @@ async function upsertOAuthUser(p) {
     role: await pickInitialRole(email),
     verification: "",
     twoFactorEnabled: false,
+    emailVerified,
     createdAt: nowIso,
     lastLoginAt: nowIso,
     connectedAccounts: { google: false, github: false, discord: false }
@@ -4613,6 +4627,7 @@ function mapAppRow(row) {
     ownerId: row.owner_id,
     name: row.name,
     clientId: row.client_id,
+    isPublic: !!row.is_public,
     redirectUris: redirectUris.map(String),
     scopes: scopes.map(String),
     createdAt: iso2(row.created_at)
@@ -4652,6 +4667,24 @@ async function verifyClientSecret(secret, stored) {
   if (a.length !== b.length || a.length === 0) return false;
   return crypto8.timingSafeEqual(a, b);
 }
+function sweepExpiredOAuthRows() {
+  if (++sinceSweep < 100) return;
+  sinceSweep = 0;
+  if (!databasePool) {
+    const now = Date.now();
+    for (let i = memoryCodes.length - 1; i >= 0; i--) {
+      const c = memoryCodes[i];
+      if (c.used || Date.parse(c.expiresAt) <= now) memoryCodes.splice(i, 1);
+    }
+    const cutoff = now - 7 * 24 * 60 * 60 * 1e3;
+    for (let i = memoryTokens2.length - 1; i >= 0; i--) {
+      if (Date.parse(memoryTokens2[i].expiresAt) < cutoff) memoryTokens2.splice(i, 1);
+    }
+    return;
+  }
+  void databasePool.query("delete from public.oauth_codes where expires_at < now() - interval '1 day'").catch(() => void 0);
+  void databasePool.query("delete from public.oauth_tokens where expires_at < now() - interval '7 days'").catch(() => void 0);
+}
 function isValidRedirectUri(value) {
   if (typeof value !== "string" || value.length > 2048) return false;
   let u;
@@ -4660,38 +4693,41 @@ function isValidRedirectUri(value) {
   } catch {
     return false;
   }
-  if (u.protocol !== "https:" && u.protocol !== "http:") return false;
   if (u.username || u.password || u.hash) return false;
   const host = u.hostname.toLowerCase();
-  if (host === "localhost" || host.endsWith(".localhost") || host === "127.0.0.1" || host === "::1") return false;
+  const isLoopback = host === "localhost" || host.endsWith(".localhost") || host === "127.0.0.1" || host === "[::1]";
+  if (isLoopback) return u.protocol === "http:" || u.protocol === "https:";
+  if (u.protocol !== "https:") return false;
   if (/^10\.|^172\.(1[6-9]|2\d|3[01])\.|^192\.168\./.test(host)) return false;
   if (/^169\.254\.|^127\.|^0\.|^100\.6[4-9]\.|^100\.(7\d|8\d|9\d|1[01]\d|2[0-6]\d)\.|^22[4-9]\.|^23\d\./.test(host)) return false;
   return true;
 }
 async function createOAuthApp(params) {
+  const isPublic = params.isPublic === true;
   const app = {
     id: secureId("oa"),
     ownerId: params.ownerId,
     name: params.name,
     clientId: secureToken("vnt_oa_", 18),
+    isPublic,
     redirectUris: params.redirectUris,
     scopes: params.scopes,
     createdAt: (/* @__PURE__ */ new Date()).toISOString()
   };
-  const clientSecret = secureToken("vnt_oa_sec_", 30);
+  const clientSecret = isPublic ? null : secureToken("vnt_oa_sec_", 30);
   if (!databasePool) {
     memoryApps.push(app);
     memoryApps.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
-    memorySecrets.set(app.clientId, clientSecret);
+    if (clientSecret) memorySecrets.set(app.clientId, clientSecret);
     return { app, clientSecret };
   }
   await ensureSchema();
-  const secretHash = await hashClientSecret(clientSecret);
+  const secretHash = clientSecret ? await hashClientSecret(clientSecret) : "";
   await databasePool.query(
     `insert into public.oauth_apps
-       (id, owner_id, name, client_id, client_secret_hash, redirect_uris, scopes)
-     values ($1, $2, $3, $4, $5, $6, $7)`,
-    [app.id, app.ownerId, app.name, app.clientId, secretHash, app.redirectUris, app.scopes]
+       (id, owner_id, name, client_id, client_secret_hash, is_public, redirect_uris, scopes)
+     values ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [app.id, app.ownerId, app.name, app.clientId, secretHash, isPublic, app.redirectUris, app.scopes]
   );
   return { app, clientSecret };
 }
@@ -4714,6 +4750,7 @@ async function lookupOAuthApp(clientId) {
     ownerId: app.ownerId,
     name: app.name,
     clientId: app.clientId,
+    isPublic: app.isPublic,
     redirectUris: app.redirectUris,
     scopes: app.scopes,
     createdAt: app.createdAt
@@ -4757,9 +4794,15 @@ async function findAppByClientId(clientId) {
 async function authenticateClient(clientId, clientSecret) {
   const app = await findAppByClientId(clientId);
   if (!app) return null;
+  if (!clientSecret) return null;
   if (!databasePool) {
-    return memorySecrets.get(app.clientId) === clientSecret ? app : null;
+    const expected = memorySecrets.get(app.clientId);
+    if (!expected) return null;
+    const a = crypto8.createHash("sha256").update(clientSecret).digest();
+    const b = crypto8.createHash("sha256").update(expected).digest();
+    return crypto8.timingSafeEqual(a, b) ? app : null;
   }
+  if (!app.secretHash) return null;
   const ok = await verifyClientSecret(clientSecret, app.secretHash);
   return ok ? app : null;
 }
@@ -4776,6 +4819,7 @@ async function createAuthorizationCode(params) {
     expiresAt: new Date(Date.now() + AUTH_CODE_TTL_MS).toISOString(),
     used: false
   };
+  sweepExpiredOAuthRows();
   if (!databasePool) {
     memoryCodes.push(record);
     return code;
@@ -4830,14 +4874,17 @@ async function consumeAuthorizationCode(rawCode) {
 }
 async function createAccessToken(params) {
   const token = secureToken("vnt_at_", 30);
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
   const record = {
     tokenHash: sha256Hex(token),
     appId: params.appId,
     userId: params.userId,
     scopes: params.scopes,
     expiresAt: new Date(Date.now() + ACCESS_TOKEN_TTL_MS).toISOString(),
+    createdAt: nowIso,
     revoked: false
   };
+  sweepExpiredOAuthRows();
   if (!databasePool) {
     memoryTokens2.push(record);
     return token;
@@ -4871,6 +4918,7 @@ async function resolveAccessToken(rawToken) {
     userId: row.user_id,
     scopes: (Array.isArray(row.scopes) ? row.scopes : []).map(String),
     expiresAt: iso2(row.expires_at),
+    createdAt: iso2(row.created_at),
     revoked: false
   };
 }
@@ -4904,6 +4952,88 @@ function purgeOAuthAppData(ownerId) {
     if (appIds.has(memoryTokens2[i].appId) || memoryTokens2[i].userId === ownerId) memoryTokens2.splice(i, 1);
   }
 }
+async function listUserGrants(userId) {
+  const byApp = /* @__PURE__ */ new Map();
+  const absorb = (appId, name, clientId, isPublic, scopes, grantedAt, expiresAt) => {
+    let grant = byApp.get(appId);
+    if (!grant) {
+      grant = { appId, name, clientId, isPublic, scopes: [], grantedAt, expiresAt, activeTokens: 0 };
+      byApp.set(appId, grant);
+    }
+    for (const s of scopes) if (!grant.scopes.includes(s)) grant.scopes.push(s);
+    if (grantedAt > grant.grantedAt) grant.grantedAt = grantedAt;
+    if (expiresAt > grant.expiresAt) grant.expiresAt = expiresAt;
+    grant.activeTokens += 1;
+  };
+  if (!databasePool) {
+    const now = Date.now();
+    for (const t of memoryTokens2) {
+      if (t.userId !== userId || t.revoked || Date.parse(t.expiresAt) <= now) continue;
+      const app = memoryApps.find((a) => a.id === t.appId);
+      if (!app) continue;
+      absorb(app.id, app.name, app.clientId, app.isPublic, t.scopes, t.createdAt, t.expiresAt);
+    }
+    return Array.from(byApp.values()).sort((a, b) => a.grantedAt < b.grantedAt ? 1 : -1);
+  }
+  await ensureSchema();
+  const r = await databasePool.query(
+    `select t.scopes, t.expires_at, t.created_at,
+            a.id as app_id, a.name, a.client_id, a.is_public
+       from public.oauth_tokens t
+       join public.oauth_apps a on a.id = t.app_id
+      where t.user_id = $1 and t.revoked = false and t.expires_at > now()
+      order by t.created_at desc`,
+    [userId]
+  );
+  for (const row of r.rows) {
+    absorb(
+      row.app_id,
+      row.name,
+      row.client_id,
+      !!row.is_public,
+      (Array.isArray(row.scopes) ? row.scopes : []).map(String),
+      iso2(row.created_at),
+      iso2(row.expires_at)
+    );
+  }
+  return Array.from(byApp.values());
+}
+async function revokeUserGrants(userId, appId) {
+  if (!databasePool) {
+    let n = 0;
+    for (const t of memoryTokens2) {
+      if (t.userId === userId && t.appId === appId && !t.revoked) {
+        t.revoked = true;
+        n += 1;
+      }
+    }
+    return n;
+  }
+  await ensureSchema();
+  const r = await databasePool.query(
+    "update public.oauth_tokens set revoked = true where user_id = $1 and app_id = $2 and revoked = false returning token_hash",
+    [userId, appId]
+  );
+  return r.rowCount ?? 0;
+}
+async function revokeAllUserGrants(userId) {
+  if (!databasePool) {
+    let n = 0;
+    for (const t of memoryTokens2) {
+      if (t.userId === userId && !t.revoked) {
+        t.revoked = true;
+        n += 1;
+      }
+    }
+    return n;
+  }
+  await ensureSchema();
+  const r = await databasePool.query(
+    "update public.oauth_tokens set revoked = true where user_id = $1 and revoked = false returning token_hash",
+    [userId]
+  );
+  return r.rowCount ?? 0;
+}
 function verifyPkce(verifier, challenge, method) {
   if (!challenge) return true;
   if (!verifier || verifier.length < 43 || verifier.length > 128) return false;
@@ -4920,7 +5050,7 @@ function verifyPkce(verifier, challenge, method) {
   if (a.length !== b.length || a.length === 0) return false;
   return crypto8.timingSafeEqual(a, b);
 }
-var OAUTH_SCOPES, AUTH_CODE_TTL_MS, ACCESS_TOKEN_TTL_MS, memoryApps, memoryCodes, memoryTokens2, iso2, sha256Hex, memorySecrets;
+var OAUTH_SCOPES, AUTH_CODE_TTL_MS, ACCESS_TOKEN_TTL_MS, memoryApps, memoryCodes, memoryTokens2, iso2, sha256Hex, sinceSweep, memorySecrets;
 var init_oauthAppsStore = __esm({
   "src/server/oauthAppsStore.ts"() {
     init_pg();
@@ -4933,6 +5063,7 @@ var init_oauthAppsStore = __esm({
     memoryTokens2 = [];
     iso2 = (v) => v instanceof Date ? v.toISOString() : String(v || (/* @__PURE__ */ new Date()).toISOString());
     sha256Hex = (value) => crypto8.createHash("sha256").update(value).digest("hex");
+    sinceSweep = 0;
     memorySecrets = /* @__PURE__ */ new Map();
   }
 });
@@ -5298,7 +5429,7 @@ async function buildApp() {
   app.use("/api/v1/members/", rateLimit({ windowMs: 6e4, max: 60, perIpOnly: true }));
   app.use("/api/v1/github/", rateLimit({ windowMs: 6e4, max: 30 }));
   app.use("/api/v1/publish/", rateLimit({ windowMs: 6e4, max: 60, perIpOnly: true }));
-  app.use("/api/v1/oauth/", rateLimit({ windowMs: 6e4, max: 60, perIpOnly: true }));
+  app.use("/api/v1/oauth/", rateLimit({ windowMs: 6e4, max: 120, perIpOnly: true }));
   app.use("/api/v1/oauth/token", rateLimit({ windowMs: 6e4, max: 30, perIpOnly: true }));
   app.use("/api/v1/youtube/", rateLimit({ windowMs: 6e4, max: 60 }));
   app.use("/api/v1/search/", rateLimit({ windowMs: 6e4, max: 60 }));
@@ -7366,6 +7497,9 @@ async function buildApp() {
     if (!methodRaw && challenge) {
       return { ok: false, error: "code_challenge_method is required when code_challenge is set" };
     }
+    if (app2.isPublic && !challenge) {
+      return { ok: false, error: "PKCE (code_challenge) is required for public clients" };
+    }
     return {
       ok: true,
       app: app2,
@@ -7395,6 +7529,11 @@ async function buildApp() {
     const actor = getActorUser(req);
     if (!actor) return res.status(401).json({ error: "Authentication required" });
     const name = sanitizeText(req.body?.name, 80).trim();
+    const typeRaw = sanitizeText(req.body?.type, 16);
+    if (typeRaw && typeRaw !== "confidential" && typeRaw !== "public") {
+      return res.status(400).json({ error: 'type must be "confidential" or "public"' });
+    }
+    const isPublic = typeRaw === "public";
     const redirectUris = (Array.isArray(req.body?.redirectUris) ? req.body.redirectUris : []).map((u) => sanitizeText(u, 2048).trim()).filter(Boolean);
     const scopes = (Array.isArray(req.body?.scopes) ? req.body.scopes : ["profile"]).map((s) => sanitizeText(s, 32)).filter(Boolean);
     if (name.length < 3) return res.status(400).json({ error: "App name must be at least 3 characters" });
@@ -7403,7 +7542,7 @@ async function buildApp() {
     }
     for (const u of redirectUris) {
       if (!isValidRedirectUri(u)) {
-        return res.status(400).json({ error: `Invalid redirect URI: ${u.slice(0, 80)}` });
+        return res.status(400).json({ error: `Invalid redirect URI: ${u.slice(0, 80)} \u2014 https required (loopback http allowed)` });
       }
     }
     if (scopes.length === 0 || scopes.length > 5) {
@@ -7413,7 +7552,7 @@ async function buildApp() {
       if (!isKnownOAuthScope(s)) return res.status(400).json({ error: `Unknown scope "${s}"` });
     }
     try {
-      const { app: app2, clientSecret } = await createOAuthApp({ ownerId: actor.id, name, redirectUris, scopes });
+      const { app: app2, clientSecret } = await createOAuthApp({ ownerId: actor.id, name, redirectUris, scopes, isPublic });
       persistAuditLog({
         actorId: actor.id,
         actorName: actor.name,
@@ -7424,12 +7563,12 @@ async function buildApp() {
         source: detectSource(req),
         status: "SUCCESS",
         ipAddress: req.ip || "unknown",
-        metadata: { redirectUris, scopes }
+        metadata: { redirectUris, scopes, type: isPublic ? "public" : "confidential" }
       });
       res.status(201).json({
         app: app2,
         clientSecret,
-        revealNote: "The client secret is shown exactly once \u2014 store it in a secure vault."
+        revealNote: clientSecret ? "The client secret is shown exactly once \u2014 store it in a secure vault." : "Public client: no secret exists. PKCE (code_challenge) is mandatory on every authorize request."
       });
     } catch (err) {
       console.error("[oauth/apps/create]", err.message);
@@ -7441,6 +7580,8 @@ async function buildApp() {
     if (!actor) return res.status(401).json({ error: "Authentication required" });
     const id = sanitizeText(req.params.id, 64);
     try {
+      const owned = (await listOAuthApps(actor.id)).find((a) => a.id === id);
+      if (!owned) return res.status(404).json({ error: "App not found" });
       const deleted = await deleteOAuthApp(id, actor.id);
       if (!deleted) return res.status(404).json({ error: "App not found" });
       persistAuditLog({
@@ -7449,7 +7590,7 @@ async function buildApp() {
         actorEmail: actor.email,
         action: "OAUTH_APP_REVOKED",
         category: "SECURITY",
-        target: `OAuth App: ${id}`,
+        target: `${owned.name} (${owned.clientId})`,
         source: detectSource(req),
         status: "WARNING",
         ipAddress: req.ip || "unknown",
@@ -7459,6 +7600,65 @@ async function buildApp() {
     } catch (err) {
       console.error("[oauth/apps/delete]", err.message);
       res.status(500).json({ error: "Could not delete the app" });
+    }
+  });
+  app.get("/api/v1/oauth/grants", async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
+    try {
+      res.json({ grants: await listUserGrants(actor.id) });
+    } catch (err) {
+      console.error("[oauth/grants]", err.message);
+      res.status(500).json({ error: "Could not load your authorized apps" });
+    }
+  });
+  app.delete("/api/v1/oauth/grants/:appId", async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
+    const appId = sanitizeText(req.params.appId, 64);
+    try {
+      const revoked = await revokeUserGrants(actor.id, appId);
+      if (revoked > 0) {
+        persistAuditLog({
+          actorId: actor.id,
+          actorName: actor.name,
+          actorEmail: actor.email,
+          action: "OAUTH_GRANT_REVOKED",
+          category: "AUTH",
+          target: `OAuth App: ${appId}`,
+          source: detectSource(req),
+          status: "WARNING",
+          ipAddress: req.ip || "unknown",
+          metadata: { revoked }
+        });
+      }
+      res.json({ success: true, revoked });
+    } catch (err) {
+      console.error("[oauth/grants/delete]", err.message);
+      res.status(500).json({ error: "Could not revoke the grant" });
+    }
+  });
+  app.delete("/api/v1/oauth/grants", async (req, res) => {
+    const actor = getActorUser(req);
+    if (!actor) return res.status(401).json({ error: "Authentication required" });
+    try {
+      const revoked = await revokeAllUserGrants(actor.id);
+      persistAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorEmail: actor.email,
+        action: "OAUTH_GRANTS_REVOKED_ALL",
+        category: "AUTH",
+        target: "All connected apps",
+        source: detectSource(req),
+        status: "WARNING",
+        ipAddress: req.ip || "unknown",
+        metadata: { revoked }
+      });
+      res.json({ success: true, revoked });
+    } catch (err) {
+      console.error("[oauth/grants/revoke-all]", err.message);
+      res.status(500).json({ error: "Could not revoke grants" });
     }
   });
   app.get("/api/v1/oauth/authorize", async (req, res) => {
@@ -7555,9 +7755,15 @@ async function buildApp() {
     const rawCode = typeof req.body?.code === "string" ? req.body.code : "";
     const redirectUri = sanitizeText(req.body?.redirect_uri, 2048);
     const verifier = typeof req.body?.code_verifier === "string" ? req.body.code_verifier.slice(0, 256) : null;
-    if (!clientId || !clientSecret) return res.status(401).json({ error: "invalid_client" });
-    const app2 = await authenticateClient(clientId, clientSecret);
+    if (!clientId) return res.status(401).json({ error: "invalid_client" });
+    const app2 = await lookupOAuthApp(clientId);
     if (!app2) return res.status(401).json({ error: "invalid_client" });
+    if (app2.isPublic) {
+    } else if (!clientSecret) {
+      return res.status(401).json({ error: "invalid_client" });
+    } else if (!await authenticateClient(clientId, clientSecret)) {
+      return res.status(401).json({ error: "invalid_client" });
+    }
     if (!rawCode) {
       return res.status(400).json({ error: "invalid_request", error_description: "code is required" });
     }
@@ -7571,6 +7777,12 @@ async function buildApp() {
         error_description: "The authorization code is invalid, expired or already used"
       });
     }
+    if (app2.isPublic && !record.codeChallenge) {
+      return res.status(400).json({
+        error: "invalid_grant",
+        error_description: "This code was issued without PKCE and cannot serve a public client"
+      });
+    }
     if (!verifyPkce(verifier, record.codeChallenge, record.codeChallengeMethod)) {
       return res.status(400).json({
         error: "invalid_grant",
@@ -7578,13 +7790,14 @@ async function buildApp() {
       });
     }
     const token = await createAccessToken({ appId: app2.id, userId: record.userId, scopes: record.scopes });
+    const grantor = await findUserById(record.userId).catch(() => null);
     persistAuditLog({
       actorId: record.userId,
-      actorName: "",
-      actorEmail: "",
+      actorName: grantor?.name || "deleted user",
+      actorEmail: grantor?.email || "",
       action: "OAUTH_TOKEN_ISSUED",
       category: "AUTH",
-      target: `App ${app2.clientId}`,
+      target: `App ${app2.clientId} (${app2.name})`,
       source: detectSource(req),
       status: "SUCCESS",
       ipAddress: req.ip || "unknown",
@@ -7602,6 +7815,10 @@ async function buildApp() {
     const rawToken = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
     const record = rawToken ? await resolveAccessToken(rawToken) : null;
     if (!record) {
+      res.setHeader(
+        "WWW-Authenticate",
+        'Bearer error="invalid_token", error_description="The access token is invalid or expired"'
+      );
       return res.status(401).json({
         error: "invalid_token",
         error_description: "The access token is invalid or expired"
@@ -7610,6 +7827,10 @@ async function buildApp() {
     try {
       const result = await findUserById(record.userId);
       if (!result) {
+        res.setHeader(
+          "WWW-Authenticate",
+          'Bearer error="invalid_token", error_description="The account no longer exists"'
+        );
         return res.status(401).json({
           error: "invalid_token",
           error_description: "The account no longer exists"
@@ -7623,7 +7844,7 @@ async function buildApp() {
       };
       if (record.scopes.includes("email")) {
         profile.email = result.email;
-        profile.email_verified = true;
+        profile.email_verified = result.emailVerified === true;
       }
       res.json(profile);
     } catch (err) {

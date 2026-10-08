@@ -775,35 +775,51 @@ Vanitas doubles as an OAuth 2.0 authorization server. Register a
 third-party application in the dashboard (OAuth Apps) and send its
 users through the standard authorization-code flow with PKCE.
 
+App types:
+- **Confidential** (server-side) — receives a `client_secret` once;
+  every token exchange must present it.
+- **Public** (SPA/mobile) — NO secret is ever minted (a shipped binary
+  can't keep one); PKCE (`code_challenge`) is mandatory on authorize.
+
+Redirect URIs: `https://` everywhere except loopback
+(`localhost` / `127.0.0.1` / `[::1]`, any port — for local dev and
+native apps, RFC 8252). Private/link-local hosts are always rejected.
+
 | Method | Endpoint | Description | Auth |
 |--------|----------|-------------|------|
 | `GET` | `/api/v1/oauth/apps` | List your registered apps | Bearer |
-| `POST` | `/api/v1/oauth/apps` | Register an app → `clientSecret` shown once | Bearer |
+| `POST` | `/api/v1/oauth/apps` | Register an app (`type` = `confidential`\|`public`) → `clientSecret` shown once (null for public) | Bearer |
 | `DELETE` | `/api/v1/oauth/apps/:id` | Revoke an app (codes + tokens die with it) | Bearer |
 | `GET` | `/api/v1/oauth/authorize` | Validate an authorize request → consent ticket | Bearer |
 | `POST` | `/api/v1/oauth/authorize/decision` | Allow/deny → single-use code (via redirect URL) | Bearer |
-| `POST` | `/api/v1/oauth/token` | Exchange code + client secret → access token | client credentials |
-| `GET` | `/api/v1/oauth/userinfo` | OIDC-style profile for a valid access token | Bearer (access token) |
+| `POST` | `/api/v1/oauth/token` | Exchange code → access token (secret for confidential, PKCE for public) | client |
+| `GET` | `/api/v1/oauth/userinfo` | OIDC-style profile; `email_verified` is reported honestly (true only when a social provider proved it) | Bearer (access token) |
 | `POST` | `/api/v1/oauth/revoke` | RFC 7009 token revocation (idempotent) | client |
+| `GET` | `/api/v1/oauth/grants` | Apps with live access to **your** account | Bearer |
+| `DELETE` | `/api/v1/oauth/grants/:appId` | Cut every token you granted to one app | Bearer |
+| `DELETE` | `/api/v1/oauth/grants` | Cut every grant at once ("sign out of all apps") | Bearer |
 
 Browser flow (the consent page is the SPA route `/oauth/consent`):
 
 1. The app sends the user to
    `https://<vanitas>/oauth/consent?client_id=…&redirect_uri=…&response_type=code&state=…`
-   (optionally `code_challenge` + `code_challenge_method=s256` for PKCE).
+   (public clients MUST add `code_challenge` + `code_challenge_method=s256`).
 2. Signed-out visitors land on `/login?next=…`; after signing in they
    return to the consent screen.
-3. The screen shows the app name, requested scopes (`profile`, `email`)
-   and the exact redirect URI — the user allows or denies.
+3. The screen shows the app name, requested scopes (`profile`, `email`),
+   the exact redirect URI and the `state` value — the user allows or denies.
 4. On allow, the browser is redirected to the app's registered
    `redirect_uri?code=vnt_code_…&state=…` (single-use, 10-minute code).
-5. The app exchanges the code at `POST /api/v1/oauth/token` with its
-   `client_id` + `client_secret` (+ `code_verifier` for PKCE) and
+5. The app exchanges the code at `POST /api/v1/oauth/token` and
    receives a 1-hour `Bearer` access token, then reads the profile at
    `/api/v1/oauth/userinfo`.
+6. The user reviews or withdraws any grant anytime under
+   **Dashboard → OAuth Apps → Apps with access to your account**.
 
 Secrets at rest: client secrets are scrypt-hashed, codes and tokens are
 sha256-hashed — a database dump alone can never mint a credential.
+Expired codes/tokens are swept opportunistically; a wrong PKCE verifier
+burns the code (single-use consumption caps verifier guessing).
 
 ### Public API (key-authenticated)
 
