@@ -245,6 +245,12 @@ check('snippet id returned', typeof snip?.id === 'string' && snip.id.length > 0,
   check('preview renders the terminal panel', pv.text.includes('SANDBOX TERMINAL'), null);
   check('preview keeps the opaque-origin sandbox (allow-scripts, no allow-same-origin)', /sandbox="allow-scripts"/.test(pv.text) && !pv.text.includes('allow-same-origin'), null);
   check('wrapper stays CSP-safe (no inline <script> in wrapper)', !/<script>(?!src)/i.test(pv.text.replace(/srcdoc="[\s\S]*?"/, '')), null);
+  // The wrapper is strict, but the sandboxed document it embeds is the
+  // user's, and a srcdoc frame inherits this response's policy. Without a
+  // permissive one here, their HTML renders and their JS never runs.
+  const csp = pv.headers.get('content-security-policy') || '';
+  check("preview serves a permissive policy ('unsafe-inline' + 'unsafe-eval')", /'unsafe-inline'/.test(csp) && /'unsafe-eval'/.test(csp), csp);
+  check("preview still cannot be embedded elsewhere (frame-ancestors 'none')", /frame-ancestors 'none'/.test(csp), csp);
 }
 
 console.log('— plan deletion leaves history intact —');

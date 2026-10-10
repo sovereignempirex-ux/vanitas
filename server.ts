@@ -2928,6 +2928,23 @@ export async function buildApp() {
 
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('X-Content-Type-Options', 'nosniff');
+    // The middleware above stamps script-src 'self' on every production
+    // response, which is exactly right for the app and exactly wrong here.
+    // This page runs the *user's* HTML inside a srcdoc iframe, and a srcdoc
+    // document inherits the embedding document's policy — so 'self' would
+    // draw their markup and then refuse to execute a single line of their
+    // script. This route therefore declares its own deliberately permissive
+    // policy. It has to be unconditional rather than production-only: the
+    // sandbox's job does not change with NODE_ENV, and a test asserting a
+    // header that only exists in one mode asserts nothing.
+    //
+    // frame-ancestors stays at 'none' on purpose. Everything above is about
+    // what the sandbox is allowed to reach; this one clause is about who is
+    // allowed to embed the sandbox, and that answer is nobody.
+    res.setHeader(
+      'Content-Security-Policy',
+      "default-src * data: blob:; script-src * 'unsafe-inline' 'unsafe-eval' data: blob:; style-src * 'unsafe-inline' data:; img-src * data: blob:; font-src * data:; media-src * data: blob:; connect-src *; frame-src * data: blob:; child-src *; worker-src *; form-action *; base-uri *; frame-ancestors 'none'"
+    );
     res.send(`<!doctype html>
 <html lang="en">
 <head>

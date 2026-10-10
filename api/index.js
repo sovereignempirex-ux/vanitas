@@ -8336,6 +8336,10 @@ async function buildApp() {
     const srcdoc = injectBridge(rawHtml).replace(/&/g, "&amp;").replace(/"/g, "&quot;");
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader(
+      "Content-Security-Policy",
+      "default-src * data: blob:; script-src * 'unsafe-inline' 'unsafe-eval' data: blob:; style-src * 'unsafe-inline' data:; img-src * data: blob:; font-src * data:; media-src * data: blob:; connect-src *; frame-src * data: blob:; child-src *; worker-src *; form-action *; base-uri *; frame-ancestors 'none'"
+    );
     res.send(`<!doctype html>
 <html lang="en">
 <head>
