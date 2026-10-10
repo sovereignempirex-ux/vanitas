@@ -162,7 +162,7 @@ final class VanitasClientTests: XCTestCase {
         let response = try await client.listKeys()
         XCTAssertEqual(response.keys.count, 1)
         XCTAssertEqual(response.keys[0].name, "Prod")
-        XCTAssertEqual(response.keys[0].scopes, ["apikeys:read"])
+        XCTAssertEqual(response.keys[0].scopes, ["apikeys:read", "usage:read"])
         XCTAssertEqual(response.allScopes.first?.scope, "apikeys:read")
     }
 
