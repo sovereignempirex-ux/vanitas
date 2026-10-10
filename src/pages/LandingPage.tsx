@@ -1,5 +1,25 @@
 import React, { useEffect, useState } from 'react';
-import { ArrowDown, ArrowUpRight, Bot, Check, Code2, Globe2, KeyRound, LockKeyhole, Radio, ShieldCheck, Sparkles, Workflow } from 'lucide-react';
+import {
+  Apple,
+  ArrowDown,
+  ArrowUpRight,
+  Blocks,
+  Bot,
+  BrainCircuit,
+  ChartNoAxesColumnIncreasing,
+  Check,
+  Code2,
+  Globe2,
+  KeyRound,
+  Laptop,
+  LockKeyhole,
+  Radio,
+  ShieldCheck,
+  Smartphone,
+  Sparkles,
+  Workflow,
+} from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 
 const SITE = 'https://vanitas-bot.vercel.app/';
 const PORTAL = `${SITE}login`;
@@ -8,22 +28,38 @@ const YOUTUBE = 'https://www.youtube.com/@SOVEREIGNX-72';
 
 const copy = {
   ar: {
-    nav: ['عن فانيتاس', 'المزايا', 'المجتمع', 'دليل اللغات'],
+    nav: ['عن فانيتاس', 'المزايا', 'المنصات', 'المجتمع', 'دليل اللغات'],
     language: 'English',
     eyebrow: 'بوابة موحدة للمطورين والبوتات',
     titleA: 'كل خدماتك،',
     titleB: 'تحت سيطرتك.',
-    lead: 'فانيتاس منصة مطورين تجمع واجهات API ومفاتيح الصلاحيات والأمان والذكاء الاصطناعي في مكان واحد.',
+    lead: 'فانيتاس منصة مطورين تجمع واجهات API والمفاتيح بصلاحيات محددة والأمان والذكاء الاصطناعي في مكان واحد — وتشتغل على الويب والأندرويد وiPhone وسطح المكتب.',
     open: 'افتح منصة فانيتاس',
     community: 'انضم إلى ديسكورد',
     scroll: 'اكتشف فانيتاس',
+    chips: ['مفاتيح بصلاحيات محددة', 'سجلات تدقيق لكل طلب', 'خيارات ذكاء اصطناعي مجانية'],
     aboutKicker: 'منصة واحدة. تحكم أوضح.',
     aboutTitle: 'بُنيت لتسهّل إدارة تكاملك.',
-    aboutBody: 'اربط تطبيقاتك وبوتاتك عبر بوابة API واحدة. تابع الاستخدام، راجع السجلات، وأدر الصلاحيات من لوحة تحكم مصممة للمطورين.',
+    aboutBody: 'اربط تطبيقاتك وبوتاتك عبر بوابة API واحدة. تابع الاستخدام، راجع سجلات التدقيق، وأدر الصلاحيات من لوحة تحكم مصمّمة للمطورين.',
+    featureLabel: 'مزايا المنصة',
     features: [
       ['بوابة API', 'نقطة دخول موحدة لتطبيقات الويب والبوتات والخدمات.', 'واجهات واضحة ومفاتيح بصلاحيات محددة.'],
-      ['الأمان والتحكم', 'أدر الجلسات والمفاتيح وسجلات التدقيق من لوحة واحدة.', 'مصادقة وصلاحيات من جهة الخادم.'],
+      ['مفاتيح وصلاحيات', 'أنشئ المفاتيح، حدّد نطاقها، واسحبها في أي لحظة.', 'حدود معدّل ومهلة زمنية لكل مفتاح.'],
       ['مساعد ذكي', 'اسأل عن الكود والتكاملات والأمان بالعربية أو الإنجليزية.', 'خيارات مجانية عبر Ollama المحلي وPollinations.'],
+      ['بوابة البوتات', 'نقطة دخول واحدة لبوتات WhatsApp وDiscord وTelegram.', 'كل تنفيذ يُسجَّل في سجل التدقيق.'],
+      ['أمان وتدقيق', 'مصادقة من جهة الخادم وسجل لنشاط الحساب.', 'مراجعات جلسات وتطبيقات موثوقة.'],
+      ['تحليلات وتقارير', 'تابع استهلاك المفاتيح والخدمات عبر الزمن.', 'تقريرات مبنيّة على بيانات حقيقية.'],
+    ],
+    platformLabel: 'المنصات',
+    platformTitle: 'فانيتاس تشتغل حيث تشتغل أنت.',
+    platformBody: 'نفس الحساب ونفس المفاتيح عبر الويب والموبايل وسطح المكتب — وكل مجال بلغة تليق به، مع خريطة برمجية كاملة للتطوّر.',
+    platformLink: 'افتح دليل اللغات',
+    platforms: [
+      ['الويب', 'TypeScript', 'المنصة الأساسية والمتصفح.'],
+      ['أندرويد', 'Kotlin', 'تطبيق أندرويد بنفس الحساب.'],
+      ['iPhone', 'Swift', 'تطبيق iOS وiPad.'],
+      ['سطح المكتب', 'C# · .NET', 'تطبيق مكتبي على ويندوز.'],
+      ['العقود الذكية', 'Solidity', 'سجل رصيد موقّع خارج السلسلة.'],
     ],
     communityKicker: 'تابع المشروع',
     communityTitle: 'فانيتاس تتطور مع مجتمعها.',
@@ -33,27 +69,40 @@ const copy = {
     footer: 'منصة المطورين والذكاء الاصطناعي',
     ariaHome: 'الرئيسية',
     ariaLanguage: 'Switch language to English',
-    featureLabel: 'مزايا المنصة',
-    free: 'خيارات مجانية',
-    powered: 'مصممة للمطورين',
   },
   en: {
-    nav: ['About Vanitas', 'Features', 'Community', 'Language guide'],
+    nav: ['About Vanitas', 'Features', 'Platforms', 'Community', 'Language guide'],
     language: 'العربية',
     eyebrow: 'A unified gateway for developers and bots',
     titleA: 'Your services,',
     titleB: 'under control.',
-    lead: 'Vanitas brings APIs, scoped keys, security controls and AI assistance together in one developer platform.',
+    lead: 'Vanitas brings APIs, scoped keys, security controls and AI assistance together in one developer platform — running on the web, Android, iPhone and the desktop.',
     open: 'Open Vanitas',
     community: 'Join Discord',
     scroll: 'Explore Vanitas',
+    chips: ['Scoped API keys', 'Audit log on every request', 'Free AI options'],
     aboutKicker: 'One platform. Clearer control.',
     aboutTitle: 'Built to simplify your integrations.',
     aboutBody: 'Connect apps and bots through one API gateway. Track usage, review audit logs and manage permissions from a dashboard made for developers.',
+    featureLabel: 'Platform features',
     features: [
       ['API gateway', 'One entry point for web apps, bots and services.', 'Clear endpoints with scoped API keys.'],
-      ['Security and control', 'Manage sessions, keys and audit logs in one place.', 'Server-side authentication and authorization.'],
+      ['Keys and scopes', 'Create keys, restrict what they can reach, revoke anytime.', 'Per-key rate limits and expiry.'],
       ['AI copilot', 'Ask about code, integrations and security in Arabic or English.', 'Free options with local Ollama and Pollinations.'],
+      ['Bot gateway', 'One ingress for WhatsApp, Discord and Telegram bots.', 'Every execution is written to the audit log.'],
+      ['Security and audit', 'Server-side authentication with a record of account activity.', 'Session review and trusted-app grants.'],
+      ['Analytics and reports', 'Watch key and service consumption over time.', 'Reports built from real usage.'],
+    ],
+    platformLabel: 'Platforms',
+    platformTitle: 'Vanitas runs where you work.',
+    platformBody: 'The same account and the same keys across web, mobile and desktop — each domain built in the language that fits it, with a full map of that landscape.',
+    platformLink: 'Open the language guide',
+    platforms: [
+      ['Web', 'TypeScript', 'The core platform and browser.'],
+      ['Android', 'Kotlin', 'The Android app, same account.'],
+      ['iPhone', 'Swift', 'The iOS and iPad app.'],
+      ['Desktop', 'C# · .NET', 'The Windows desktop app.'],
+      ['Smart contracts', 'Solidity', 'An off-chain-signed credit ledger.'],
     ],
     communityKicker: 'Follow the project',
     communityTitle: 'Vanitas grows with its community.',
@@ -63,13 +112,13 @@ const copy = {
     footer: 'Developer and AI platform',
     ariaHome: 'Home',
     ariaLanguage: 'التبديل إلى العربية',
-    featureLabel: 'Platform features',
-    free: 'Free AI options',
-    powered: 'Made for developers',
   },
 } as const;
 
-const featureIcons = [KeyRound, ShieldCheck, Bot];
+// One icon per feature, in the order they are declared in `copy` above.
+const featureIcons: LucideIcon[] = [Globe2, KeyRound, BrainCircuit, Bot, ShieldCheck, ChartNoAxesColumnIncreasing];
+// Ditto for the platforms row.
+const platformIcons: LucideIcon[] = [Globe2, Smartphone, Apple, Laptop, Blocks];
 
 export const LandingPage: React.FC = () => {
   const [language, setLanguage] = useState<'ar' | 'en'>(() => {
@@ -94,9 +143,7 @@ export const LandingPage: React.FC = () => {
     ];
     const previousMetadata = localizedMetadata.map((meta) => meta?.content);
     const title = isArabic ? 'فانيتاس — منصة المطورين والذكاء الاصطناعي' : 'Vanitas — Developer and AI Platform';
-    const descriptionText = isArabic
-      ? 'فانيتاس منصة مطورين تجمع واجهات API ومفاتيح الصلاحيات والأمان والذكاء الاصطناعي في مكان واحد.'
-      : 'Vanitas brings APIs, scoped keys, security controls and AI assistance together in one developer platform.';
+    const descriptionText = t.lead;
     document.documentElement.lang = language;
     document.documentElement.dir = isArabic ? 'rtl' : 'ltr';
     document.title = title;
@@ -111,13 +158,15 @@ export const LandingPage: React.FC = () => {
         if (meta && previousMetadata[index] !== undefined) meta.content = previousMetadata[index]!;
       });
     };
-  }, [language, isArabic]);
+  }, [language, isArabic, t.lead]);
 
   const toggleLanguage = () => {
     const next = isArabic ? 'en' : 'ar';
     setLanguage(next);
     try { localStorage.setItem('vanitas_language', next); } catch { /* The visible language still changes. */ }
   };
+
+  const navLabel = isArabic ? 'التنقل الرئيسي' : 'Main navigation';
 
   return (
     <main lang={language} dir={isArabic ? 'rtl' : 'ltr'} className="vnt-landing min-h-screen overflow-hidden text-white">
@@ -127,11 +176,12 @@ export const LandingPage: React.FC = () => {
           <img src="/images/logo.svg" alt="" className="h-10 w-10" />
           <span className="font-display text-lg font-bold tracking-[.13em]">VANITAS</span>
         </a>
-        <nav className="hidden items-center gap-8 text-sm text-slate-300 md:flex" aria-label={isArabic ? 'التنقل الرئيسي' : 'Main navigation'}>
+        <nav className="hidden items-center gap-7 text-sm text-slate-300 lg:flex" aria-label={navLabel}>
           <a className="transition hover:text-cyan-300" href="#about">{t.nav[0]}</a>
           <a className="transition hover:text-cyan-300" href="#features">{t.nav[1]}</a>
-          <a className="transition hover:text-cyan-300" href="#community">{t.nav[2]}</a>
-          <a className="transition hover:text-cyan-300" href="/languages">{t.nav[3]}</a>
+          <a className="transition hover:text-cyan-300" href="#platforms">{t.nav[2]}</a>
+          <a className="transition hover:text-cyan-300" href="#community">{t.nav[3]}</a>
+          <a className="transition hover:text-cyan-300" href="/languages">{t.nav[4]}</a>
         </nav>
         <div className="flex items-center gap-2 sm:gap-3">
           <button type="button" onClick={toggleLanguage} className="inline-flex items-center gap-2 rounded-full border border-white/15 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:border-cyan-300/50 hover:text-cyan-200" aria-label={t.ariaLanguage}>
@@ -140,11 +190,12 @@ export const LandingPage: React.FC = () => {
           <a href={PORTAL} className="hidden rounded-full border border-cyan-200/25 bg-cyan-200/10 px-4 py-2 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-200/15 sm:inline-flex">{t.open}</a>
         </div>
       </header>
-      <nav className="relative z-10 mb-2 flex justify-center gap-6 px-4 text-xs text-slate-300 md:hidden" aria-label={isArabic ? 'التنقل الرئيسي' : 'Main navigation'}>
+      <nav className="relative z-10 mb-2 flex flex-wrap justify-center gap-x-5 gap-y-2 px-4 text-xs text-slate-300 lg:hidden" aria-label={navLabel}>
         <a className="transition hover:text-cyan-300" href="#about">{t.nav[0]}</a>
         <a className="transition hover:text-cyan-300" href="#features">{t.nav[1]}</a>
-        <a className="transition hover:text-cyan-300" href="#community">{t.nav[2]}</a>
-        <a className="transition hover:text-cyan-300" href="/languages">{t.nav[3]}</a>
+        <a className="transition hover:text-cyan-300" href="#platforms">{t.nav[2]}</a>
+        <a className="transition hover:text-cyan-300" href="#community">{t.nav[3]}</a>
+        <a className="transition hover:text-cyan-300" href="/languages">{t.nav[4]}</a>
       </nav>
 
       <section id="home" className="relative mx-auto grid min-h-[74vh] max-w-7xl items-center gap-8 px-5 pb-20 pt-8 sm:px-8 lg:grid-cols-[1.05fr_.95fr] lg:px-10 lg:pb-28">
@@ -156,10 +207,11 @@ export const LandingPage: React.FC = () => {
             <a href={PORTAL} className="group inline-flex items-center gap-3 rounded-full bg-cyan-300 px-6 py-3.5 font-bold text-slate-950 transition hover:bg-cyan-200">{t.open}<ArrowUpRight size={18} className="transition group-hover:-translate-y-0.5 group-hover:translate-x-0.5" /></a>
             <a href={DISCORD} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-3 rounded-full border border-white/20 bg-white/[.04] px-6 py-3.5 font-semibold transition hover:border-white/40 hover:bg-white/[.08]">{t.community}<Radio size={17} /></a>
           </div>
-          <div className="mt-8 flex flex-wrap gap-x-6 gap-y-3 text-xs text-slate-400">
-            <span className="inline-flex items-center gap-2"><Check size={14} className="text-cyan-300" /> {t.powered}</span>
-            <span className="inline-flex items-center gap-2"><Check size={14} className="text-cyan-300" /> {t.free}</span>
-          </div>
+          <ul className="mt-8 flex flex-wrap gap-x-6 gap-y-3 text-xs text-slate-400">
+            {t.chips.map((chip) => (
+              <li key={chip} className="inline-flex items-center gap-2"><Check size={14} className="text-cyan-300" /> {chip}</li>
+            ))}
+          </ul>
         </div>
 
         <div className="relative mx-auto flex aspect-square w-full max-w-[470px] items-center justify-center">
@@ -183,9 +235,9 @@ export const LandingPage: React.FC = () => {
 
       <section id="features" className="mx-auto max-w-7xl px-5 py-16 sm:px-8 lg:px-10 lg:py-20">
         <p className="mb-7 text-xs font-bold tracking-[.2em] text-cyan-300">{t.featureLabel}</p>
-        <div className="grid gap-4 md:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {t.features.map(([title, body, detail], index) => {
-            const Icon = featureIcons[index];
+            const Icon = featureIcons[index] ?? Sparkles;
             return <article key={title} className="rounded-3xl border border-white/10 bg-white/[.035] p-6 transition hover:border-cyan-200/25 hover:bg-white/[.05]">
               <div className="mb-7 flex h-11 w-11 items-center justify-center rounded-2xl border border-cyan-200/15 bg-cyan-100/[.06] text-cyan-200"><Icon size={20} /></div>
               <h3 className="text-lg font-bold">{title}</h3><p className="mt-3 min-h-14 text-sm leading-7 text-slate-300">{body}</p>
@@ -195,7 +247,33 @@ export const LandingPage: React.FC = () => {
         </div>
       </section>
 
-      <section id="community" className="mx-auto max-w-7xl px-5 pb-16 sm:px-8 lg:px-10 lg:pb-20">
+      <section id="platforms" className="relative border-y border-white/[.07] bg-white/[.025]">
+        <div className="mx-auto max-w-7xl px-5 py-16 sm:px-8 lg:px-10 lg:py-20">
+          <div className="grid gap-6 lg:grid-cols-[1fr_auto] lg:items-end">
+            <div className="max-w-2xl">
+              <p className="mb-4 text-xs font-bold tracking-[.2em] text-cyan-300">{t.platformLabel}</p>
+              <h2 className="text-3xl font-bold leading-tight sm:text-4xl">{t.platformTitle}</h2>
+              <p className="mt-4 text-base leading-8 text-slate-300">{t.platformBody}</p>
+            </div>
+            <a href="/languages" className="group inline-flex w-fit items-center gap-2 rounded-full border border-cyan-200/25 bg-cyan-200/10 px-5 py-3 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-200/15">
+              {t.platformLink}<ArrowUpRight size={17} className="transition group-hover:-translate-y-0.5 group-hover:translate-x-0.5" />
+            </a>
+          </div>
+          <ul className="mt-10 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+            {t.platforms.map(([name, language_, blurb], index) => {
+              const Icon = platformIcons[index] ?? Globe2;
+              return <li key={name} className="rounded-3xl border border-white/10 bg-white/[.035] p-5 transition hover:border-cyan-200/25 hover:bg-white/[.05]">
+                <Icon size={20} className="text-cyan-200" />
+                <p className="mt-4 text-base font-bold">{name}</p>
+                <p className="mt-1 text-xs font-semibold tracking-wide text-cyan-300">{language_}</p>
+                <p className="mt-3 text-xs leading-6 text-slate-400">{blurb}</p>
+              </li>;
+            })}
+          </ul>
+        </div>
+      </section>
+
+      <section id="community" className="mx-auto max-w-7xl px-5 pb-16 pt-16 sm:px-8 lg:px-10 lg:pb-20 lg:pt-20">
         <div className="rounded-[2rem] border border-cyan-200/15 bg-[radial-gradient(ellipse_at_top_left,rgba(34,211,238,.12),transparent_55%),rgba(255,255,255,.035)] px-6 py-11 text-center sm:px-12 sm:py-14">
           <img src="/images/logo.svg" alt="" className="mx-auto mb-5 h-12 w-12" />
           <p className="mb-3 text-xs font-bold tracking-[.2em] text-cyan-300">{t.communityKicker}</p>
