@@ -597,6 +597,20 @@ credit، ومفتاح المستخدم اللي استخدمته كان بتاع
    Desktop كان أخضر. الحل: التوسيع للاتنين (يغطّي تحليل مصفوفة أكتر من سكوب)
    بدل التصغير.
 
+10. **`xcodebuild` كان هيولّع حتى بعد ما `swift test` نجح** — الخطوة الجاية
+    في job بتاع iOS، وما اشتغلتش محليًا أبدًا. الـ pbxproj المكتوب بالإيد كان
+    بيعمل compile **للملفات الخمسة بتاعت `VanitasCore` جوّه الـ app module
+    نفسه**، وفي نفس الوقت ملفات الـ shell بتعمل `import VanitasCore` — يعني
+    module مش موجود → `no such module`. الحزمة ما كانتش مربوطة بالمشروع أصلًا:
+    مافيش `XCLocalSwiftPackageReference` ولا `packageProductDependencies`. الحل:
+    إضافة المرجع المحلي (`relativePath = .`) + `XCSwiftPackageProductDependency`
+    للحزمة + `packageProductDependencies` على الـ target + product في
+    `Frameworks`، و**شيل الملفات الخمسة من `PBXSourcesBuildPhase`** (لو فضلوا،
+    نفس الملفات هيتبنّوا مرتين: مرة في الـ app ومرة في الحزمة). الـ file refs
+    اتسيبت عشان `ios-check.py` بيطالب إن كل `path = *.swift` على القرص يكون
+    مذكور — فالفحص بيمنع حذفها بالغلط. اتأكد بعد التعديل: «parses as an Xcode
+    project» + «all 50 object ids resolve».
+
 ملاحظة تشغيلية: أي فشل في `run-tests.mjs` لازم **يتكرّر قبل الحكم** — البناء
 بتاع Swift بيحِمل الجهاز فترًا، وأدى في محاولة واحدة لـ `auth-flow` و
 `server-orders` يفشلوا بـ «server not reachable»، ثم ينجحوا كلهم في التكرار

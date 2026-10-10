@@ -7,11 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		B10000000000000000000001 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000001 /* Models.swift */; };
-		B10000000000000000000002 /* ApiError.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000002 /* ApiError.swift */; };
-		B10000000000000000000003 /* VanitasClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000003 /* VanitasClient.swift */; };
-		B10000000000000000000004 /* SessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000004 /* SessionStore.swift */; };
-		B10000000000000000000005 /* UsageEvaluator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000005 /* UsageEvaluator.swift */; };
 		B10000000000000000000006 /* VanitasApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000006 /* VanitasApp.swift */; };
 		B10000000000000000000007 /* AppEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000007 /* AppEnvironment.swift */; };
 		B10000000000000000000008 /* PreferencesStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000008 /* PreferencesStore.swift */; };
@@ -24,6 +19,7 @@
 		B1000000000000000000000F /* UsageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000F /* UsageView.swift */; };
 		B10000000000000000000010 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000010 /* SettingsView.swift */; };
 		B10000000000000000000011 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000011 /* Assets.xcassets */; };
+		B10000000000000000000021 /* VanitasCore in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000021 /* VanitasCore */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -53,6 +49,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B10000000000000000000021 /* VanitasCore in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -133,6 +130,9 @@
 			dependencies = (
 			);
 			name = Vanitas;
+			packageProductDependencies = (
+				A10000000000000000000021 /* VanitasCore */,
+			);
 			productName = Vanitas;
 			productReference = F10000000000000000000013 /* Vanitas.app */;
 			productType = "com.apple.product-type.application";
@@ -164,6 +164,9 @@
 			productRefGroup = A10000000000000000000005 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
+			packageReferences = (
+				A10000000000000000000020 /* XCLocalSwiftPackageReference "." */,
+			);
 			targets = (
 				C10000000000000000000010 /* Vanitas */,
 			);
@@ -186,11 +189,6 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				B10000000000000000000001 /* Models.swift in Sources */,
-				B10000000000000000000002 /* ApiError.swift in Sources */,
-				B10000000000000000000003 /* VanitasClient.swift in Sources */,
-				B10000000000000000000004 /* SessionStore.swift in Sources */,
-				B10000000000000000000005 /* UsageEvaluator.swift in Sources */,
 				B10000000000000000000006 /* VanitasApp.swift in Sources */,
 				B10000000000000000000007 /* AppEnvironment.swift in Sources */,
 				B10000000000000000000008 /* PreferencesStore.swift in Sources */,
@@ -339,6 +337,21 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		A10000000000000000000020 /* XCLocalSwiftPackageReference "." */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = .;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A10000000000000000000021 /* VanitasCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10000000000000000000020 /* XCLocalSwiftPackageReference "." */;
+			productName = VanitasCore;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = C10000000000000000000011 /* Project object */;
 }
