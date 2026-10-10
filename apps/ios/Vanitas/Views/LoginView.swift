@@ -1,4 +1,5 @@
 import SwiftUI
+import VanitasCore
 
 struct LoginView: View {
     // Not `private`: this view is constructed from RootView.swift, and the

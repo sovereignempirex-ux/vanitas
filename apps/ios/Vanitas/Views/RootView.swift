@@ -1,4 +1,5 @@
 import SwiftUI
+import VanitasCore
 
 /// Chooses between the signed-out and signed-in worlds. Kept tiny on purpose:
 /// it reads exactly one flag, so signing in or out swaps the whole tree with

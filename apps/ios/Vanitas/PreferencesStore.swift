@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import VanitasCore
 
 /// `SessionStore` backed by `UserDefaults`: a signed-in user stays signed in,
 /// and the alert history survives a relaunch (otherwise every cold start would

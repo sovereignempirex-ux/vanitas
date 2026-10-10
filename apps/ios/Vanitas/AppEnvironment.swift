@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import VanitasCore
 
 /// The app's single source of truth: which session, which profile, which
 /// usage window.

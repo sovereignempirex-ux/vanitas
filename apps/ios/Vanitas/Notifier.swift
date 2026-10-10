@@ -1,5 +1,6 @@
 import Foundation
 import UserNotifications
+import VanitasCore
 
 /// Delivers raised `UsageAlert`s as local notifications. Kept behind a
 /// protocol so views and the background task can be tested without the

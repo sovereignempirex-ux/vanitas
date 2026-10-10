@@ -1,4 +1,5 @@
 import SwiftUI
+import VanitasCore
 
 struct UsageView: View {
     @EnvironmentObject var env: AppEnvironment

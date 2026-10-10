@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import VanitasCore
 
 struct KeysView: View {
     // Stored properties stay `internal` (see RootView.swift): this view is

@@ -1,6 +1,7 @@
 import BackgroundTasks
 import SwiftUI
 import UIKit
+import VanitasCore
 
 /// Registers the periodic usage refresh with `BGTaskScheduler`.
 ///
