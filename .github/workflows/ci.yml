@@ -194,12 +194,24 @@ jobs:
       - name: Build the app for the iOS Simulator
         # No signing on a generic simulator destination; the shared scheme is
         # what makes `-scheme Vanitas` resolvable without a workspace.
+        #
+        # The job log is sign-in gated, so a failure here is otherwise
+        # undiagnosable without an account: re-emit every error line as an
+        # annotation, which is public.
         run: |
+          log="$RUNNER_TEMP/xcodebuild.log"
+          set +e
           xcodebuild \
             -project apps/ios/Vanitas.xcodeproj \
             -scheme Vanitas \
             -destination 'generic/platform=iOS Simulator' \
-            build CODE_SIGNING_ALLOWED=NO
+            build CODE_SIGNING_ALLOWED=NO >"$log" 2>&1
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then tail -n 5 "$log"; exit 0; fi
+          grep -n 'error:' "$log" | head -n 40 | sed 's/^/::error::/' || true
+          echo "::error::xcodebuild exited $status"
+          exit "$status"
 
   # The desktop domain runs in C#. WPF only builds on Windows, so this job runs
   # there — unlike the web build, it shares no tooling with any other job.
