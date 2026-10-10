@@ -26,7 +26,7 @@
   ],
   "headers": [
     {
-      "source": "/:path((?!api/v1/publish/(projects|snippets)/[^/]+/preview).*)",
+      "source": "/:path((?!api/v1/publish/[a-z]+/[^/]+/preview).*)",
       "headers": [
         { "key": "X-Content-Type-Options", "value": "nosniff" },
         { "key": "X-Frame-Options", "value": "DENY" },
