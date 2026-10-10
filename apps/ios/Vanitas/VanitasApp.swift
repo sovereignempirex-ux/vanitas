@@ -21,7 +21,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     ) -> Bool {
         _ = BGTaskScheduler.shared.register(
             forTaskWithIdentifier: Self.usageRefreshIdentifier,
-            queue: nil
+            using: nil
         ) { task in
             guard let refresh = task as? BGAppRefreshTask else {
                 task.setTaskCompleted(success: false)
