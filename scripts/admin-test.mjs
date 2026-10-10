@@ -1,7 +1,7 @@
 // Admin Control Center — full permission matrix against the LOCAL server.
 // Requires a FRESH server (empty memory DB): the first registered account
 // bootstraps as ADMIN, the second becomes a plain USER.
-//   $env:PORT='3111'; npx tsx server.ts
+//   $env:PORT='3111'; $env:ALLOW_FIRST_USER_ADMIN='true'; npx tsx server.ts
 //   node scripts/admin-test.mjs
 const BASE = 'http://127.0.0.1:3111/api/v1';
 

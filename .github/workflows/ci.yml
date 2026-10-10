@@ -52,6 +52,231 @@ jobs:
       - name: Run test suites
         run: node scripts/run-tests.mjs
 
+  # The AI/ML domain runs in Python (services/ai-service). Its suite is fully
+  # offline: providers are mocked, so it never needs a key or network access.
+  ai-service:
+    name: Python AI service
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/ai-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/ai-service/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Pytest (offline)
+        run: pytest -q
+
+  # The data-analysis domain runs in Python (services/analytics), with an
+  # optional R engine. The suite is offline and deterministic: it pins its own
+  # clock and never shells out to R unless Rscript is on PATH.
+  analytics:
+    name: Python analytics service
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/analytics
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/analytics/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Pytest (offline)
+        run: pytest -q
+
+  ratelimit:
+    name: Go rate-limit service
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/ratelimit
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache-dependency-path: services/ratelimit/go.mod
+
+      - name: gofmt (must be clean)
+        # `gofmt -l` prints every unformatted file; fail if any is printed.
+        run: test -z "$(gofmt -l .)"
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Go tests
+        run: go test ./...
+
+  android:
+    name: Android app (Kotlin)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # The committed wrapper downloads Gradle; only the caches travel.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('apps/android/gradle/wrapper/gradle-wrapper.properties', 'apps/android/gradle/libs.versions.toml', 'apps/android/**/*.gradle.kts') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      # Same entry point as the README — java straight against the wrapper jar,
+      # so the job does not depend on the executable bit surviving a Windows
+      # checkout (gradlew is invoked by users on their own platform anyway).
+      - name: Kotlin unit tests (offline, mock engine)
+        run: node scripts/android-test.mjs
+
+      - name: Assemble debug APK
+        # The runner ships an SDK that may have moved past android-34; install
+        # it when missing. A missing platform only warns — the unit tests above
+        # are the gate, and they need nothing but a JDK.
+        run: |
+          if [ ! -d "${ANDROID_HOME}/platforms/android-34" ]; then
+            sdkmanager --install "platforms;android-34" "build-tools;34.0.0" >/dev/null 2>&1 || true
+          fi
+          if [ -d "${ANDROID_HOME}/platforms/android-34" ]; then
+            node scripts/android-test.mjs --apk
+          else
+            echo "::warning::android-34 unavailable - APK assembly skipped"
+          fi
+
+  # The iOS domain runs in Swift. Two gates, because they prove different
+  # things: `swift test` compiles and exercises VanitasCore offline on any
+  # platform, while `xcodebuild` is the only thing that proves the SwiftUI
+  # shell and the hand-written .pbxproj actually build against the iOS SDK.
+  ios:
+    name: iOS app (Swift)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Swift version
+        run: swift --version
+
+      # Best effort: the checker degrades to SKIP for whatever is missing and
+      # still runs the route/contract/plist assertions on plain Python.
+      - name: Install local-check dependencies
+        run: |
+          pip3 install pbxproj tree-sitter tree-sitter-swift \
+            || echo "::warning::tree-sitter/pbxproj unavailable - syntax and project checks skipped"
+
+      - name: Structural checks (syntax, project, wire contract)
+        run: python3 scripts/ios-check.py
+
+      - name: SwiftPM tests (offline, scripted transport)
+        working-directory: apps/ios
+        run: swift test
+
+      - name: Build the app for the iOS Simulator
+        # No signing on a generic simulator destination; the shared scheme is
+        # what makes `-scheme Vanitas` resolvable without a workspace.
+        run: |
+          xcodebuild \
+            -project apps/ios/Vanitas.xcodeproj \
+            -scheme Vanitas \
+            -destination 'generic/platform=iOS Simulator' \
+            build CODE_SIGNING_ALLOWED=NO
+
+  # The desktop domain runs in C#. WPF only builds on Windows, so this job runs
+  # there — unlike the web build, it shares no tooling with any other job.
+  desktop:
+    name: Desktop app (C#)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The runner has an SDK, but pinning the version the project targets
+      # keeps a runner image bump from silently changing the language version.
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: .NET version
+        run: dotnet --version
+
+      # Two gates, for the same reason as Android: the tests are the real
+      # proof (offline, scripted transport), and assembling the shell after
+      # them only shows the XAML and the views compile.
+      - name: Core tests (offline, scripted transport)
+        run: node scripts/desktop-test.mjs
+
+      - name: Build the WPF shell
+        run: node scripts/desktop-test.mjs --app
+
+  # The blockchain domain runs in Solidity (contracts/). Two things make this
+  # job need no secrets at all: `forge test` runs on Foundry's in-process EVM
+  # (no RPC, no node, no key), and forge-std is vendored rather than
+  # submodule'd, so checkout needs nothing extra either.
+  contracts:
+    name: Smart contract (Solidity)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned to the release these tests were written against. A Foundry bump
+      # can add lint rules and shift default behaviour; a contract that
+      # controls credit balances is the wrong place to absorb that silently.
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.8.5
+
+      - name: forge --version
+        run: forge --version
+
+      - name: forge fmt --check (must be clean)
+        run: forge fmt --check
+
+      # `forge lint` exits 0 even when it has findings, so the gate has to be
+      # the output rather than the exit code — the same idea as
+      # `test -z "$(gofmt -l .)"` in the Go job above.
+      - name: forge lint (no findings)
+        run: |
+          findings=$(forge lint 2>&1 | grep -E '^(warning|error)' || true)
+          if [ -n "$findings" ]; then
+            echo "::error::forge lint reported findings:"
+            echo "$findings"
+            exit 1
+          fi
+          echo "OK - no lint findings."
+
+      # -vvv because this contract's failures are custom errors: without a
+      # call trace, `NotAuthorisedSigner(0x…, 0x…)` arrives as bare selectors.
+      - name: Forge tests (offline, in-process EVM)
+        run: forge test -vvv
+
+      # The only thing that exercises script/Deploy.s.sol. Runs on the local
+      # EVM with no PRIVATE_KEY and no --rpc-url, so it proves the deploy path
+      # stays compilable and runnable without ever having to broadcast.
+      - name: Deploy script dry run (no key, no RPC)
+        run: forge script script/Deploy.s.sol
+
   # Fails the build if a tracked .env (or any other ignore-pattern file)
   # ever gets committed again. See .gitignore.
   secrets:

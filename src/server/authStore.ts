@@ -18,39 +18,29 @@ const DEFAULT_AVATAR = '/images/avatar-default.svg';
 
 export type AuthOutcome = { ok: true; user: User } | { ok: false; status: number; error: string };
 
-/** In-memory only: the single "first account bootstraps as ADMIN" claim. */
-let bootstrapRoleClaimed = false;
-
 /**
- * ADMIN if the email is listed in ADMIN_EMAILS; otherwise USER — except the
- * very first account on a fresh database, which bootstraps as ADMIN.
- * Shared by password registration and OAuth sign-in.
- *
- * `queryable` MUST already hold `pg_advisory_xact_lock('vanitas.user_bootstrap')`
- * when the caller is about to INSERT: the count and the insert have to happen
- * under the same lock, otherwise two signups racing on an empty database both
- * read 0 rows and BOTH come out as ADMIN. In-memory mode uses a synchronous
- * claim flag for exactly the same reason (JS is single-threaded, so checking
- * and claiming in one tick is atomic).
+ * Production admins must be named explicitly in ADMIN_EMAILS. A first-user
+ * bootstrap remains available only for isolated local development and test
+ * runs that opt in with ALLOW_FIRST_USER_ADMIN=true.
  */
-async function pickInitialRole(email: string, queryable?: { query: (sql: string, params?: unknown[]) => Promise<any> }): Promise<UserRole> {
+let localBootstrapClaimed = false;
+const LOCAL_BOOTSTRAP_LOCK = "select pg_advisory_xact_lock(hashtext('vanitas.local_user_bootstrap'))";
+async function pickInitialRole(
+  email: string,
+  queryable?: { query: (sql: string, params?: unknown[]) => Promise<any> },
+): Promise<UserRole> {
   if (isAdminEmail(email)) return 'ADMIN';
+  if (process.env.NODE_ENV === 'production' || process.env.ALLOW_FIRST_USER_ADMIN !== 'true') return 'USER';
   if (databasePool) {
     const source = queryable || databasePool;
     const count = await source.query('select count(*)::int as n from public.users');
     if ((count.rows[0]?.n ?? 0) === 0) return 'ADMIN';
-  } else if (db.users.length === 0 && !bootstrapRoleClaimed) {
-    // In-memory mode mirrors PostgreSQL: the very first account bootstraps
-    // as ADMIN so a fresh install always has an owner. The flag makes the
-    // check-and-claim atomic within one event-loop turn.
-    bootstrapRoleClaimed = true;
+  } else if (db.users.length === 0 && !localBootstrapClaimed) {
+    localBootstrapClaimed = true;
     return 'ADMIN';
   }
   return 'USER';
 }
-
-/** Serialises the "who is the first ADMIN" decision across concurrent signups. */
-const BOOTSTRAP_LOCK = "select pg_advisory_xact_lock(hashtext('vanitas.user_bootstrap'))";
 
 // ---- password hashing -----------------------------------------------------
 
@@ -217,10 +207,9 @@ export async function createAccount(params: { email: string; password: string; n
     const client = await databasePool.connect();
     try {
       await client.query('begin');
-      // Serialise the bootstrap decision WITH the insert. Without the lock two
-      // signups racing on a fresh database both read 0 users and both become
-      // ADMIN — a silent privilege-escalation race.
-      await client.query(BOOTSTRAP_LOCK);
+      if (process.env.NODE_ENV !== 'production' && process.env.ALLOW_FIRST_USER_ADMIN === 'true') {
+        await client.query(LOCAL_BOOTSTRAP_LOCK);
+      }
 
       const existing = await client.query('select 1 from public.users where lower(email) = $1', [email]);
       if (existing.rowCount) {
@@ -406,16 +395,7 @@ export async function forgetAccount(userId: string): Promise<void> {
       const [removed] = db.users.splice(idx, 1);
       if (removed) memoryPasswords.delete(removed.email);
     }
-    // Re-arm the bootstrap claim once the store is empty again.
-    //
-    // pickInitialRole reads count(*) live in PostgreSQL, so an emptied
-    // database bootstraps a fresh ADMIN on the next signup — in-memory mode
-    // must do the same. The flag was set once and never cleared, so after the
-    // very first account deleted itself every later signup came out USER and
-    // a reset install was left with no owner at all. While any user remains
-    // the flag stays set; clearing it only on emptiness keeps two racing
-    // signups from both reading 0 rows and both claiming ADMIN.
-    if (db.users.length === 0) bootstrapRoleClaimed = false;
+    if (db.users.length === 0) localBootstrapClaimed = false;
     db.apiKeys = db.apiKeys.filter((k) => k.ownerId !== userId);
     for (const [key, rec] of memorySessions) if (rec.userId === userId) memorySessions.delete(key);
     for (const [key, uid] of memoryIdentities) if (uid === userId) memoryIdentities.delete(key);
@@ -971,16 +951,16 @@ export async function upsertOAuthUser(p: OAuthIdentityParams): Promise<User> {
         }
       }
 
-      // 3) Brand new account + identity, created atomically (CTE) — and under
-      //    the same bootstrap lock as createAccount, so a fresh database can
-      //    never mint two ADMINs from two racing signups (password + OAuth).
+      // 3) Brand new account + identity, created atomically (CTE).
       const client = await databasePool.connect();
       let finalRole: UserRole;
       let id: string;
       let username: string;
       try {
         await client.query('begin');
-        await client.query(BOOTSTRAP_LOCK);
+        if (process.env.NODE_ENV !== 'production' && process.env.ALLOW_FIRST_USER_ADMIN === 'true') {
+          await client.query(LOCAL_BOOTSTRAP_LOCK);
+        }
         finalRole = await pickInitialRole(email || 'oauth@unknown', client);
         id = secureId('usr');
         username = await uniqueUsernameFromEmailPg(email || `${provider}${providerId}`);

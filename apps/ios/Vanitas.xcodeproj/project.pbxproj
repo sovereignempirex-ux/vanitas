@@ -1,0 +1,344 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		B10000000000000000000001 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000001 /* Models.swift */; };
+		B10000000000000000000002 /* ApiError.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000002 /* ApiError.swift */; };
+		B10000000000000000000003 /* VanitasClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000003 /* VanitasClient.swift */; };
+		B10000000000000000000004 /* SessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000004 /* SessionStore.swift */; };
+		B10000000000000000000005 /* UsageEvaluator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000005 /* UsageEvaluator.swift */; };
+		B10000000000000000000006 /* VanitasApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000006 /* VanitasApp.swift */; };
+		B10000000000000000000007 /* AppEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000007 /* AppEnvironment.swift */; };
+		B10000000000000000000008 /* PreferencesStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000008 /* PreferencesStore.swift */; };
+		B10000000000000000000009 /* Notifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000009 /* Notifier.swift */; };
+		B1000000000000000000000A /* L10n.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000A /* L10n.swift */; };
+		B1000000000000000000000B /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000B /* RootView.swift */; };
+		B1000000000000000000000C /* LoginView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000C /* LoginView.swift */; };
+		B1000000000000000000000D /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000D /* DashboardView.swift */; };
+		B1000000000000000000000E /* KeysView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000E /* KeysView.swift */; };
+		B1000000000000000000000F /* UsageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000F /* UsageView.swift */; };
+		B10000000000000000000010 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000010 /* SettingsView.swift */; };
+		B10000000000000000000011 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000011 /* Assets.xcassets */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		F10000000000000000000001 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		F10000000000000000000002 /* ApiError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApiError.swift; sourceTree = "<group>"; };
+		F10000000000000000000003 /* VanitasClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VanitasClient.swift; sourceTree = "<group>"; };
+		F10000000000000000000004 /* SessionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionStore.swift; sourceTree = "<group>"; };
+		F10000000000000000000005 /* UsageEvaluator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageEvaluator.swift; sourceTree = "<group>"; };
+		F10000000000000000000006 /* VanitasApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VanitasApp.swift; sourceTree = "<group>"; };
+		F10000000000000000000007 /* AppEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppEnvironment.swift; sourceTree = "<group>"; };
+		F10000000000000000000008 /* PreferencesStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreferencesStore.swift; sourceTree = "<group>"; };
+		F10000000000000000000009 /* Notifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Notifier.swift; sourceTree = "<group>"; };
+		F1000000000000000000000A /* L10n.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = L10n.swift; sourceTree = "<group>"; };
+		F1000000000000000000000B /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
+		F1000000000000000000000C /* LoginView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginView.swift; sourceTree = "<group>"; };
+		F1000000000000000000000D /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
+		F1000000000000000000000E /* KeysView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeysView.swift; sourceTree = "<group>"; };
+		F1000000000000000000000F /* UsageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageView.swift; sourceTree = "<group>"; };
+		F10000000000000000000010 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		F10000000000000000000011 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		F10000000000000000000012 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		F10000000000000000000013 /* Vanitas.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Vanitas.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		C10000000000000000000002 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A10000000000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000002 /* Vanitas */,
+				A10000000000000000000004 /* VanitasCore */,
+				A10000000000000000000005 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A10000000000000000000002 /* Vanitas */ = {
+			isa = PBXGroup;
+			children = (
+				F10000000000000000000006 /* VanitasApp.swift */,
+				F10000000000000000000007 /* AppEnvironment.swift */,
+				F10000000000000000000008 /* PreferencesStore.swift */,
+				F10000000000000000000009 /* Notifier.swift */,
+				F1000000000000000000000A /* L10n.swift */,
+				A10000000000000000000003 /* Views */,
+				F10000000000000000000011 /* Assets.xcassets */,
+				F10000000000000000000012 /* Info.plist */,
+			);
+			path = Vanitas;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000003 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				F1000000000000000000000B /* RootView.swift */,
+				F1000000000000000000000C /* LoginView.swift */,
+				F1000000000000000000000D /* DashboardView.swift */,
+				F1000000000000000000000E /* KeysView.swift */,
+				F1000000000000000000000F /* UsageView.swift */,
+				F10000000000000000000010 /* SettingsView.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000004 /* VanitasCore */ = {
+			isa = PBXGroup;
+			children = (
+				F10000000000000000000001 /* Models.swift */,
+				F10000000000000000000002 /* ApiError.swift */,
+				F10000000000000000000003 /* VanitasClient.swift */,
+				F10000000000000000000004 /* SessionStore.swift */,
+				F10000000000000000000005 /* UsageEvaluator.swift */,
+			);
+			name = VanitasCore;
+			path = Sources/VanitasCore;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000005 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				F10000000000000000000013 /* Vanitas.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		C10000000000000000000010 /* Vanitas */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C10000000000000000000013 /* Build configuration list for PBXNativeTarget "Vanitas" */;
+			buildPhases = (
+				C10000000000000000000001 /* Sources */,
+				C10000000000000000000002 /* Frameworks */,
+				C10000000000000000000003 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Vanitas;
+			productName = Vanitas;
+			productReference = F10000000000000000000013 /* Vanitas.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		C10000000000000000000011 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1500;
+				LastUpgradeCheck = 1500;
+				TargetAttributes = {
+					C10000000000000000000010 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+				};
+			};
+			buildConfigurationList = C10000000000000000000012 /* Build configuration list for PBXProject "Vanitas" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = A10000000000000000000001;
+			productRefGroup = A10000000000000000000005 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				C10000000000000000000010 /* Vanitas */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		C10000000000000000000003 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B10000000000000000000011 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		C10000000000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B10000000000000000000001 /* Models.swift in Sources */,
+				B10000000000000000000002 /* ApiError.swift in Sources */,
+				B10000000000000000000003 /* VanitasClient.swift in Sources */,
+				B10000000000000000000004 /* SessionStore.swift in Sources */,
+				B10000000000000000000005 /* UsageEvaluator.swift in Sources */,
+				B10000000000000000000006 /* VanitasApp.swift in Sources */,
+				B10000000000000000000007 /* AppEnvironment.swift in Sources */,
+				B10000000000000000000008 /* PreferencesStore.swift in Sources */,
+				B10000000000000000000009 /* Notifier.swift in Sources */,
+				B1000000000000000000000A /* L10n.swift in Sources */,
+				B1000000000000000000000B /* RootView.swift in Sources */,
+				B1000000000000000000000C /* LoginView.swift in Sources */,
+				B1000000000000000000000D /* DashboardView.swift in Sources */,
+				B1000000000000000000000E /* KeysView.swift in Sources */,
+				B1000000000000000000000F /* UsageView.swift in Sources */,
+				B10000000000000000000010 /* SettingsView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		C10000000000000000000020 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		C10000000000000000000021 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		C10000000000000000000022 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_TESTABILITY = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Vanitas/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.vanitas.ios;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		C10000000000000000000023 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Vanitas/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.vanitas.ios;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		C10000000000000000000012 /* Build configuration list for PBXProject "Vanitas" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C10000000000000000000020 /* Debug */,
+				C10000000000000000000021 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		C10000000000000000000013 /* Build configuration list for PBXNativeTarget "Vanitas" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C10000000000000000000022 /* Debug */,
+				C10000000000000000000023 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = C10000000000000000000011 /* Project object */;
+}

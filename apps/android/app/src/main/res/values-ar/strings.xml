@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">فانيتاس</string>
+
+    <!-- Sign in -->
+    <string name="login_title">تسجيل الدخول إلى فانيتاس</string>
+    <string name="login_subtitle">مفاتيح الـ API والاستخدام، من موبايلك.</string>
+    <string name="hint_server">رابط الخادم</string>
+    <string name="hint_email">البريد الإلكتروني</string>
+    <string name="hint_password">كلمة المرور</string>
+    <string name="hint_totp">الرمز المكوّن من 6 أرقام</string>
+    <string name="label_2fa_hint">التحقق بخطوتين مفعّل — اكتب الكود من تطبيق المصادقة.</string>
+    <string name="action_sign_in">دخول</string>
+    <string name="action_signing_in">جارٍ الدخول…</string>
+    <string name="error_required">البريد وكلمة المرور مطلوبان</string>
+
+    <!-- Dashboard -->
+    <string name="title_dashboard">لوحة التحكم</string>
+    <string name="label_signed_in_as">مسجّل الدخول باسم %1$s</string>
+    <string name="action_keys">مفاتيح API</string>
+    <string name="action_usage">الاستخدام</string>
+    <string name="action_settings">الإعدادات</string>
+    <string name="action_sign_out">تسجيل الخروج</string>
+
+    <!-- API keys -->
+    <string name="title_keys">مفاتيح API</string>
+    <string name="action_add_key">مفتاح جديد</string>
+    <string name="empty_keys">لا توجد مفاتيح بعد — أنشئ أول مفتاح.</string>
+    <string name="label_scopes">النطاقات: %1$s</string>
+    <string name="label_rate_limit">%1$d طلب/دقيقة</string>
+    <string name="label_usage_count">%1$d طلب</string>
+    <string name="action_revoke">إلغاء</string>
+    <string name="action_cancel">إلغاء</string>
+    <string name="action_create">إنشاء</string>
+    <string name="dialog_key_name">اسم المفتاح</string>
+    <string name="dialog_revoke_title">إلغاء %1$s؟</string>
+    <string name="dialog_revoke_body">الطلبات اللي بتستخدم المفتاح ده هتفشل فورًا، ومفيش رجوع.</string>
+    <string name="msg_key_created">تم إنشاء المفتاح — انسخ السر دلوقتي، بيظهر مرة واحدة بس.</string>
+    <string name="msg_key_revoked">تم إلغاء المفتاح</string>
+
+    <!-- Usage -->
+    <string name="title_usage">الاستخدام</string>
+    <string name="period_24h">24 ساعة</string>
+    <string name="period_7d">7 أيام</string>
+    <string name="period_30d">30 يوم</string>
+    <string name="label_total_requests">الطلبات</string>
+    <string name="label_success">النجاح</string>
+    <string name="label_errors">الأخطاء</string>
+    <string name="label_throttled">المقيّدة</string>
+    <string name="label_quota">الحصة %1$d%%</string>
+    <string name="label_peak_rpm">الذروة %1$d/د</string>
+    <string name="label_latency">%1$d مللي ثانية متوسط</string>
+    <string name="label_no_quota">بدون حصة شهرية</string>
+    <string name="empty_usage">مفيش حركة في المدة دي.</string>
+
+    <!-- Settings -->
+    <string name="title_settings">الإعدادات</string>
+    <string name="label_notifications">تنبيهات الاستخدام</string>
+    <string name="label_notifications_hint">نبّهني لو مفتاح قرب يخلّص حصته أو بدأ يفشل.</string>
+    <string name="hint_threshold">حد تنبيه الحصة: %1$d%%</string>
+    <string name="action_save">حفظ</string>
+    <string name="msg_saved">تم حفظ الإعدادات</string>
+    <string name="label_version">فانيتاس أندرويد %1$s</string>
+    <string name="label_build">Kotlin · إصدار %1$s</string>
+
+    <!-- Errors -->
+    <string name="error_network">تعذّر الوصول للخادم. اتأكد من الرابط في الإعدادات.</string>
+    <string name="error_auth">انتهت الجلسة — سجّل الدخول تاني.</string>
+    <string name="error_generic">حصل خطأ: %1$s</string>
+    <string name="empty_fields_fill">اكتب كل البيانات الأول.</string>
+
+    <!-- Notifications -->
+    <string name="channel_usage">تنبيهات الاستخدام</string>
+    <string name="channel_usage_desc">تنبيهات الحصة والأخطاء وتجاوز الحد لمفاتيح الـ API.</string>
+    <string name="notif_quota_title">الحصة · %1$s</string>
+    <string name="notif_quota_body">%1$s وصل لـ %2$d%% من حصته الشهرية.</string>
+    <string name="notif_errors_title">ارتفاع الأخطاء · %1$s</string>
+    <string name="notif_errors_body">%1$d من %2$d طلب فشل على %3$s.</string>
+    <string name="notif_throttled_title">تجاوز الحد · %1$s</string>
+    <string name="notif_throttled_body">%1$d من %2$d طلب اتقيد على %3$s.</string>
+    <string name="notif_permission_rationale">أندرويد محتاج إذنك عشان يعرض تنبيهات الاستخدام.</string>
+</resources>

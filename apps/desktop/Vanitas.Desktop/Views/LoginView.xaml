@@ -1,0 +1,56 @@
+<UserControl x:Class="Vanitas.Desktop.Views.LoginView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Background="{StaticResource BgBrush}">
+    <!-- Code-behind, not bindings: every string below is assigned in
+         LoginView.xaml.cs, so a wrong path is a compile error rather than a
+         silently blank box the user cannot sign in from. -->
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="400" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+
+        <Border Grid.Column="1" Style="{StaticResource Card}"
+                VerticalAlignment="Center" Padding="32">
+
+            <StackPanel>
+                <TextBlock x:Name="Heading" Style="{StaticResource Heading}"
+                           HorizontalAlignment="Center" />
+                <TextBlock x:Name="Subtitle" Style="{StaticResource Hint}"
+                           HorizontalAlignment="Center" Margin="0,0,0,24" />
+
+                <TextBlock x:Name="EmailLabel" Style="{StaticResource Label}" />
+                <TextBox x:Name="EmailBox" Style="{StaticResource Field}" />
+
+                <TextBlock x:Name="PasswordLabel" Style="{StaticResource Label}" />
+                <PasswordBox x:Name="PasswordBox" Style="{StaticResource Field}"
+                             PasswordChanged="Password_Changed" />
+
+                <!-- Revealed only once the gateway answers 401 with
+                     twoFactorRequired, so it never asks for a code the
+                     account does not have. -->
+                <StackPanel x:Name="CodeRow" Visibility="Collapsed">
+                    <TextBlock x:Name="CodeLabel" Style="{StaticResource Label}" />
+                    <TextBox x:Name="CodeBox" Style="{StaticResource Field}" />
+                </StackPanel>
+
+                <!-- The client's own sentence for the failure — never a type
+                     name, never a stack trace. -->
+                <TextBlock x:Name="ErrorText" Foreground="{StaticResource DangerBrush}"
+                           Style="{StaticResource Hint}" Margin="0,0,0,12"
+                           Visibility="Collapsed" />
+
+                <Button x:Name="SignInButton" Style="{StaticResource PrimaryButton}"
+                        Margin="0,0,0,16" Click="SignIn_Click" />
+
+                <TextBlock x:Name="ServerLabel" Style="{StaticResource Label}" />
+                <TextBox x:Name="ServerBox" Style="{StaticResource Field}"
+                         Margin="0,0,0,0" />
+                <TextBlock x:Name="ServerHint" Style="{StaticResource Hint}"
+                           Margin="0,6,0,0" />
+            </StackPanel>
+        </Border>
+    </Grid>
+</UserControl>

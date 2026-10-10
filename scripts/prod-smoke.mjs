@@ -1,6 +1,7 @@
 // Production smoke test: verifies the REAL deployment end-to-end and cleans
 // up after itself completely — afterwards the database must be empty again
-// (so the owner's first registration bootstraps as ADMIN).
+// Production registration never grants ADMIN by creation order; smoke addresses
+// must be explicitly allowlisted if a future smoke step needs admin access.
 // Run: node scripts/prod-smoke.mjs
 import crypto from 'crypto';
 
@@ -212,12 +213,9 @@ const email = `smoke_${stamp}@example.com`;
 const password = 'SmokeTest123!';
 r = await call('POST', '/auth/register', { body: { email, password, name: 'Smoke Tester' } });
 check('register → 201 + session', r.status === 201 && String(r.json?.token).startsWith('vnt_sess_'), r);
-const bootstrapAdmin = r.json?.user?.role === 'ADMIN';
 check(
-  bootstrapAdmin
-    ? 'production DB was empty → bootstrap ADMIN'
-    : 'owner accounts already exist → bootstrap ADMIN consumed (new user = USER)',
-  bootstrapAdmin || r.json?.user?.role === 'USER',
+  'production registration does not grant ADMIN by account order',
+  r.json?.user?.role === 'USER',
   r.json?.user,
 );
 let token = r.json?.token;
@@ -391,8 +389,8 @@ r = await call('GET', '/auth/me', { token });
 check('session died with account → 401', r.status === 401, r);
 r = await call('POST', '/auth/register', { body: { email, password, name: 'Smoke Tester' } });
 check(
-  're-register after cleanup → 201 + sane role (ADMIN if DB empty, USER if owner exists)',
-  r.status === 201 && (r.json?.user?.role === 'ADMIN' || r.json?.user?.role === 'USER'),
+  're-register after cleanup → 201 + USER role',
+  r.status === 201 && r.json?.user?.role === 'USER',
   r.json?.user,
 );
 r = await call('DELETE', '/auth/account', { token: r.json?.token });

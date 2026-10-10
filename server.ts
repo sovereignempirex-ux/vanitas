@@ -24,6 +24,8 @@ import {
   fetchProfile,
 } from './src/server/oauth.ts';
 import { processAiQuery, processAiQueryStream, diagnoseAndFixCode, performSemanticSearch, searchYouTubeVideos, getLastAiUpstream } from './src/server/aiService.ts';
+import { remoteAnalyze, remoteReport, getAnalyticsServiceUrl } from './src/server/analyticsRemote.ts';
+import { nativeAnalyze, nativeReport, nativeTimeseriesCsv, nativeEndpointsCsv, ANALYTICS_PERIODS, type AnalyticsPeriod, type UsageEvent } from './src/server/analyticsNative.ts';
 import { authenticateApiKey, requireScope, rateWindowStatus, nextQuotaReset } from './src/server/apiKeyAuth.ts';
 import { loadApiKeys, saveApiKey, flushAllUsage } from './src/server/apiKeyStore.ts';
 import { saveGitHubToken, getGitHubToken, clearGitHubToken, listUserRepos, importRepoFiles, GITHUB_ERRORS } from './src/server/githubStore.ts';
@@ -615,6 +617,9 @@ export async function buildApp() {
   // keeps a spraying client from burning that quota.
   app.use('/api/v1/github/', rateLimit({ windowMs: 60_000, max: 30 }));
   app.use('/api/v1/publish/', rateLimit({ windowMs: 60_000, max: 60, perIpOnly: true }));
+  // Analysis reads ship the whole usage window to Python on every call, so a
+  // tighter ceiling keeps a refresh-happy dashboard from flooding the service.
+  app.use('/api/v1/analytics/', rateLimit({ windowMs: 60_000, max: 60 }));
   // OAuth provider surface. The authorize-validation + consent
   // decision endpoints are path-parameter-free but hit by
   // browsers; the token endpoint exchanges credentials, so it
@@ -742,10 +747,30 @@ export async function buildApp() {
       ready: database !== 'unreachable',
       database,
       auth: 'ready',
-      ai: process.env.AI_PROVIDER === 'ollama' ? 'ollama_configured' : process.env.GEMINI_API_KEY ? 'gemini_enabled' : 'pollinations_free',
+      ai: process.env.AI_PROVIDER === 'ollama'
+        ? 'ollama_configured'
+        : process.env.AI_PROVIDER === 'pollinations'
+          ? 'pollinations_free'
+          : process.env.GEMINI_API_KEY ? 'gemini_enabled' : 'pollinations_free',
       // Why the last live AI attempt degraded (null when healthy) — honest,
       // machine-readable diagnostics for ops and smoke tests.
       aiUpstream: getLastAiUpstream(),
+      // Where the AI/ML domain is executed: the Python microservice when
+      // AI_SERVICE_URL is set (with automatic fallback), else the built-in
+      // TypeScript chain. See services/ai-service/README.md.
+      aiService: process.env.AI_SERVICE_URL
+        ? `python_remote:${process.env.AI_SERVICE_URL.replace(/\/+$/, '')}`
+        : 'typescript_native',
+      // Where the servers/Go domain runs: the Go shared bucket when
+      // RATELIMIT_SERVICE_URL is set (automatic fallback), else the built-in
+      // in-memory limiter. See services/ratelimit/README.md.
+      rateLimitService: process.env.RATELIMIT_SERVICE_URL
+        ? `go_remote:${process.env.RATELIMIT_SERVICE_URL.replace(/\/+$/, '')}`
+        : 'typescript_native',
+      // Data-analysis domain (services/analytics) — same fallback contract.
+      analyticsService: process.env.ANALYTICS_SERVICE_URL
+        ? `python_remote:${process.env.ANALYTICS_SERVICE_URL.replace(/\/+$/, '')}`
+        : 'typescript_native',
       mode: process.env.DEMO_MODE === 'true' && process.env.NODE_ENV !== 'production' ? 'demo' : 'authenticated',
     });
   });
@@ -1829,6 +1854,64 @@ export async function buildApp() {
     // analytics of keys they own (null ownerId = no restriction).
     const data = db.getKeyUsageAnalytics(period, actor.role === 'ADMIN' ? null : actor.id);
     res.json(data);
+  });
+
+  // Deep usage analysis — the data-analysis domain lives in Python/R
+  // (`services/analytics`). The gateway forwards the raw usage window and
+  // falls back to the native TypeScript analysis whenever the service is
+  // unconfigured, unreachable or answers with an unexpected shape.
+  const analyticsPeriod = (raw: unknown): AnalyticsPeriod =>
+    (ANALYTICS_PERIODS as string[]).includes(String(raw)) ? (raw as AnalyticsPeriod) : '24h';
+
+  const analyticsEventsFor = (actor: { id: string; role: string }): UsageEvent[] => {
+    // Admins analyse the fleet; a signed-in user only their own keys' events.
+    const ownerId = actor.role === 'ADMIN' ? null : actor.id;
+    const events = db.apiKeyUsageEvents;
+    return ownerId ? events.filter((event) => event.ownerId === ownerId) : [...events];
+  };
+
+  const analyticsUpstream = (): string => {
+    const url = getAnalyticsServiceUrl();
+    return url ? `python_remote:${url}` : 'typescript_native';
+  };
+
+  // GET /api/v1/analytics/insights?period=24h|7d|30d
+  app.get('/api/v1/analytics/insights', async (req, res) => {
+    try {
+      const actor = getActorUser(req);
+      if (!actor) return res.status(401).json({ error: 'Authentication required' });
+      const period = analyticsPeriod(req.query.period);
+      const events = analyticsEventsFor(actor);
+      const remote = await remoteAnalyze(events, period);
+      if (remote) return res.json({ ...remote, upstream: analyticsUpstream() });
+      return res.json({ ...nativeAnalyze(events, period), upstream: 'typescript_native' });
+    } catch (error) {
+      console.error('analytics insights failed:', error);
+      res.status(500).json({ error: 'Analysis failed' });
+    }
+  });
+
+  // GET /api/v1/analytics/report?period=24h|7d|30d — Markdown + CSV exports.
+  app.get('/api/v1/analytics/report', async (req, res) => {
+    try {
+      const actor = getActorUser(req);
+      if (!actor) return res.status(401).json({ error: 'Authentication required' });
+      const period = analyticsPeriod(req.query.period);
+      const events = analyticsEventsFor(actor);
+      const remote = await remoteReport(events, period);
+      if (remote) return res.json({ ...remote, upstream: analyticsUpstream() });
+      const analysis = nativeAnalyze(events, period);
+      return res.json({
+        markdown: nativeReport(analysis),
+        timeseriesCsv: nativeTimeseriesCsv(analysis),
+        endpointsCsv: nativeEndpointsCsv(analysis),
+        analysis,
+        upstream: 'typescript_native',
+      });
+    } catch (error) {
+      console.error('analytics report failed:', error);
+      res.status(500).json({ error: 'Report failed' });
+    }
   });
 
   // API Key Create (with assertGrantableScopes + strict validation)

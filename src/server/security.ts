@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import type { Request, Response, NextFunction } from 'express';
 import { db } from './db.ts';
+import { getRateLimitServiceUrl, remoteRateCheck, type RateDecision } from './rateLimitRemote.ts';
 import type { User } from '../types.ts';
 
 // ---------------------------------------------------------------------------
@@ -136,9 +137,15 @@ function pruneHits(): void {
 export function rateLimit({ windowMs = 60_000, max = 120, perIpOnly = false }: { windowMs?: number; max?: number; perIpOnly?: boolean }) {
   if (windowMs > maxWindowMs) maxWindowMs = windowMs;
   const namespace = ++limiterSeq;
-  return (req: Request, res: Response, next: NextFunction) => {
+  const bucketKey = (req: Request): string => {
     const ip = req.ip || req.socket.remoteAddress || 'unknown';
-    const key = perIpOnly ? `${ip}:*:l${namespace}` : `${ip}:l${namespace}:${req.path}`;
+    return perIpOnly ? `${ip}:*:l${namespace}` : `${ip}:l${namespace}:${req.path}`;
+  };
+
+  // Native path — byte-for-byte the original behaviour, used whenever the Go
+  // service is unconfigured or unreachable.
+  const localCheck = (req: Request, res: Response, next: NextFunction) => {
+    const key = bucketKey(req);
     const now = Date.now();
     if (++sweepCounter % 1000 === 0) pruneHits();
     const arr = (hits.get(key) || []).filter((t) => now - t < windowMs);
@@ -149,6 +156,30 @@ export function rateLimit({ windowMs = 60_000, max = 120, perIpOnly = false }: {
     arr.push(now);
     hits.set(key, arr);
     next();
+  };
+
+  // Delegated path — one shared bucket for every gateway instance. Exactly one
+  // of {remote decision, local check} runs per request, so a slow or dead Go
+  // service degrades to the native limiter instead of dropping the request.
+  const check = async (req: Request, res: Response, next: NextFunction) => {
+    let decision: RateDecision | null = null;
+    try {
+      decision = await remoteRateCheck(bucketKey(req), windowMs, max);
+    } catch {
+      decision = null;
+    }
+    if (!decision) return localCheck(req, res, next);
+    if (!decision.allowed) {
+      res.setHeader('Retry-After', decision.retryAfterSecs);
+      return res.status(429).json({ error: 'Too many requests. Slow down and retry.' });
+    }
+    return next();
+  };
+
+  return (req: Request, res: Response, next: NextFunction) => {
+    // Fast path for the default deployment: no env read per request beyond this.
+    if (!getRateLimitServiceUrl()) return localCheck(req, res, next);
+    void check(req, res, next);
   };
 }
 

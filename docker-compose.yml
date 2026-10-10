@@ -35,6 +35,13 @@ services:
       NODE_ENV: production
       AI_PROVIDER: ollama
       OLLAMA_BASE_URL: http://ollama:11434
+      # The AI/ML domain runs in Python; the TS gateway delegates to it and
+      # silently falls back to its own chain if this container is unreachable.
+      AI_SERVICE_URL: http://ai-service:8100
+      # Data analysis runs in Python too — same delegation + fallback contract.
+      ANALYTICS_SERVICE_URL: http://analytics:8200
+      # Rate limiting runs in Go — same delegation + fallback contract.
+      RATELIMIT_SERVICE_URL: http://ratelimit:8300
       # Derived from POSTGRES_PASSWORD so the app can never drift from the
       # password Postgres was initialised with (env_file's localhost URL is
       # for `npm run dev` outside Docker; this entry overrides it in-container).
@@ -45,6 +52,98 @@ services:
         condition: service_healthy
       ollama:
         condition: service_started
+      ai-service:
+        condition: service_started
+      analytics:
+        condition: service_started
+      ratelimit:
+        condition: service_started
+
+  # AI/ML domain — Python (services/ai-service), per the platform language map.
+  ai-service:
+    build: ./services/ai-service
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8100:8100"
+    env_file: .env
+    environment:
+      AI_SERVICE_HOST: 0.0.0.0
+      AI_SERVICE_PORT: 8100
+      AI_PROVIDER: ollama
+      OLLAMA_BASE_URL: http://ollama:11434
+    depends_on:
+      ollama:
+        condition: service_started
+
+  # Data-analysis domain — Python (+ optional R), services/analytics.
+  # Pass WITH_R=1 (docker compose build --build-arg WITH_R=1 analytics) to bake
+  # R into the image; without it the service serves the same numbers from its
+  # built-in Python engine.
+  analytics:
+    build:
+      context: ./services/analytics
+      args:
+        WITH_R: "0"
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8200:8200"
+    env_file: .env
+    environment:
+      ANALYTICS_SERVICE_HOST: 0.0.0.0
+      ANALYTICS_SERVICE_PORT: 8200
+
+  # Rate limiting — Go (services/ratelimit). One shared bucket for every
+  # gateway instance; the gateway falls back to its built-in limiter if this
+  # container is unreachable, so no request is ever dropped because it is down.
+  ratelimit:
+    build: ./services/ratelimit
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8300:8300"
+    env_file: .env
+    environment:
+      RATELIMIT_HOST: 0.0.0.0
+      RATELIMIT_PORT: 8300
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8300/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Blockchain domain — Solidity (contracts/), per the platform language map.
+  # A local Anvil node so the contract can be deployed to a real chain without
+  # touching a public network:
+  #
+  #   docker compose up -d anvil
+  #   # anvil prints ten funded dev accounts and their keys on startup;
+  #   # put the first one in .env as CREDIT_DEPLOYER_PRIVATE_KEY.
+  #   forge script contracts/script/Deploy.s.sol --rpc-url http://127.0.0.1:8545 \
+  #       --private-key "$CREDIT_DEPLOYER_PRIVATE_KEY" --broadcast
+  #
+  # Opt-in only: nothing here depends on it. `forge test` never needs a node
+  # (it runs on Foundry's in-process EVM) and the gateway does not talk to the
+  # contract at all — this exists purely to make a local deployment possible.
+  #
+  # ghcr publishes only `latest`, `master` and nightly tags for this image, so
+  # `latest` is as pinned as it gets; the bytecode stays reproducible anyway
+  # because foundry.toml pins solc itself (solc_version = "0.8.30").
+  #
+  # The account below holds Anvil's well-known throwaway mnemonic, printed by
+  # every client. It carries nothing and must never be pointed at a real
+  # network — which is also why the port binds to loopback only.
+  anvil:
+    image: ghcr.io/foundry-rs/foundry:latest
+    entrypoint: ["anvil"]
+    command:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8545"
+      - --chain-id
+      - "31337"
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8545:8545"
 
 volumes:
   postgres_data:

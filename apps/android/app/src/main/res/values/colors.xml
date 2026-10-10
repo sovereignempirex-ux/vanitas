@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="vanitas_primary">#4F46E5</color>
+    <color name="vanitas_primary_dark">#3730A3</color>
+    <color name="vanitas_accent">#22D3EE</color>
+    <color name="vanitas_background">#0B1020</color>
+    <color name="vanitas_surface">#151B2E</color>
+    <color name="vanitas_on_surface">#E5E7EB</color>
+    <color name="vanitas_muted">#94A3B8</color>
+    <color name="vanitas_danger">#F87171</color>
+    <color name="vanitas_success">#34D399</color>
+    <color name="ic_launcher_background">#4F46E5</color>
+</resources>

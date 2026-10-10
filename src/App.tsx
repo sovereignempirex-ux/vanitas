@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { lazy, Suspense, useEffect, useState } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext.tsx';
 import { Header } from './components/Header.tsx';
 import { Sidebar } from './components/Sidebar.tsx';
@@ -9,26 +9,28 @@ import { ProfilePage } from './pages/ProfilePage.tsx';
 import { AuthModal } from './components/AuthModal.tsx';
 import { LandingPage } from './pages/LandingPage.tsx';
 import { VIEW_SEO, seoForAuthPage, seoForInvitePage, seoForLandingPage, setPageSeo } from './lib/seo.ts';
+const TechMapPage = lazy(() => import('./pages/TechMapPage.tsx').then((m) => ({ default: m.TechMapPage })));
 
-// Views
-import { OverviewView } from './components/views/OverviewView.tsx';
-import { ApiKeysView } from './components/views/ApiKeysView.tsx';
-import { PlaygroundView } from './components/views/PlaygroundView.tsx';
-import { DocsView } from './components/views/DocsView.tsx';
-import { AdminCenterView } from './components/views/AdminCenterView.tsx';
-import { AuditLogsView } from './components/views/AuditLogsView.tsx';
-import { SecurityView } from './components/views/SecurityView.tsx';
-import { AiAssistantView } from './components/views/AiAssistantView.tsx';
-import { BotGatewayView } from './components/views/BotGatewayView.tsx';
-import { WebhooksView } from './components/views/WebhooksView.tsx';
-import { StatusView } from './components/views/StatusView.tsx';
-import { ProfileView } from './components/views/ProfileView.tsx';
-import { DownloadsView } from './components/views/DownloadsView.tsx';
-import { SocialView } from './components/views/SocialView.tsx';
-import { PublishView } from './components/views/PublishView.tsx';
-import { OAuthAppsView } from './components/views/OAuthAppsView.tsx';
-import { ServerOrdersView } from './components/views/ServerOrdersView.tsx';
-import { OAuthConsentView } from './components/views/OAuthConsentView.tsx';
+// Load dashboard sections on demand so public landing and sign-in pages do not
+// download charts, admin tools and the AI workspace before a user needs them.
+const OverviewView = lazy(() => import('./components/views/OverviewView.tsx').then((m) => ({ default: m.OverviewView })));
+const ApiKeysView = lazy(() => import('./components/views/ApiKeysView.tsx').then((m) => ({ default: m.ApiKeysView })));
+const PlaygroundView = lazy(() => import('./components/views/PlaygroundView.tsx').then((m) => ({ default: m.PlaygroundView })));
+const DocsView = lazy(() => import('./components/views/DocsView.tsx').then((m) => ({ default: m.DocsView })));
+const AdminCenterView = lazy(() => import('./components/views/AdminCenterView.tsx').then((m) => ({ default: m.AdminCenterView })));
+const AuditLogsView = lazy(() => import('./components/views/AuditLogsView.tsx').then((m) => ({ default: m.AuditLogsView })));
+const SecurityView = lazy(() => import('./components/views/SecurityView.tsx').then((m) => ({ default: m.SecurityView })));
+const AiAssistantView = lazy(() => import('./components/views/AiAssistantView.tsx').then((m) => ({ default: m.AiAssistantView })));
+const BotGatewayView = lazy(() => import('./components/views/BotGatewayView.tsx').then((m) => ({ default: m.BotGatewayView })));
+const WebhooksView = lazy(() => import('./components/views/WebhooksView.tsx').then((m) => ({ default: m.WebhooksView })));
+const StatusView = lazy(() => import('./components/views/StatusView.tsx').then((m) => ({ default: m.StatusView })));
+const ProfileView = lazy(() => import('./components/views/ProfileView.tsx').then((m) => ({ default: m.ProfileView })));
+const DownloadsView = lazy(() => import('./components/views/DownloadsView.tsx').then((m) => ({ default: m.DownloadsView })));
+const SocialView = lazy(() => import('./components/views/SocialView.tsx').then((m) => ({ default: m.SocialView })));
+const PublishView = lazy(() => import('./components/views/PublishView.tsx').then((m) => ({ default: m.PublishView })));
+const OAuthAppsView = lazy(() => import('./components/views/OAuthAppsView.tsx').then((m) => ({ default: m.OAuthAppsView })));
+const ServerOrdersView = lazy(() => import('./components/views/ServerOrdersView.tsx').then((m) => ({ default: m.ServerOrdersView })));
+const OAuthConsentView = lazy(() => import('./components/views/OAuthConsentView.tsx').then((m) => ({ default: m.OAuthConsentView })));
 
 const AppContent: React.FC = () => {
   const { activeView, user, authLoading } = useAuth();
@@ -42,6 +44,7 @@ const AppContent: React.FC = () => {
   const inviteToken = path.startsWith('/invite/') ? path.slice('/invite/'.length) : null;
   // Public profile: /u/<username> (shareable @username page, no shell).
   const publicProfileName = path.startsWith('/u/') ? path.slice('/u/'.length) : null;
+  const techMapPage = path === '/languages';
   // OAuth consent: /oauth/consent (third-party sign-in, no shell).
   const oauthConsent = path === '/oauth/consent';
 
@@ -56,6 +59,13 @@ const AppContent: React.FC = () => {
         title: 'Sign in with Vanitas',
         description:
           'Authorize a third-party application to sign you in with your Vanitas account.',
+      });
+      return;
+    }
+    if (techMapPage) {
+      setPageSeo({
+        title: 'دليل لغات البرمجة حسب المجال',
+        description: 'خريطة عربية تفاعلية تربط مجالات التقنية بلغات البرمجة، مع بحث وتصفية حسب اللغة.',
       });
       return;
     }
@@ -78,7 +88,7 @@ const AppContent: React.FC = () => {
       return;
     }
     setPageSeo(VIEW_SEO[activeView] || VIEW_SEO.overview);
-  }, [authPage, authLoading, user, activeView, path, inviteToken, publicProfileName]);
+  }, [authPage, authLoading, user, activeView, path, inviteToken, publicProfileName, techMapPage]);
 
   const renderActiveView = () => {
     switch (activeView) {
@@ -139,6 +149,10 @@ const AppContent: React.FC = () => {
     return <ProfilePage username={publicProfileName} />;
   }
 
+  if (techMapPage) {
+    return <Suspense fallback={<PageLoading />}><TechMapPage /></Suspense>;
+  }
+
   // OAuth consent — standalone sign-in page for third-party
   // apps. Signed-out visitors land on the login page; after
   // signing in they return here (the `next` parameter in
@@ -153,7 +167,7 @@ const AppContent: React.FC = () => {
       );
     }
     if (!user) return <AuthPage mode="login" />;
-    return <OAuthConsentView />;
+    return <Suspense fallback={<PageLoading />}><OAuthConsentView /></Suspense>;
   }
 
   // REAL ACCOUNTS ONLY: the dashboard is gated behind server-verified auth.
@@ -193,7 +207,7 @@ const AppContent: React.FC = () => {
         {/* Content View Container */}
         <main className="flex-1 lg:pl-64 flex flex-col min-w-0">
           <div className="flex-1 p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto vnt-fade-up" key={activeView}>
-            {renderActiveView()}
+            <Suspense fallback={<PageLoading />}>{renderActiveView()}</Suspense>
           </div>
 
           {/* Footer */}
@@ -231,5 +245,12 @@ export function App() {
     </AuthProvider>
   );
 }
+
+const PageLoading: React.FC = () => (
+  <div className="flex min-h-56 items-center justify-center gap-3 text-sm text-slate-400" role="status" aria-live="polite">
+    <span className="h-5 w-5 animate-spin rounded-full border-2 border-blue-400/30 border-t-blue-300" aria-hidden="true" />
+    Loading Vanitas…
+  </div>
+);
 
 export default App;

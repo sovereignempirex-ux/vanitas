@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Vanitas</string>
+
+    <!-- Sign in -->
+    <string name="login_title">Sign in to Vanitas</string>
+    <string name="login_subtitle">Your API keys and usage, from your pocket.</string>
+    <string name="hint_server">Server URL</string>
+    <string name="hint_email">Email</string>
+    <string name="hint_password">Password</string>
+    <string name="hint_totp">6-digit code</string>
+    <string name="label_2fa_hint">Two-factor authentication is on — enter the code from your authenticator app.</string>
+    <string name="action_sign_in">Sign in</string>
+    <string name="action_signing_in">Signing in…</string>
+    <string name="error_required">Email and password are required</string>
+
+    <!-- Dashboard -->
+    <string name="title_dashboard">Dashboard</string>
+    <string name="label_signed_in_as">Signed in as %1$s</string>
+    <string name="action_keys">API keys</string>
+    <string name="action_usage">Usage</string>
+    <string name="action_settings">Settings</string>
+    <string name="action_sign_out">Sign out</string>
+
+    <!-- API keys -->
+    <string name="title_keys">API keys</string>
+    <string name="action_add_key">New key</string>
+    <string name="empty_keys">No API keys yet — create your first one.</string>
+    <string name="label_scopes">Scopes: %1$s</string>
+    <string name="label_rate_limit">%1$d req/min</string>
+    <string name="label_usage_count">%1$d requests</string>
+    <string name="action_revoke">Revoke</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="action_create">Create</string>
+    <string name="dialog_key_name">Key name</string>
+    <string name="dialog_revoke_title">Revoke %1$s?</string>
+    <string name="dialog_revoke_body">Requests using this key start failing immediately. This cannot be undone.</string>
+    <string name="msg_key_created">Key created — copy the secret now, it is shown only once.</string>
+    <string name="msg_key_revoked">Key revoked</string>
+
+    <!-- Usage -->
+    <string name="title_usage">Usage</string>
+    <string name="period_24h">24h</string>
+    <string name="period_7d">7d</string>
+    <string name="period_30d">30d</string>
+    <string name="label_total_requests">Requests</string>
+    <string name="label_success">Success</string>
+    <string name="label_errors">Errors</string>
+    <string name="label_throttled">Throttled</string>
+    <string name="label_quota">Quota %1$d%%</string>
+    <string name="label_peak_rpm">Peak %1$d rpm</string>
+    <string name="label_latency">%1$d ms avg</string>
+    <string name="label_no_quota">No monthly quota</string>
+    <string name="empty_usage">No traffic in this window.</string>
+
+    <!-- Settings -->
+    <string name="title_settings">Settings</string>
+    <string name="label_notifications">Usage alerts</string>
+    <string name="label_notifications_hint">Notify me when a key nears its quota or starts failing.</string>
+    <string name="hint_threshold">Quota alert threshold: %1$d%%</string>
+    <string name="action_save">Save</string>
+    <string name="msg_saved">Settings saved</string>
+    <string name="label_version">Vanitas Android %1$s</string>
+    <string name="label_build">Kotlin · %1$s build</string>
+
+    <!-- Errors -->
+    <string name="error_network">Cannot reach the server. Check the URL in Settings.</string>
+    <string name="error_auth">Session expired — please sign in again.</string>
+    <string name="error_generic">Something went wrong: %1$s</string>
+    <string name="empty_fields_fill">Fill in every field first.</string>
+
+    <!-- Notifications -->
+    <string name="channel_usage">Usage alerts</string>
+    <string name="channel_usage_desc">Quota, error and rate-limit alerts for your API keys.</string>
+    <string name="notif_quota_title">Quota · %1$s</string>
+    <string name="notif_quota_body">%1$s has reached %2$d%% of its monthly quota.</string>
+    <string name="notif_errors_title">Error spike · %1$s</string>
+    <string name="notif_errors_body">%1$d of %2$d requests failed on %3$s.</string>
+    <string name="notif_throttled_title">Rate limited · %1$s</string>
+    <string name="notif_throttled_body">%1$d of %2$d requests were throttled on %3$s.</string>
+    <string name="notif_permission_rationale">Android needs your permission to show usage alerts.</string>
+</resources>

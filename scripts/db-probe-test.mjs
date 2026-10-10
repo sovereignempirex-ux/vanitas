@@ -2,10 +2,10 @@
 //
 //   node scripts/db-probe-test.mjs
 //
-// IMPORTANT: run this against a FRESH memory-mode server and NOT before the
-// other suites — it registers the first user (who must bootstrap as ADMIN)
-// and leaves accounts behind. Run it instead of admin-test on a dedicated
-// fresh server, or after killing and restarting the server.
+// IMPORTANT: run this against a FRESH memory-mode server with
+// ALLOW_FIRST_USER_ADMIN=true and NOT before the other suites — it registers
+// the first user as ADMIN and leaves accounts behind. This opt-in is ignored
+// in production. Run it on a dedicated fresh local server.
 const BASE = 'http://127.0.0.1:3111/api/v1';
 let pass = 0, fail = 0;
 function check(name, cond, detail) {

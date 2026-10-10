@@ -24,6 +24,40 @@ tools/blender/_test_*.png
 __pycache__/
 *.pyc
 
+# Python AI service (services/ai-service) — virtualenv & test caches
+.venv/
+.pytest_cache/
+
+# Swift package build output (apps/ios) — SwiftPM writes this inside the
+# package directory, and it contains generated sources (DerivedSources/),
+# module caches and a whole copy of the built products. `swift test` recreates
+# all of it, so none of it belongs in git.
+apps/ios/.build/
+apps/ios/.swiftpm/
+
+# .NET build output (apps/desktop) — `dotnet build` and `dotnet test` recreate
+# these entirely; obj/ also holds NuGet restore artefacts such as the
+# project.assets.json the build depends on.
+apps/desktop/**/bin/
+apps/desktop/**/obj/
+
+# Foundry build output (contracts/) — `forge build` regenerates out/ and cache/
+# completely. broadcast/ holds one JSON receipt per run of `forge script
+# --broadcast`; it is local deployment history, not source, and can carry the
+# deploying address. NOTE: contracts/lib/forge-std is deliberately NOT ignored —
+# it is vendored (--no-git, no submodule) so `forge test` works on a fresh clone
+# with no network and no `git submodule update`.
+contracts/out/
+contracts/cache/
+contracts/broadcast/
+# `forge coverage --report lcov` output; regenerated on every run.
+contracts/lcov.info
+
 # Logs & OS
 *.log
 .DS_Store
+
+# Stray compiler output at the repo root (`cl /c hello.c` style). Not a build
+# product of anything in this repository — ignored so it stops showing up as
+# an untracked file nobody recognises.
+hello.obj

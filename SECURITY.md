@@ -22,9 +22,12 @@
   Only the **sha256 hash** of a token is stored (`public.auth_sessions`), sessions
   expire after 30 days, and login errors are generic (`Invalid email or password`)
   to block user enumeration. Login/register are rate-limited (60/min/IP).
-- New self-registered users are always `USER`. Admin promotion paths are only:
-  `ADMIN_EMAILS` env (comma-separated), the first account on a fresh database,
-  or `ADMIN_API_TOKEN` promoting via `/api/v1/admin/users/:id/role`.
+- New self-registered users are `USER` unless their address is explicitly listed
+  in `ADMIN_EMAILS` (comma-separated). Registration order never grants admin.
+  Local isolated test servers can opt in to first-user bootstrap with
+  `ALLOW_FIRST_USER_ADMIN=true`; the option is ignored in production.
+  `ADMIN_API_TOKEN` can also promote a user through
+  `/api/v1/admin/users/:id/role`.
 - **Social login** (Discord/Google/GitHub — OAuth 2.0 authorization code):
   `state` is an HMAC signed with the provider's client_secret (10-min expiry,
   verified with `timingSafeEqual`) so it works on serverless without shared

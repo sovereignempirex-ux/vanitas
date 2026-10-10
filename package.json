@@ -1,5 +1,5 @@
 {
-  "name": "react-example",
+  "name": "vanitas-platform",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -14,7 +14,22 @@
     "test": "npm run lint && npm run build && node scripts/run-tests.mjs",
     "test:sql": "node scripts/sql-check.mjs",
     "test:e2e": "npm run build && node scripts/oauth-e2e-test.mjs",
-    "db:migrate": "node scripts/migrate.js"
+    "db:migrate": "node scripts/migrate.js",
+    "ai:service": "cd services/ai-service && python -m uvicorn app.main:app --port 8100",
+    "ai:test": "cd services/ai-service && python -m pytest -q",
+    "analytics:service": "cd services/analytics && python -m uvicorn app.main:app --port 8200",
+    "analytics:test": "cd services/analytics && python -m pytest -q",
+    "ratelimit:service": "cd services/ratelimit && go run .",
+    "ratelimit:test": "cd services/ratelimit && go test ./...",
+    "android:test": "node scripts/android-test.mjs",
+    "android:apk": "node scripts/android-test.mjs --apk",
+    "ios:check": "python scripts/ios-check.py",
+    "ios:test": "cd apps/ios && swift test",
+    "desktop:test": "node scripts/desktop-test.mjs",
+    "desktop:build": "node scripts/desktop-test.mjs --app",
+    "contracts:test": "cd contracts && forge test",
+    "contracts:build": "cd contracts && forge build",
+    "contracts:fmt": "cd contracts && forge fmt"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

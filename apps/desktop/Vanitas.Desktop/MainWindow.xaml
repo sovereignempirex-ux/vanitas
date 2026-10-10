@@ -1,0 +1,75 @@
+<Window x:Class="Vanitas.Desktop.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Vanitas"
+        Width="1120" Height="720"
+        MinWidth="880" MinHeight="560"
+        WindowStartupLocation="CenterScreen"
+        Background="{StaticResource BgBrush}"
+        PreviewKeyDown="Window_PreviewKeyDown">
+
+    <!-- Two modes, one window: signed out shows the login card, signed in
+         shows the shell. Swapping a single child keeps the frame (and the
+         keyboard handler) alive across the transition. -->
+    <Grid x:Name="Root">
+        <ContentControl x:Name="LoginHost" />
+
+        <Grid x:Name="ShellHost" Visibility="Collapsed">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="200" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <!-- Navigation -->
+            <Border Grid.Column="0" Background="{StaticResource SurfaceBrush}"
+                    BorderBrush="{StaticResource LineBrush}" BorderThickness="0,0,1,0">
+                <DockPanel>
+                    <StackPanel DockPanel.Dock="Top" Margin="12,20,12,8">
+                        <TextBlock Text="Vanitas" FontSize="20" FontWeight="Bold"
+                                   HorizontalAlignment="Center" Margin="0,0,0,4" />
+                        <TextBlock x:Name="UserLabel" Style="{StaticResource Hint}"
+                                   HorizontalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                    </StackPanel>
+
+                    <StackPanel DockPanel.Dock="Top" Margin="12,12,12,0">
+                        <RadioButton x:Name="NavKeys" Style="{StaticResource NavButton}"
+                                     IsChecked="True" Checked="Nav_Changed" />
+                        <RadioButton x:Name="NavUsage" Style="{StaticResource NavButton}"
+                                     Checked="Nav_Changed" />
+                        <RadioButton x:Name="NavLogs" Style="{StaticResource NavButton}"
+                                     Checked="Nav_Changed" />
+                        <RadioButton x:Name="NavSettings" Style="{StaticResource NavButton}"
+                                     Checked="Nav_Changed" />
+                    </StackPanel>
+
+                    <!-- The status strip the shortcut hints live in, so the
+                         keys are discoverable without opening Settings. -->
+                    <TextBlock DockPanel.Dock="Bottom" x:Name="NavHint"
+                               Style="{StaticResource Hint}" Margin="16,0,16,16"
+                               TextWrapping="Wrap" />
+                </DockPanel>
+            </Border>
+
+            <!-- Content -->
+            <Grid Grid.Column="1">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <ContentControl x:Name="ContentHost" Grid.Row="0" />
+
+                <Border Grid.Row="1" Background="{StaticResource SurfaceBrush}"
+                        BorderBrush="{StaticResource LineBrush}" BorderThickness="0,1,0,0"
+                        Padding="16,8">
+                    <DockPanel LastChildFill="False">
+                        <TextBlock DockPanel.Dock="Left" x:Name="ServerStatus"
+                                   Style="{StaticResource Hint}" />
+                        <TextBlock DockPanel.Dock="Right" x:Name="BusyStatus"
+                                   Style="{StaticResource Hint}" />
+                    </DockPanel>
+                </Border>
+            </Grid>
+        </Grid>
+    </Grid>
+</Window>

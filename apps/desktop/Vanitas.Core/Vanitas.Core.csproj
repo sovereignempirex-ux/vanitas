@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The desktop twin of `Sources/VanitasCore` (Swift) and `core/` (Kotlin):
+       models, the typed client, the session store and the alert evaluator,
+       with no reference to WPF so `dotnet test` runs them headlessly. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Vanitas.Core</RootNamespace>
+    <AssemblyName>Vanitas.Core</AssemblyName>
+    <Description>Vanitas gateway client and usage logic, UI-free.</Description>
+  </PropertyGroup>
+
+</Project>

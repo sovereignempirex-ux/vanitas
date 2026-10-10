@@ -19,7 +19,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white&style=flat-square" alt="TypeScript" />
-  <img src="https://img.shields.io/badge/Next.js-000000?logo=next.js&logoColor=white&style=flat-square" alt="Next.js" />
+  <img src="https://img.shields.io/badge/Express-000000?logo=express&logoColor=white&style=flat-square" alt="Express" />
   <img src="https://img.shields.io/badge/React-61DAFB?logo=react&logoColor=black&style=flat-square" alt="React" />
   <img src="https://img.shields.io/badge/Tailwind_CSS-06B6D4?logo=tailwindcss&logoColor=white&style=flat-square" alt="Tailwind CSS" />
   <img src="https://img.shields.io/badge/Supabase-3ECF8E?logo=supabase&logoColor=white&style=flat-square" alt="Supabase" />
@@ -76,6 +76,8 @@ docker compose exec ollama ollama pull llama3.2
 
 Open `http://localhost:3000`. This uses free/open-source software locally; hosting, model hardware, and third-party free-tier limits remain the operator's responsibility. Gemini is optional and disabled when `AI_PROVIDER=ollama`.
 
+`AI_PROVIDER=pollinations` selects the free hosted model directly without a Gemini key. `AI_PROVIDER=ollama` uses your local model first and falls back to Pollinations if Ollama is unavailable. Gemini is optional and may be subject to provider quotas or pricing.
+
 `DEMO_MODE` is disabled by default. Do not enable it in production: it is solely a local UI-testing aid and no production authorization decision trusts browser role headers.
 
 > **Live Website:** [https://vanitas-bot.vercel.app](https://vanitas-bot.vercel.app)  
@@ -97,7 +99,7 @@ Open `http://localhost:3000`. This uses free/open-source software locally; hosti
                          ┌─────────────────────────────────────┐
                          │           VANITAS                   │
                          │    Central API + PostgreSQL         │
-                         │    Redis Cache + Supabase RLS       │
+                         │   Optional DB + process-local mode  │
                          └──────────────┬──────────────────────┘
                                         │
               ┌─────────────────────────┼─────────────────────────┐
@@ -123,14 +125,24 @@ Open `http://localhost:3000`. This uses free/open-source software locally; hosti
 
 | Layer | Technology |
 |-------|------------|
-| **Frontend** | Next.js 14 (App Router), React 18, TypeScript, Tailwind CSS |
-| **Backend** | Next.js API Routes, Server Actions, Edge Runtime |
-| **Database** | PostgreSQL (Supabase), Row Level Security (RLS) |
-| **Cache** | Redis (Upstash) |
-| **Auth** | Supabase Auth, OAuth 2.0 (Google, GitHub, Discord) |
-| **AI** | OpenAI GPT-4, Function Calling |
-| **Storage** | Supabase Storage (avatars, assets) |
-| **Hosting** | Vercel (Edge Network) |
+| **Frontend** | React 19, TypeScript, Vite, Tailwind CSS |
+| **Backend** | Node.js, Express 4, TypeScript |
+| **Database** | PostgreSQL (optional; in-memory mode for local use) |
+| **Auth** | Server-managed sessions, scrypt passwords, OAuth 2.0, TOTP 2FA |
+| **AI / ML** | **Python (FastAPI)** — `services/ai-service`; the TypeScript gateway delegates to it over HTTP and falls back to its own chain when it is unreachable |
+| **Data Analysis** | **Python (+ optional R)** — `services/analytics`; percentiles, trends, anomalies and report exports, with a native TypeScript fallback |
+| **Rate Limiting** | **Go** — `services/ratelimit`; one shared sliding-window bucket for every gateway instance, with the built-in TypeScript limiter as fallback |
+| **Mobile (Android)** | **Kotlin** — `apps/android`; Gradle app (login, API keys, usage, local alerts) on the same gateway, with every decision unit-tested in a pure-JVM `:core` module |
+| **Mobile (iOS)** | **Swift** — `apps/ios`; SwiftUI app on the same gateway, with the whole client/evaluator/store as a SwiftPM package (`VanitasCore`) tested by `swift test` and built by `xcodebuild` in CI |
+| **Desktop** | **C# (.NET 10 + WPF)** — `apps/desktop`; Windows client on the same gateway with API keys, usage, a request log, CSV export and keyboard shortcuts, with every decision in a UI-free `Vanitas.Core` library tested by `dotnet test` |
+| **Blockchain** | **Solidity (Foundry)** — `contracts/`; `VanitasCredit`, the on-chain credit ledger, authorised by off-chain EIP-712 signatures so any relayer can submit and the user pays no gas. Zero external dependencies, tested by `forge test` |
+| **AI Providers** | Local Ollama, free Pollinations fallback, optional Gemini |
+| **Hosting** | Vercel or Docker/Render (+ Docker Compose for the Python service) |
+
+Each domain follows the platform's [language map](/languages): web → TypeScript,
+AI/ML → Python, data analysis → Python/R, mobile → Kotlin (Android) and
+Swift (iOS), desktop → C# (WPF), blockchain → Solidity (Foundry), databases → SQL,
+servers → TypeScript/Python/Go/Java.
 
 ---
 
@@ -139,8 +151,8 @@ Open `http://localhost:3000`. This uses free/open-source software locally; hosti
 ### 🔐 Authentication
 - **OAuth 2.0** — Google, GitHub, Discord login
 - **Email/Password** — Secure registration with validation
-- **Session Management** — JWT-based sessions with refresh tokens
-- **2FA / Passkeys** — TOTP and WebAuthn support
+- **Session Management** — server-managed bearer sessions
+- **Two-factor authentication** — TOTP authenticator codes
 - **Connected Accounts** — Link/unlink OAuth providers safely
 - **OAuth Provider** — Third-party apps can offer "Sign in with Vanitas" (authorization-code flow + PKCE)
 
@@ -223,10 +235,10 @@ User → OAuth Provider → Callback → Supabase Auth → JWT Session → Redir
 ### Role Assignment
 
 ```
-Authenticated User → user_id → user_roles table → Role (USER/ADMIN)
+New account → USER by default → ADMIN only for addresses in ADMIN_EMAILS
 ```
 
-> **Note:** Admin promotion is done server-side or via secure bootstrap process. No hardcoded credentials exist in the codebase.
+> **Note:** Admin promotion is server-side. Add a trusted address to `ADMIN_EMAILS` before its first registration. Production account creation order never grants administrator privileges; isolated local tests may opt in with `ALLOW_FIRST_USER_ADMIN=true`.
 
 ---
 
@@ -650,11 +662,27 @@ reference. The server loads it at boot (`import 'dotenv/config'` in
 `server.ts`) and never overrides variables already provided by the platform.
 
 ```env
-# AI (ollama = local, gemini = optional paid)
+# AI (ollama = local, pollinations = free hosted, gemini = optional)
 AI_PROVIDER=ollama
 OLLAMA_BASE_URL=http://ollama:11434
 OLLAMA_MODEL=llama3.2
 GEMINI_API_KEY=
+
+# Python AI microservice (services/ai-service) — leave AI_SERVICE_URL empty
+# to keep using the built-in TypeScript chain
+AI_SERVICE_URL=http://127.0.0.1:8100
+AI_SERVICE_TOKEN=                # openssl rand -hex 32 (X-Internal-Token)
+
+# Python analytics microservice (services/analytics) — leave
+# ANALYTICS_SERVICE_URL empty to keep the built-in TypeScript analysis
+ANALYTICS_SERVICE_URL=http://127.0.0.1:8200
+ANALYTICS_SERVICE_TOKEN=         # openssl rand -hex 32 (X-Internal-Token)
+
+# Go rate-limit microservice (services/ratelimit) — leave
+# RATELIMIT_SERVICE_URL empty to keep the built-in per-IP limiter
+RATELIMIT_SERVICE_URL=http://127.0.0.1:8300
+RATELIMIT_SERVICE_TOKEN=         # openssl rand -hex 32 (X-Internal-Token)
+RATELIMIT_SERVICE_TIMEOUT_MS=300 # per-decision budget before falling back
 
 # Database — EMPTY = in-memory mode (works out of the box)
 DATABASE_URL=
@@ -717,12 +745,59 @@ vanitas/
 │       ├── apiKeyStore.ts    # Durable api_keys persistence (jsonb record)
 │       ├── oauth.ts          # Signed state + code exchange
 │       ├── totp.ts           # TOTP secret generation / verification
-│       ├── aiService.ts      # AI provider client + semantic search
+│       ├── aiService.ts      # AI chain + optional delegation to the Python service
+│       ├── aiRemoteClient.ts # HTTP bridge to services/ai-service (AI_SERVICE_URL)
+│       ├── analyticsNative.ts   # Fallback analysis + report (mirrors metrics.py)
+│       ├── analyticsRemote.ts   # HTTP bridge to services/analytics (ANALYTICS_SERVICE_URL)
+│       ├── rateLimitRemote.ts   # HTTP bridge to services/ratelimit (RATELIMIT_SERVICE_URL)
 │       └── vercelEntry.ts    # Serverless wrapper → api/index.js
+├── services/
+│   ├── ai-service/           # Python (FastAPI): chat, streaming, diagnosis, search
+│   │   ├── app/              # chain, prompts, providers, diagnosis, semantic
+│   │   ├── tests/            # offline pytest suite (no network)
+│   │   └── Dockerfile        # python:3.12-slim → uvicorn :8100
+│   ├── analytics/            # Python (FastAPI + optional R): usage analysis
+│   │   ├── app/              # metrics, report, charts, rbridge (R when installed)
+│   │   ├── stats/trend.R     # base-R trend script — no CRAN packages
+│   │   ├── tests/            # offline pytest suite (pinned clock)
+│   │   └── Dockerfile        # python:3.12-slim → uvicorn :8200
+│   └── ratelimit/            # Go: shared sliding-window rate limiter
+│       ├── limiter.go        # bucket bookkeeping (mirrors security.ts)
+│       ├── main.go           # stdlib-only HTTP API → :8300
+│       ├── *_test.go         # offline go test ./...
+│       └── Dockerfile        # golang:1.27-alpine → static binary
+├── apps/
+│   ├── android/              # Kotlin: login, API keys, usage, local alerts
+│   │   ├── core/             # pure JVM module — 40 offline unit tests
+│   │   │   ├── src/main/…    # Models, VanitasClient (Ktor), UsageEvaluator
+│   │   │   └── src/test/…    # MockEngine suite (no server, no emulator)
+│   │   ├── app/              # Android shell: activities, notifications, prefs
+│   │   └── README.md         # Arabic guide (structure, API map, alert rules)
+│   └── ios/                  # Swift: same features, SwiftUI
+│       ├── Package.swift     # VanitasCore package — 42 offline `swift test`s
+│       ├── Sources/…         # Models, VanitasClient (HTTPTransport), evaluator
+│       ├── Tests/…           # scripted-transport suite (no server, no simulator)
+│       ├── Vanitas/          # SwiftUI shell: views, notifications, prefs
+│       ├── Vanitas.xcodeproj # hand-written project + shared scheme
+│       └── README.md         # Arabic guide (structure, API map, alert rules)
+│   └── desktop/              # C#: same features, WPF on Windows
+│       ├── Vanitas.Core/     # UI-free library — 46 offline `dotnet test`s
+│       │   ├── *.cs          # Models, VanitasClient (IHttpTransport), evaluator
+│       │   └── …             # scripted-transport suite (no server, no window)
+│       ├── Vanitas.Core.Tests/
+│       ├── Vanitas.Desktop/  # WPF shell: views, shortcuts, request log, CSV
+│       └── README.md         # Arabic guide (structure, API map, shortcuts)
+├── contracts/                # Solidity: the on-chain credit ledger
+│   ├── src/VanitasCredit.sol #   CREDIT/DEBIT/TRANSFER, off-chain EIP-712 auth
+│   ├── test/…                #   35 offline Forge tests (98.8% line coverage)
+│   ├── script/Deploy.s.sol   #   forge script — dry run needs no key, no RPC
+│   ├── lib/forge-std/        #   vendored with --no-git (not a submodule)
+│   └── README.md             # Arabic guide (design, deploy, EIP-712 reference)
 ├── scripts/                  # migrate.js, sql-check.mjs, e2e + smoke tests
 ├── supabase/schema.sql       # Canonical PostgreSQL schema (npm run db:migrate)
 ├── public/                   # Self-hosted static assets
-├── .github/workflows/        # ci.yml (typecheck + build + secret scan), codeql.yml
+├── .github/workflows/        # ci.yml (10 jobs: web, Python, Go, Kotlin, Swift,
+│                             #          C#, Solidity, secret scan), codeql.yml
 └── .env.example              # Every supported variable, annotated
 ```
 
@@ -746,7 +821,7 @@ All routes are served by `server.ts` (Express). Unless noted, authentication is
 
 | Method | Endpoint | Description | Auth |
 |--------|----------|-------------|------|
-| `POST` | `/api/v1/auth/register` | Create an account (first one bootstraps as ADMIN) | — |
+| `POST` | `/api/v1/auth/register` | Create an account (`ADMIN` only for addresses in `ADMIN_EMAILS`) | — |
 | `POST` | `/api/v1/auth/login` | Password login (may require 2FA) | — |
 | `POST` | `/api/v1/auth/logout` | Revoke the current session | Bearer |
 | `GET` | `/api/v1/auth/me` | Current user + permissions | Bearer |
@@ -990,6 +1065,8 @@ If you discover a security vulnerability, please email **security@vanitas.dev** 
 | Server Orders | Plan CRUD, submit validation, honeypot, track token, admin lifecycle, embed files, sandbox console |
 | Audit Logs | Pagination, filters, CSV export |
 | Security | Unauthorized requests, rate limits |
+| AI Service (Python) | Prompts/project mode, provider chain + fallback, pollinations breakers, local diagnosis analyzer, semantic scoring, YouTube parser |
+| Smart contract (Solidity) | EIP-712 authorisation, replay/nonces, wrong-signer and wrong-domain rejection, atomic batches, pause, ownership — 35 Forge tests, 98.8% line coverage |
 
 ### Running Tests
 
@@ -1005,6 +1082,17 @@ npm run typecheck
 
 # Alias of typecheck
 npm run lint
+
+# Python AI service (offline, no network): cd services/ai-service && pytest -q
+# Python analytics service (offline, pinned clock): npm run analytics:test
+# Go rate-limit service (offline): npm run ratelimit:test
+# Android app (offline Kotlin suite; needs a JDK 17+): npm run android:test
+# iOS app (structural checks, no macOS needed): npm run ios:check
+# iOS logic tests (needs a Swift toolchain): cd apps/ios && swift test
+# Desktop app (offline .NET suite; needs the .NET 10 SDK): npm run desktop:test
+# Desktop app tests + WPF build: npm run desktop:build
+# Smart contract (offline Forge suite, in-process EVM; needs Foundry):
+npm run contracts:test
 ```
 
 > Earlier revisions of this file listed `npm run verify` and a unit-test suite

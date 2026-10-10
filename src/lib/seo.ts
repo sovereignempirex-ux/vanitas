@@ -114,10 +114,10 @@ export const VIEW_SEO: Record<string, SeoEntry> = {
 /** Metadata for the public landing page at "/" (signed-out visitors). */
 export function seoForLandingPage(): SeoEntry {
   return {
-    // No "Vanitas" prefix here — setPageSeo appends the "| Vanitas" suffix.
-    title: 'Centralized API & Developer Platform',
+    // setPageSeo appends the "| Vanitas" suffix.
+    title: 'منصة المطورين والذكاء الاصطناعي',
     description:
-      'One secure gateway for web, bots, mobile and desktop: scoped API keys, signed webhooks, audit logs, verification badges and a site-aware AI copilot with Arabic support.',
+      'فانيتاس منصة مطورين تجمع واجهات API ومفاتيح الصلاحيات والأمان والذكاء الاصطناعي في مكان واحد.',
   };
 }
 

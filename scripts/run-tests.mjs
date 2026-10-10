@@ -27,6 +27,8 @@ const SUITES = [
   { file: 'downloads-test.mjs', server: true, why: 'download catalog + counts' },
   { file: 'comments-test.mjs', server: true, why: 'threading + moderation' },
   { file: 'server-orders-test.mjs', server: true, why: 'server-request orders + embed + sandbox console' },
+  { file: 'analytics-test.mjs', server: true, why: 'analytics insights + report (native or Python)' },
+  { file: 'rate-limit-test.mjs', server: true, why: 'per-IP ceilings (Go service or native fallback)' },
 ];
 
 const PORT = process.env.TEST_PORT || '3000';
@@ -54,6 +56,8 @@ async function startServer() {
       // is falsy so pg.ts skips the pool. Deleted would let .env re-add it.
       DATABASE_URL: '',
       NODE_ENV: 'development',
+      // Test-only local bootstrap; production always requires ADMIN_EMAILS.
+      ALLOW_FIRST_USER_ADMIN: 'true',
       PORT,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -99,6 +103,38 @@ const stop = (child) =>
     setTimeout(() => child.kill('SIGKILL'), 4000).unref?.();
   });
 
+/**
+ * The gateway process is restarted per suite, so its NATIVE buckets are fresh
+ * by construction (see the header). The shared Go store outlives it — that is
+ * the whole point of a shared bucket — so when RATELIMIT_SERVICE_URL is set we
+ * clear it here too, otherwise earlier suites leave warm buckets behind and the
+ * "fresh, empty, rate-limit-free server" contract silently stops holding.
+ *
+ * No-op when the variable is unset or the service is unreachable: the native
+ * limiter is fresh anyway and the suite then exercises the fallback path.
+ */
+async function resetSharedRateLimit() {
+  const base = String(process.env.RATELIMIT_SERVICE_URL || '').trim().replace(/\/+$/, '');
+  if (!base) return;
+  try {
+    const headers = { 'content-type': 'application/json' };
+    const token = process.env.RATELIMIT_SERVICE_TOKEN;
+    if (token) headers['x-internal-token'] = token;
+    const res = await fetch(`${base}/v1/rate/reset`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ all: true }),
+      signal: AbortSignal.timeout(2000),
+    });
+    if (res.ok) {
+      const body = await res.json().catch(() => ({}));
+      console.log(`  (shared rate-limit buckets cleared: ${body.cleared ?? '?'} dropped)`);
+    }
+  } catch {
+    /* unreachable — the suite runs against the native fallback */
+  }
+}
+
 const selected = SUITES.filter((s) => !only || s.file.includes(only));
 if (selected.length === 0) {
   console.error(`No suite matches "--only ${only}"`);
@@ -110,7 +146,10 @@ for (const suite of selected) {
   process.stdout.write(`\n=== ${suite.file}  (${suite.why}) ===\n`);
   let server = null;
   try {
-    if (suite.server) server = await startServer();
+    if (suite.server) {
+      server = await startServer();
+      await resetSharedRateLimit();
+    }
     const { code, out } = await runSuite(suite.file);
     // Keep only the verdict lines; the body is noisy and CI shows it on failure.
     const lines = out.split(/\r?\n/);

@@ -4,6 +4,7 @@ import { AiToneStyle, CodeDiagnosisResult, ProductSuggestion } from '../../types
 import { useAuth } from '../../context/AuthContext.tsx';
 import { Markdown } from '../Markdown.tsx';
 import { safeWebHref } from '../../lib/urls.ts';
+import { ProjectModeView } from './ProjectModeView.tsx';
 import {
   Sparkles,
   Send,
@@ -149,7 +150,7 @@ function welcomeMessage(): Message {
 }
 
 export const AiAssistantView: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'chat' | 'code_doctor' | 'toolbelt' | 'suggestions'>('chat');
+  const [activeTab, setActiveTab] = useState<'chat' | 'project' | 'code_doctor' | 'toolbelt' | 'suggestions'>('chat');
   const [persona, setPersona] = useState<'code' | 'api' | 'security' | 'analyst' | 'docs' | 'admin'>('code');
   const [toneStyle, setToneStyle] = useState<AiToneStyle>('developer');
   const [enableWebSearch, setEnableWebSearch] = useState(false);
@@ -498,6 +499,14 @@ export const AiAssistantView: React.FC = () => {
           </button>
 
           <button
+            onClick={() => setActiveTab('project')}
+            className={`flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition-all ${activeTab === 'project' ? 'bg-cyan-600 text-white shadow-md shadow-cyan-600/30' : 'text-slate-400 hover:text-white hover:bg-white/[0.04]'}`}
+          >
+            <FileCode2 className="h-4 w-4" />
+            <span>Project Mode</span>
+          </button>
+
+          <button
             onClick={() => { setActiveTab('suggestions'); loadSuggestions(); }}
             className={`flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition-all ${
               activeTab === 'suggestions' ? 'bg-amber-600 text-white shadow-md shadow-amber-600/30' : 'text-slate-400 hover:text-white hover:bg-white/[0.04]'
@@ -533,6 +542,8 @@ export const AiAssistantView: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {activeTab === 'project' && <ProjectModeView />}
 
       {/* TAB 1: AI COPILOT CHAT & PERSONA & TONE STYLES */}
       {activeTab === 'chat' && (

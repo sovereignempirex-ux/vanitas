@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The shell: windows, keyboard shortcuts, the request log and CSV export.
+       Every decision it makes is delegated to `Vanitas.Core`, so this project
+       holds no logic worth a unit test — `dotnet test` covers the core and
+       this assembly only has to build and behave on screen. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <RootNamespace>Vanitas.Desktop</RootNamespace>
+    <AssemblyName>Vanitas.Desktop</AssemblyName>
+    <ApplicationTitle>Vanitas</ApplicationTitle>
+    <Product>Vanitas Desktop</Product>
+    <Version>1.0.0</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The UI-free half: models, client, evaluator, store. Referencing the
+         library (rather than compiling its sources here) is what lets
+         `dotnet test` exercise exactly the code this app runs. -->
+    <ProjectReference Include="..\Vanitas.Core\Vanitas.Core.csproj" />
+  </ItemGroup>
+
+</Project>
